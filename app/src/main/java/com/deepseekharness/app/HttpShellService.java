@@ -1335,7 +1335,15 @@ public final class HttpShellService {
   public static void setScreenPaused(Context context, boolean paused) {
     var coordinator = com.deepseekharness.app.control.PhoneControlCoordinator.get(context);
     if (paused) coordinator.pause("LOCAL_USER_PAUSE");
-    else coordinator.resume();
+    else {
+      // An expanded assistant panel re-pauses on every geometry publish
+      // (AssistantWindow.publish -> OwnedScreenOverlay expansion listener ->
+      // pause("ASSISTANT_PANEL_EXPANDED")). Collapsing here keeps the resumed
+      // authority from being fenced again by that stale expansion flag.
+      var session = com.deepseekharness.app.assistant.AssistantSessionController.active();
+      if (session != null) session.collapse();
+      coordinator.resume();
+    }
     com.deepseekharness.app.screen.AccessibilityRepairOwner.cancel(
         com.deepseekharness.app.util.AccessibilityRepairState.CancelCause.PAUSE_CHANGED);
     DshaApp.from(context).capabilityBroker().revoke("screen");
