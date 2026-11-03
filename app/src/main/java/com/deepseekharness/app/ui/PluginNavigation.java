@@ -1,0 +1,28 @@
+package com.deepseekharness.app.ui;
+
+import android.app.Activity;
+import android.content.Intent;
+import android.net.Uri;
+import com.deepseekharness.app.util.PluginInstallLink;
+
+/** 两个网页内核共用插件导航；包、路径、摘要和事务核验后自动提交启用，保留维护屏障。 */
+final class PluginNavigation {
+  private PluginNavigation() {}
+
+  static boolean open(Activity activity, String url) {
+    if (PluginInstallLink.management(url)) {
+      com.deepseekharness.app.core.PluginRepository.get(activity).invalidateInstalledState();
+      activity.startActivity(
+          MainActivity.navigationIntent(activity).putExtra("open_plugins", true));
+      return true;
+    }
+    try {
+      PluginInstallLink.parse(url);
+    } catch (IllegalArgumentException ordinary) {
+      return false;
+    }
+    activity.startActivity(
+        new Intent(activity, PluginInstallActivity.class).setData(Uri.parse(url)));
+    return true;
+  }
+}

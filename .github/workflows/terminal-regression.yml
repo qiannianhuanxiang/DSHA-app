@@ -1,0 +1,302 @@
+name: Terminal Standard regression package
+
+# 仅本私有终端分支；不运行 Low，不创建 tag/Release，不保存或上传测试私钥。
+# 借鉴 a36112c 的已执行 CI 合同，固定原始输入升级到当前 build197；不迁回旧产品源码。
+on:
+  push:
+    branches: [Sunset-zhongdua-G]
+  workflow_dispatch:
+    inputs:
+      asset_bundle_url:
+        description: Optional immutable HTTPS input archive (URL and SHA must be paired)
+        required: false
+        type: string
+      asset_bundle_sha256:
+        description: SHA-256 of the exact input archive, not an APK digest
+        required: false
+        type: string
+      asset_archive_format:
+        description: Layout of an explicitly supplied archive
+        required: false
+        type: choice
+        default: bundle
+        options: [bundle, source-archive]
+permissions:
+  contents: read
+concurrency:
+  group: terminal-regression-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  source:
+    name: Terminal source contracts
+    if: github.repository == 'ym2025szz/DSHA-prerelase' && github.event.repository.private && github.ref == 'refs/heads/Sunset-zhongdua-G'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    outputs:
+      asset_url: ${{ steps.inputs.outputs.url }}
+      asset_sha: ${{ steps.inputs.outputs.sha256 }}
+      asset_format: ${{ steps.inputs.outputs.format }}
+      asset_source: ${{ steps.inputs.outputs.source }}
+      apk_name: ${{ steps.artifacts.outputs.apk }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Set commit-bound short artifact name
+        id: artifacts
+        run: |
+          python3 - <<'PY'
+          import importlib.util, os, re
+          spec = importlib.util.spec_from_file_location('terminal_package', 'ci/terminal-package.py')
+          helper = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(helper)
+          identity = helper.identity(os.environ)
+          name = f"dsha-terminal-{identity['commit'][:8]}.apk"
+          if not re.fullmatch(r'[a-z0-9][a-z0-9.-]{0,31}', name):
+              raise SystemExit('Invalid artifact filename')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+              output.write(f'apk={name}\n')
+          PY
+      - name: Resolve complete fixed input pair
+        id: inputs
+        env:
+          SUNSET_DISPATCH_URL: ${{ github.event.inputs.asset_bundle_url }}
+          SUNSET_DISPATCH_SHA: ${{ github.event.inputs.asset_bundle_sha256 }}
+          SUNSET_DISPATCH_FORMAT: ${{ github.event.inputs.asset_archive_format }}
+        # 不读取旧分支的 SUNSET_ASSET_* 仓库变量，默认只认当前源码锁。
+        run: python3 tools/sunset-ci-inputs.py --github-output
+      - name: Verify toolchain against source configuration
+        id: toolchain
+        run: |
+          python3 tools/ci-toolchain.py --github-output
+          python3 -c 'import sys; assert sys.version_info[:2] == (3, 12), sys.version'
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: ${{ steps.toolchain.outputs.java }}
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ steps.toolchain.outputs.node }}
+      - name: Verify current checked-in contracts
+        run: |
+          python3 tools/prepare-runtime-tools.py --check
+          python3 tools/verify-runtime-descriptor-source.py
+          python3 tools/generate-third-party-notices.py --check
+          python3 tools/check-third-party-notices.py
+          python3 tools/generate-builtin-plugins.py --verify
+          python3 tools/generate-credential-paths.py --check
+          python3 tools/prepare-semver-reference.py
+          python3 tools/format-java-tree.py --check
+          python3 tools/run-host-tests.py --check-manifest
+          python3 tools/check-source-hygiene.py
+          python3 tools/check-ui-i18n.py
+          python3 tools/generate-changelog.py --check
+          python3 tools/check-document-links.py
+      - name: Input and CI gate regressions
+        run: |
+          python3 tools/run-host-tests.py --stage fast --jdk "$JAVA_HOME" \
+            --only test-ci-assets.py \
+            --only test-ci-package.py \
+            --only test-sunset-ci-inputs.py \
+            --only test-runtime-descriptor-inputs.py \
+            --only test-runtime-descriptor-source.py \
+            --only test-architecture-boundaries.py \
+            --only test-dsh-runtime-packaging.py
+      - name: Upload source reports even on failure
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: terminal-source
+          path: app/build/host-tests
+          if-no-files-found: warn
+          retention-days: 14
+  apk:
+    name: Terminal Standard signed test APK
+    needs: source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      ASSET_URL: ${{ needs.source.outputs.asset_url }}
+      ASSET_SHA: ${{ needs.source.outputs.asset_sha }}
+      ASSET_FORMAT: ${{ needs.source.outputs.asset_format }}
+      ASSET_SOURCE: ${{ needs.source.outputs.asset_source }}
+      APK_NAME: ${{ needs.source.outputs.apk_name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Verify toolchain against source configuration
+        id: toolchain
+        run: python3 tools/ci-toolchain.py --github-output
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: ${{ steps.toolchain.outputs.java }}
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ steps.toolchain.outputs.node }}
+      - name: Restore and record exact original build197 inputs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          args=(--url "$ASSET_URL" --sha256 "$ASSET_SHA")
+          if [ "$ASSET_FORMAT" = source-archive ]; then args+=(--source-archive); fi
+          python3 tools/ci-assets.py "${args[@]}"
+          python3 ci/terminal-package.py inputs
+      - name: Install Android SDK and NDK
+        run: |
+          platform=$(python3 tools/ci-toolchain.py --field androidPlatform)
+          buildtools=$(python3 tools/ci-toolchain.py --field buildTools)
+          ndk=$(python3 tools/ci-toolchain.py --field ndk)
+          sdk_root="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          sdkmanager_bin="$sdk_root/cmdline-tools/latest/bin/sdkmanager"
+          test -x "$sdkmanager_bin"
+          "$sdkmanager_bin" "platforms;$platform" "build-tools;$buildtools" "ndk;$ndk"
+      - name: Rebuild current managed runtime and descriptor
+        run: |
+          python3 tools/prepare-dsh-runtime.py
+          python3 tools/prepare-backup-assets.py --write
+          python3 tools/prepare-runtime-descriptor.py --write
+          python3 tools/verify-runtime-descriptor-source.py
+      - name: Prepare current verified raw and managed fixtures
+        run: python3 tools/prepare-test-runtime.py
+      - name: Verify runtime patch upgrades and managed recovery consent
+        run: |
+          python3 tools/run-host-tests.py --stage runtime --jdk "$JAVA_HOME" \
+            --output app/build/host-tests/terminal-patch-chains \
+            --only test-plugin-management-patch-chain.py \
+            --only test-session-interaction-patch-upgrade.py \
+            --only test-preset-pending-patch-upgrade.py \
+            --only test-recovery-native-consent.mjs
+      - name: Complete Standard unit tests with fixed inputs
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:testStandardDebugUnitTest \
+            -Pdsha.sunsetTest=true -Pdsha.unsignedPackage=true -Pdsha.sourceOnlyTests=false \
+            --rerun-tasks --no-daemon --max-workers=2
+      - name: Verify seven fixtures and terminal test execution
+        run: python3 tools/verify-terminal-test-scope.py
+      - name: Lint Standard release
+        run: ./gradlew :app:lintStandardRelease -Pdsha.sunsetTest=true -Pdsha.unsignedPackage=true --no-daemon --max-workers=2
+      - name: Build unsigned Standard test package
+        run: ./gradlew :app:assembleStandardRelease -Pdsha.sunsetTest=true -Pdsha.unsignedPackage=true --no-daemon --max-workers=2
+      - name: Prepare ephemeral or configured test signing key
+        env:
+          TERMINAL_TEST_KEYSTORE_B64: ${{ secrets.SUNSET_TEST_KEYSTORE_B64 }}
+          CONFIGURED_TEST_PASSWORD: ${{ secrets.SUNSET_TEST_STORE_PASSWORD }}
+        run: |
+          umask 077
+          key="$RUNNER_TEMP/terminal-test-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.jks"
+          if [ -n "$TERMINAL_TEST_KEYSTORE_B64" ]; then
+            password="${CONFIGURED_TEST_PASSWORD:-sunset-test-only}"
+            printf '%s' "$TERMINAL_TEST_KEYSTORE_B64" | base64 -d > "$key"
+            source=configured-secret
+          else
+            password=$(python3 -c 'import secrets; print(secrets.token_hex(24))')
+            source=ephemeral
+          fi
+          echo "::add-mask::$password"
+          export TERMINAL_TEST_STORE_PASSWORD="$password"
+          if [ "$source" = ephemeral ]; then
+            keytool -genkeypair -keystore "$key" -storetype PKCS12 -alias sunset-test \
+              -keyalg RSA -keysize 3072 -validity 3650 \
+              -dname 'CN=DSHA Terminal Test (NOT FOR RELEASE), OU=Sunset-zhongdua-G, O=SunsetRNE, C=CN' \
+              -storepass:env TERMINAL_TEST_STORE_PASSWORD -keypass:env TERMINAL_TEST_STORE_PASSWORD
+          fi
+          mkdir -p out
+          keytool -exportcert -rfc -keystore "$key" -alias sunset-test \
+            -storepass:env TERMINAL_TEST_STORE_PASSWORD > out/terminal-test-cert.pem
+          printf 'TERMINAL_TEST_KEY=%s\nTERMINAL_TEST_STORE_PASSWORD=%s\nSIGNING_KEY_SOURCE=%s\n' \
+            "$key" "$password" "$source" >> "$GITHUB_ENV"
+      - name: Sign test APK and verify exact identity and contents
+        id: sign
+        run: |
+          buildtools=$(python3 tools/ci-toolchain.py --field buildTools)
+          sdk_root="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          apksigner="$sdk_root/build-tools/$buildtools/apksigner"
+          aapt2="$sdk_root/build-tools/$buildtools/aapt2"
+          shopt -s nullglob
+          candidates=(app/build/outputs/apk/standard/release/*-unsigned.apk)
+          test "${#candidates[@]}" -eq 1
+          apk="out/$APK_NAME"
+          "$apksigner" sign --ks "$TERMINAL_TEST_KEY" --ks-key-alias sunset-test \
+            --ks-pass env:TERMINAL_TEST_STORE_PASSWORD --key-pass env:TERMINAL_TEST_STORE_PASSWORD \
+            --out "$apk" "${candidates[0]}"
+          "$apksigner" verify --verbose --print-certs "$apk" > out/apk-signature.txt
+          "$aapt2" dump badging "$apk" > out/apk-badging.txt
+          python3 tools/verify-dsh-upgrade-apk.py "$apk" > out/apk-runtime-verification.txt
+          python3 tools/verify-recovery-apk.py "$apk" > out/apk-recovery-verification.txt
+          python3 tools/verify-third-party-apk.py "$apk" --output out/third-party-apk.json
+          python3 ci/terminal-package.py package --apk "$apk"
+          printf 'apk=%s\n' "$apk" >> "$GITHUB_OUTPUT"
+      - name: Remove test private key
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          parent = Path(os.environ['RUNNER_TEMP']).resolve()
+          expected = parent / f"terminal-test-{os.environ['GITHUB_RUN_ID']}-{os.environ['GITHUB_RUN_ATTEMPT']}.jks"
+          if expected.is_symlink() or expected.resolve().parent != parent:
+              raise SystemExit('Refuse unexpected test key path')
+          expected.unlink(missing_ok=True)
+          PY
+      - name: Upload signed APK without archiving
+        id: upload_apk
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          archive: false
+          path: ${{ steps.sign.outputs.apk }}
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload public package evidence
+        id: upload_evidence
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: terminal-evidence
+          archive: true
+          path: |
+            out/SHA256SUMS
+            out/terminal-test-cert.pem
+            out/build-info.json
+            out/fixed-inputs.json
+            out/full-unit-tests.json
+            out/apk-signature.txt
+            out/apk-badging.txt
+            out/apk-runtime-verification.txt
+            out/apk-recovery-verification.txt
+            out/third-party-apk.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Show commit-bound download links
+        env:
+          APK_URL: ${{ steps.upload_apk.outputs.artifact-url }}
+          EVIDENCE_URL: ${{ steps.upload_evidence.outputs.artifact-url }}
+        run: |
+          python3 - <<'PY'
+          import os
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as summary:
+              summary.write(f"### 测试产物（非正式发布、未安装）\n\nCommit `{os.environ['GITHUB_SHA']}`\n\n")
+              summary.write(f"[APK：{os.environ['APK_NAME']}]({os.environ['APK_URL']})\n\n")
+              summary.write(f"[公有证书、固定输入与校验回执]({os.environ['EVIDENCE_URL']})\n")
+          PY
+      - name: Upload test reports even on failure
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: terminal-tests
+          path: |
+            app/build/test-results/testStandardDebugUnitTest
+            app/build/host-tests/terminal-patch-chains
+            app/build/reports/lint-results-standardRelease.*
+            out/fixed-inputs.json
+            out/full-unit-tests.json
+            out/apk-signature.txt
+            out/apk-badging.txt
+            out/apk-runtime-verification.txt
+            out/apk-recovery-verification.txt
+            out/third-party-apk.json
+          if-no-files-found: warn
+          retention-days: 14

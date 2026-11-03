@@ -1,0 +1,1130 @@
+package com.deepseekharness.app.ui;
+
+import android.app.Activity;
+import android.content.Context;
+import android.content.Intent;
+import android.net.Uri;
+import android.os.Bundle;
+import android.view.LayoutInflater;
+import android.view.View;
+import android.view.ViewGroup;
+import android.widget.Button;
+import android.widget.TextView;
+import android.widget.Toast;
+
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
+import androidx.fragment.app.Fragment;
+
+import com.deepseekharness.app.LanProxyService;
+import com.deepseekharness.app.R;
+import com.deepseekharness.app.core.HarnessController;
+import com.deepseekharness.app.util.LanAccessPresentation;
+import com.deepseekharness.app.util.LanAddressPolicy;
+import com.deepseekharness.app.util.UiText;
+
+/**
+ * 启动页：启动 / 进入 / 停止 dsh Web，显示运行状态、鉴权链接与局域网访问地址。
+ */
+public class LaunchFragment extends Fragment {
+
+  /** 通知点击进入时带上的参数：Web 就绪后自动打开会话。 */
+  public static final String ARG_OPEN_WEB = "open_web";
+
+  private HarnessController controller;
+  private TextView lanAddrText;
+  private TextView launchLog;
+  private ShellActivityTrack activityTrack;
+  private TextView latestLogsButton;
+  private androidx.appcompat.app.AlertDialog accessDialog;
+
+  /** 日志跟随：默认跟随末尾；用户上翻或主动暂停后保留阅读位置。 */
+  private boolean followLogs = true;
+
+  /** 启动按钮当前是否处于「进入」态（鉴权链接已就绪）。 */
+  private boolean webReady;
+
+  /** 主线程单飞；成功打开后保持占用，直到页面重新可见。 */
+  private boolean enteringWeb;
+
+  private boolean webEntryFailure;
+
+  private boolean preparingStart;
+  // Preserve admission failures until the next explicit action or a ready Web instance.
+  private String startStatusMessage = "";
+  private final java.util.concurrent.atomic.AtomicLong startRequest =
+      new java.util.concurrent.atomic.AtomicLong();
+  private static final java.util.concurrent.Executor START_IO =
+      java.util.concurrent.Executors.newSingleThreadExecutor();
+
+  /** 本次启动开始时刻（显示耗时用）。 */
+  private long startAtMs;
+
+  private long logRevision = -1;
+  private String logUrl = "";
+  private final android.os.Handler ui = new android.os.Handler(android.os.Looper.getMainLooper());
+
+  /** 通知点击进来、待自动进入 Web 的意图；由既有每秒刷新循环消费，就绪即进。 */
+  private boolean pendingAutoEnter;
+
+  private final Runnable refreshState =
+      new Runnable() {
+        @Override
+        public void run() {
+          refreshRunState();
+          refreshLanAddr();
+          // 通知点击进来的自动进入：复用这个每秒循环等鉴权链接，不另开定时器。
+          // 判据只认「鉴权链接已出现」——它就是进入 Web 的前提，也是按钮变「进入」的
+          // 同一条件。不能拿 getWebAuthFailure() 判成败：那是最近一次鉴权结果消息，
+          // 初始值与成功值都非 null（成功时是"鉴权成功"），用它当成功判据会永不进入。
+          if (pendingAutoEnter && !webEntryUrl().isEmpty()) {
+            pendingAutoEnter = false;
+            enterWeb();
+          }
+          ui.postDelayed(this, 1000);
+        }
+      };
+
+  @Nullable
+  @Override
+  public View onCreateView(
+      @NonNull LayoutInflater inflater,
+      @Nullable ViewGroup container,
+      @Nullable Bundle savedInstanceState) {
+    View v = inflater.inflate(R.layout.fragment_launch, container, false);
+
+    // v5 主页新增的语境、活动条与日志工具；原有 id 与业务 id 全部保留。
+    followLogs = true;
+    activityTrack = v.findViewById(R.id.launch_activity);
+    latestLogsButton = v.findViewById(R.id.launch_latest_button);
+    ((TextView) v.findViewById(R.id.launch_terminal_row))
+        .setText(UiText.choose("打开本机终端", "Open local terminal"));
+    v.findViewById(R.id.launch_terminal_row)
+        .setContentDescription(
+            UiText.choose("打开本机终端，直接处理文件与命令", "Open the local terminal for files and commands"));
+    ((TextView) v.findViewById(R.id.launch_environment_row))
+        .setText(UiText.choose("运行环境 · 检查与维护", "Runtime environment · inspect and repair"));
+
+    controller = HarnessController.get(requireContext());
+    final Activity activity = requireActivity();
+    TextView status = v.findViewById(R.id.launch_status);
+    Button start = v.findViewById(R.id.launch_start);
+    Button restart = v.findViewById(R.id.launch_open);
+    Button stop = v.findViewById(R.id.launch_stop);
+    lanAddrText = v.findViewById(R.id.lan_addr);
+    launchLog = v.findViewById(R.id.launch_log);
+    logRevision = -1;
+    logUrl = "";
+    v.findViewById(R.id.launch_download_logs)
+        .setOnClickListener(x -> startActivity(DiagnosticActivity.downloadLogs(requireContext())));
+
+    // v5 快捷行与日志工具：终端走 MainActivity 的既有门禁，环境行复用恢复入口。
+    v.findViewById(R.id.launch_terminal_row).setOnClickListener(x -> openLocalTerminal());
+    v.findViewById(R.id.launch_environment_row).setOnClickListener(x -> openEnvironment());
+    v.findViewById(R.id.launch_copy_logs).setOnClickListener(x -> copyLogs());
+    v.findViewById(R.id.launch_follow_logs).setOnClickListener(x -> toggleLogFollow());
+    if (latestLogsButton != null) latestLogsButton.setOnClickListener(x -> resumeLogFollow());
+    ((TextView) v.findViewById(R.id.launch_copy_logs)).setText(UiText.choose("复制日志", "Copy log"));
+    v.findViewById(R.id.launch_copy_logs)
+        .setContentDescription(UiText.choose("复制启动日志", "Copy the startup log"));
+    LogScrollView launchLogScroll = v.findViewById(R.id.launch_log_scroll);
+    // 用户滚回末尾时恢复跟随；离开末尾时暂停，避免下一秒刷新把阅读位置拉走。
+    launchLogScroll.setOnScrollChangeListener(
+        (view, scrollX, scrollY, oldScrollX, oldScrollY) -> {
+          boolean atEnd = launchLogScroll.shouldFollowEnd();
+          if (atEnd != followLogs) setLogFollow(atEnd);
+        });
+    renderLogControls(v);
+
+    v.findViewById(R.id.launch_address).setOnClickListener(x -> showAccessAddresses());
+    restart.setText(R.string.ui2_restart);
+    v.findViewById(R.id.launch_recovery).setOnClickListener(x -> showRecovery());
+    v.findViewById(R.id.launch_safe)
+        .setOnClickListener(
+            x ->
+                new com.deepseekharness.app.ui.DshaDialogBuilder(requireContext(), true)
+                    .setTitle(com.deepseekharness.app.util.UiText.text("安全启动 Web？"))
+                    .setMessage(
+                        com.deepseekharness.app.util.UiText.text(
+                            "停止当前启动，只加载官方基础界面。原插件开关、会话、模型和配置保留；普通重启后回到原配置。安全界面不加载移动插件等扩展。"))
+                    .setNegativeButton(com.deepseekharness.app.util.UiText.text("取消"), null)
+                    .setPositiveButton(
+                        com.deepseekharness.app.util.UiText.text("安全启动"),
+                        (dialog, which) -> doStart(activity, status, start, true))
+                    .show());
+
+    // 启动按钮：未就绪时是「启动」；鉴权链接就绪后自动变为「进入」，点击进 WebUI。
+    start.setOnClickListener(
+        x -> {
+          if (webReady || !webEntryUrl().isEmpty()) {
+            enterWeb();
+            return;
+          }
+          doStart(activity, status, start);
+        });
+
+    restart.setOnClickListener(
+        x -> {
+          // startWeb 本身串行执行「清旧进程 → 启动」，无需拆成两次请求。
+          doStart(activity, status, start);
+        });
+
+    // 通知点击进来：置待进入标记，由每秒刷新循环在鉴权链接就绪后自动进入。
+    if (getArguments() != null && getArguments().getBoolean(ARG_OPEN_WEB, false)) {
+      getArguments().remove(ARG_OPEN_WEB);
+      pendingAutoEnter = true;
+    }
+
+    stop.setOnClickListener(
+        x -> {
+          startRequest.incrementAndGet();
+          preparingStart = false;
+          startStatusMessage = "";
+          FirstRunWebStart.cancel(requireContext());
+          invalidateWebEntry();
+          controller.stopWeb(
+              msg -> {
+                long generation = controller.getWebGeneration();
+                activity.runOnUiThread(
+                    () -> {
+                      if (getView() != v || generation != controller.getWebGeneration()) return;
+                      status.setText(com.deepseekharness.app.util.UiStateText.render(msg));
+                      refreshRunState();
+                      refreshLanAddr();
+                      var stopped = controller.lastStopResult();
+                      if (stopped != null && !stopped.stopped()
+                          || !controller.lastStopError().isEmpty())
+                        offerForceStop(activity, v, status, generation);
+                    });
+              });
+          webReady = false;
+          start.setText(com.deepseekharness.app.util.UiText.text("启动"));
+          status.setText(com.deepseekharness.app.util.UiText.text("停止中…"));
+          refreshLanAddr();
+          refreshRunState();
+        });
+
+    return v;
+  }
+
+  /** 启动 dsh：记录启动时刻，鉴权链接就绪后把「启动」变「进入」并输出 URL 到日志。 */
+  private void doStart(Activity activity, TextView status, Button start) {
+    doStart(activity, status, start, false);
+  }
+
+  private void doStart(Activity activity, TextView status, Button start, boolean safeMode) {
+    if (preparingStart || !safeMode && (controller.isStarting() || controller.isStopping())) return;
+    final View root = getView();
+    if (root == null || !isResumed() || activity.isFinishing() || activity.isDestroyed()) return;
+    FirstRunWebStart.cancel(requireContext());
+    preparingStart = true;
+    long request = startRequest.incrementAndGet();
+    startStatusMessage = "";
+    invalidateWebEntry();
+    startAtMs = System.currentTimeMillis();
+    String time =
+        new java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
+            .format(new java.util.Date());
+    status.setText(com.deepseekharness.app.util.UiText.format("启动中…（%s）", time));
+    start.setText(com.deepseekharness.app.util.UiText.text("启动"));
+    webReady = false;
+    java.util.function.Consumer<String> startStatus =
+        msg -> {
+          long generation = controller.getWebGeneration();
+          activity.runOnUiThread(
+              () -> {
+                if (startRequest.get() != request
+                    || getView() != root
+                    || generation != controller.getWebGeneration()) return;
+                startStatusMessage = msg == null ? "" : msg;
+                refreshRunState();
+                refreshLanAddr();
+              });
+        };
+    refreshRunState();
+    boolean queued =
+        enqueueStart(
+            requireActivity(),
+            safeMode,
+            startStatus,
+            accepted -> {
+              if (startRequest.get() != request || getView() != root) return;
+              preparingStart = false;
+              if (!accepted && startStatusMessage.isEmpty()) {
+                startStatusMessage =
+                    UiText.choose(
+                        "启动请求未执行，请检查运行状态后重试。",
+                        "The start request was not submitted. Check the run status and retry.");
+              }
+              refreshRunState();
+              refreshLanAddr();
+            });
+    if (!queued) {
+      preparingStart = false;
+      refreshRunState();
+    }
+  }
+
+  // Isolate dispatch from presentation so host tests can exercise the real button and callbacks.
+  boolean enqueueStart(
+      androidx.fragment.app.FragmentActivity activity,
+      boolean safeMode,
+      java.util.function.Consumer<String> status,
+      java.util.function.Consumer<Boolean> completed) {
+    return FirstRunWebStart.enqueueVisible(
+        activity, START_IO, safeMode, safeMode, status, completed);
+  }
+
+  /**
+   * 外部（通知点击）请求：下一次刷新周期自动进入 Web。
+   *
+   * <p>页面不可见时由 {@code onPause} 清掉，避免用户回来时被意外带走。
+   */
+  void requestAutoEnterWeb() {
+    // Main 的入口检查可能仍挂起恢复页视图；先保留明确请求，创建视图后再等待鉴权。
+    pendingAutoEnter = true;
+    if (controller != null && getView() != null) ui.post(refreshState);
+  }
+
+  /** 打开 WebPreviewActivity 进入 dsh WebUI。 */
+  private void enterWeb() {
+    final View root = getView();
+    final Activity activity = getActivity();
+    if (enteringWeb
+        || root == null
+        || activity == null
+        || !isResumed()
+        || activity.isFinishing()
+        || activity.isDestroyed()) return;
+    String url = webEntryUrl();
+    if (url.isEmpty()) {
+      if (getView() != null) {
+        ((TextView) getView().findViewById(R.id.launch_status))
+            .setText(com.deepseekharness.app.util.UiText.text("先点「启动」，等鉴权链接就绪后再进入"));
+      }
+      return;
+    }
+    final long generation = webEntryGeneration();
+    enteringWeb = true;
+    webEntryFailure = false;
+    ((TextView) root.findViewById(R.id.launch_status))
+        .setText(com.deepseekharness.app.util.UiText.choose("正在打开 Web…", "Opening Web…"));
+    refreshRunState();
+    try {
+      if (getView() != root || !isResumed() || activity.isFinishing() || activity.isDestroyed()) {
+        invalidateWebEntry();
+        return;
+      }
+      if (generation != webEntryGeneration() || !url.equals(webEntryUrl())) {
+        finishWebEntry(root, com.deepseekharness.app.util.UiText.text("Web 状态已变化，请等待就绪后重新进入"));
+        return;
+      }
+      // The browser owns the token -> cookie -> HTTP 200 verification. Doing it here
+      // too created two serial exchanges before the first page; no unverified cookie
+      // is handed off and neither navigation nor progress reports browser readiness.
+      openWebEntry(activity, url, null);
+      refreshLanAddr();
+    } catch (RuntimeException error) {
+      finishWebEntry(
+          root,
+          com.deepseekharness.app.util.UiText.format(
+              "无法打开 Web 页面，请重试（%s）", error.getClass().getSimpleName()));
+    }
+  }
+
+  // Same-package host tests can replace only the Activity destination.
+  String webEntryUrl() {
+    return controller.getWebAuthUrl();
+  }
+
+  long webEntryGeneration() {
+    return controller.getWebGeneration();
+  }
+
+  void openWebEntry(Activity activity, String url, String cookie) {
+    startActivity(WebPreviewActivity.intent(activity, url, cookie));
+  }
+
+  private void finishWebEntry(View root, String message) {
+    enteringWeb = false;
+    webEntryFailure = true;
+    ((TextView) root.findViewById(R.id.launch_status))
+        .setText(com.deepseekharness.app.util.UiStateText.render(message));
+    refreshRunState();
+  }
+
+  private void invalidateWebEntry() {
+    enteringWeb = false;
+  }
+
+  /** 仅在用户仍位于底部且跟随开启时滚动；滚动日志本身，不请求焦点或移动操作区。 */
+  private void updateLog(String text) {
+    View root = getView();
+    if (root == null || launchLog == null) return;
+    LogScrollView scroll = root.findViewById(R.id.launch_log_scroll);
+    boolean follow = followLogs && scroll.shouldFollowEnd();
+    launchLog.setText(text);
+    if (follow) scroll.followEndAfterLayout();
+    else renderLogControls(root);
+  }
+
+  /** 复制当前日志框的完整文本；日志可能含本机鉴权地址，按敏感剪贴板写入。 */
+  private void copyLogs() {
+    if (launchLog == null) return;
+    CharSequence logs = launchLog.getText();
+    if (logs == null || logs.length() == 0) {
+      Toast.makeText(
+              requireContext(),
+              UiText.choose("还没有可复制的日志", "There is no log to copy yet"),
+              Toast.LENGTH_SHORT)
+          .show();
+      return;
+    }
+    try {
+      android.content.ClipboardManager clipboard =
+          (android.content.ClipboardManager)
+              requireContext().getSystemService(Context.CLIPBOARD_SERVICE);
+      if (clipboard == null) {
+        Toast.makeText(
+                requireContext(),
+                UiText.choose("复制失败：剪贴板不可用", "Copy failed: clipboard unavailable"),
+                Toast.LENGTH_SHORT)
+            .show();
+        return;
+      }
+      clipboard.setPrimaryClip(
+          com.deepseekharness.app.bridge.SensitiveClipboard.text(
+              UiText.choose("DSH 启动日志", "DSH startup log"), logs));
+      Toast.makeText(
+              requireContext(),
+              UiText.choose(
+                  "已复制启动日志；其中可能包含本机访问地址，请只分享给可信对象",
+                  "Startup log copied. It may contain local access addresses; share only with trusted devices"),
+              Toast.LENGTH_LONG)
+          .show();
+    } catch (Throwable failure) {
+      Toast.makeText(
+              requireContext(),
+              UiText.format("复制失败：%s", failure.getClass().getSimpleName()),
+              Toast.LENGTH_SHORT)
+          .show();
+    }
+  }
+
+  /** 打开本机终端：终端门禁仍由 MainActivity.openTerminal() 统一判断。 */
+  private void openLocalTerminal() {
+    Activity host = getActivity();
+    if (host instanceof MainActivity) {
+      ((MainActivity) host).openTerminal();
+      return;
+    }
+    Toast.makeText(
+            requireContext(),
+            UiText.choose("请在主界面打开本机终端", "Open the local terminal from the main screen"),
+            Toast.LENGTH_SHORT)
+        .show();
+  }
+
+  /** 运行环境行复用现有恢复入口：需要恢复时进入环境维护，否则打开启动恢复页。 */
+  private void openEnvironment() {
+    if (!isAdded()) return;
+    if (EnvironmentUiStatus.get(requireContext()).recovery) {
+      startActivity(
+          new Intent(requireContext(), ExtractActivity.class).putExtra("review_only", true));
+      return;
+    }
+    showRecovery();
+  }
+
+  /** 跟随开关只改展示，不触发任务状态变化；打开时再显式滚到末尾。 */
+  private void setLogFollow(boolean follow) {
+    if (followLogs == follow) {
+      renderLogControls(getView());
+      return;
+    }
+    followLogs = follow;
+    renderLogControls(getView());
+  }
+
+  private void toggleLogFollow() {
+    if (followLogs) {
+      setLogFollow(false);
+      return;
+    }
+    resumeLogFollow();
+  }
+
+  /** 恢复跟随并滚到最新；由「跟随最新」和「查看最新」共用。 */
+  private void resumeLogFollow() {
+    setLogFollow(true);
+    View root = getView();
+    if (root == null) return;
+    LogScrollView scroll = root.findViewById(R.id.launch_log_scroll);
+    if (scroll == null) return;
+    scroll.fullScroll(View.FOCUS_DOWN);
+    scroll.followEndAfterLayout();
+  }
+
+  /** 同步跟随按钮文案与「查看最新」可见性；暂停时保留当前阅读位置。 */
+  private void renderLogControls(View root) {
+    if (root == null) return;
+    TextView follow = root.findViewById(R.id.launch_follow_logs);
+    if (follow != null) {
+      follow.setText(
+          followLogs
+              ? UiText.choose("暂停跟随", "Pause following")
+              : UiText.choose("跟随最新", "Follow latest"));
+      follow.setContentDescription(
+          followLogs
+              ? UiText.choose("日志跟随中，点按暂停跟随", "Log following is on. Tap to pause.")
+              : UiText.choose("日志已暂停跟随，点按恢复", "Log following is paused. Tap to resume."));
+      follow.setTextColor(
+          requireContext()
+              .getColor(followLogs ? R.color.shell_text_secondary : R.color.shell_accent));
+    }
+    if (latestLogsButton != null) {
+      latestLogsButton.setText(UiText.choose("查看最新", "View latest"));
+      latestLogsButton.setContentDescription(
+          UiText.choose("跳到启动日志最新一行", "Jump to the latest startup log line"));
+      latestLogsButton.setVisibility(followLogs ? View.GONE : View.VISIBLE);
+    }
+  }
+
+  @Override
+  public void onResume() {
+    super.onResume();
+    if (controller == null) return;
+    invalidateWebEntry();
+    ui.removeCallbacks(refreshState);
+    ui.post(refreshState);
+  }
+
+  @Override
+  public void onPause() {
+    // 页面不可见时撤销自动进入：用户离开了启动页，回来不该被"突袭"打开 Web。
+    pendingAutoEnter = false;
+    startRequest.incrementAndGet();
+    preparingStart = false;
+    if (enteringWeb && getView() != null) {
+      ((TextView) getView().findViewById(R.id.launch_status))
+          .setText(com.deepseekharness.app.util.UiText.text("返回后可重新进入 Web"));
+    }
+    invalidateWebEntry();
+    ui.removeCallbacks(refreshState);
+    super.onPause();
+  }
+
+  @Override
+  public void onDestroyView() {
+    startRequest.incrementAndGet();
+    preparingStart = false;
+    invalidateWebEntry();
+    ui.removeCallbacks(refreshState);
+    if (accessDialog != null) accessDialog.dismiss();
+    accessDialog = null;
+    lanAddrText = null;
+    launchLog = null;
+    activityTrack = null;
+    latestLogsButton = null;
+    super.onDestroyView();
+  }
+
+  /** 读取共享状态，不在主线程执行 proot/kill -0；重建页面也能跟随后台启停。 */
+  private void refreshRunState() {
+    try {
+      View root = getView();
+      if (root == null) return;
+      TextView runState = root.findViewById(R.id.launch_run_state);
+      Button start = root.findViewById(R.id.launch_start);
+      if (runState == null) return;
+      boolean starting = preparingStart || controller.isStarting();
+      boolean stopping = controller.isStopping();
+      var stopResult = controller.lastStopResult();
+      boolean unresolvedStop =
+          controller.isUserStopped()
+              && !starting
+              && (stopResult != null && !stopResult.stopped()
+                  || !controller.lastStopError().isEmpty());
+      boolean ready = !starting && !stopping && !webEntryUrl().isEmpty();
+      if (ready) startStatusMessage = "";
+      boolean restoring = controller.isRestoringWebSession();
+      boolean unresolved = controller.hasUnresolvedWebSession();
+      com.deepseekharness.app.util.StartupTrace.Snapshot trace =
+          controller.startupDiagnostics().snapshot();
+      String localUrl = webEntryUrl();
+      if (launchLog != null && (trace.revision != logRevision || !localUrl.equals(logUrl))) {
+        // 仅原生本机视图显示当前鉴权地址；归档与导出的诊断仍统一脱敏。
+        updateLog(
+            (trace.log.isEmpty() ? com.deepseekharness.app.util.UiText.text("还没有日志。") : trace.log)
+                + (localUrl.isEmpty()
+                    ? ""
+                    : com.deepseekharness.app.util.UiText.format(
+                        "\n\n本机 Web 地址（可长按复制）：\n%s", localUrl)));
+        logRevision = trace.revision;
+        logUrl = localUrl;
+      }
+      runState.setText(
+          enteringWeb
+              ? com.deepseekharness.app.util.UiText.choose("正在打开 Web…", "Opening Web…")
+              : restoring
+                  ? com.deepseekharness.app.util.UiText.choose(
+                      "正在核对原 Web 实例…", "Checking the existing Web instance…")
+                  : unresolved
+                      ? com.deepseekharness.app.util.UiText.choose(
+                          "原 Web 实例状态待确认，请查看诊断或正常停止后重试",
+                          "The previous Web instance is unconfirmed. Inspect diagnostics or stop it normally before retrying.")
+                      : controller.isRestartBlocked()
+                          ? com.deepseekharness.app.util.UiText.text("自动重启已暂停")
+                          : stopping
+                              ? com.deepseekharness.app.util.UiText.text("DSH 停止中…")
+                              : starting
+                                  ? com.deepseekharness.app.util.UiText.text("DSH 启动中…")
+                                  : ready
+                                      ? (trace.safe
+                                              ? com.deepseekharness.app.util.UiText.text(
+                                                  "基础界面已就绪 · 安全模式")
+                                              : com.deepseekharness.app.util.UiText.text(
+                                                  "DSH 已就绪，可进入"))
+                                          + (controller.isWebCompatibilityFallback()
+                                              ? com.deepseekharness.app.util.UiText.text(
+                                                  " · 已兼容切换 proot")
+                                              : "")
+                                      : controller.isUserStopped()
+                                          ? getString(R.string.ui2_stopped)
+                                          : getString(R.string.ui2_stopped));
+      ((TextView) root.findViewById(R.id.launch_port))
+          .setText(ready ? String.valueOf(controller.getWebPort()) : "—");
+      EnvironmentUiStatus.Snapshot environment = EnvironmentUiStatus.get(requireContext());
+      boolean needsRecovery = environment.recovery;
+      ((TextView) root.findViewById(R.id.launch_environment))
+          .setText(environment.ready ? "READY" : "—");
+      ((TextView) root.findViewById(R.id.launch_subtitle))
+          .setText(
+              ready
+                  ? (controller.isWebCompatibilityFallback()
+                          ? "proot"
+                          : controller.proot().runtime().id())
+                      + " · dsh "
+                      + com.deepseekharness.app.util.Constants.DSH_VERSION
+                  : getString(R.string.ui2_launch_hint));
+      // 语境小字 / 活动条 / 工作台状态只取真实状态；不根据等待时长推算阶段。
+      renderStatusChrome(
+          root,
+          starting,
+          stopping,
+          ready,
+          enteringWeb,
+          restoring,
+          unresolved,
+          controller.isRestartBlocked(),
+          needsRecovery);
+      root.findViewById(R.id.launch_status)
+          .setVisibility(
+              enteringWeb
+                      || webEntryFailure
+                      || starting
+                      || stopping
+                      || unresolvedStop
+                      || !startStatusMessage.isEmpty()
+                      || !trace.issues.isEmpty()
+                  ? View.VISIBLE
+                  : View.GONE);
+      if (starting)
+        ((TextView) root.findViewById(R.id.launch_status))
+            .setText(
+                com.deepseekharness.app.util.UiText.format(
+                    "%s · 本阶段 %s 秒 · 总计 %s 秒\n%s",
+                    trace.stage,
+                    trace.stageElapsedMs / 1000,
+                    trace.elapsedMs / 1000,
+                    trace.issues.isEmpty()
+                        ? com.deepseekharness.app.util.UiText.text("下方实时显示启动输出；等待不会自动终止。")
+                        : com.deepseekharness.app.util.UiText.text("检测到插件或配置异常，可查看恢复选项。")));
+      else if (!startStatusMessage.isEmpty() && !stopping && !enteringWeb)
+        ((TextView) root.findViewById(R.id.launch_status))
+            .setText(com.deepseekharness.app.util.UiStateText.render(startStatusMessage));
+      Button recovery = root.findViewById(R.id.launch_recovery);
+      int failures = controller.config().getWebFailures();
+      recovery.setVisibility(View.VISIBLE);
+      recovery.setText(com.deepseekharness.app.util.UiText.text("恢复选项"));
+      recovery.setContentDescription(
+          !trace.issues.isEmpty()
+              ? com.deepseekharness.app.util.UiText.format(
+                  "检测到 %s 项异常，查看插件与恢复选项", trace.issues.size())
+              : com.deepseekharness.app.util.UiText.format(
+                  "失败 %s/3，%s，查看恢复选项", failures, controller.config().getWebFailureStage()));
+      if (start != null) {
+        webReady = ready;
+        start.setText(
+            enteringWeb
+                ? com.deepseekharness.app.util.UiText.text("进入中…")
+                : ready
+                    ? com.deepseekharness.app.util.UiText.choose("▶  进入工作台", "▶  Open workspace")
+                    : getString(R.string.ui2_start));
+        start.setEnabled(!enteringWeb && !starting && !stopping && !restoring);
+      }
+      Button restart = root.findViewById(R.id.launch_open);
+      if (restart != null) restart.setEnabled(!starting && !stopping);
+      Button stop = root.findViewById(R.id.launch_stop);
+      if (stop != null) stop.setEnabled(!stopping);
+      if (needsRecovery) {
+        runState.setText(com.deepseekharness.app.util.UiText.text("环境需要恢复"));
+        if (start != null) start.setEnabled(false);
+        if (restart != null) restart.setEnabled(false);
+        root.findViewById(R.id.launch_safe).setEnabled(false);
+        recovery.setVisibility(View.VISIBLE);
+        recovery.setText(com.deepseekharness.app.util.UiText.text("环境维护"));
+        recovery.setContentDescription(com.deepseekharness.app.util.UiText.text("查看环境维护与恢复选项"));
+        recovery.setOnClickListener(
+            v ->
+                startActivity(
+                    new Intent(requireContext(), ExtractActivity.class)
+                        .putExtra("review_only", true)));
+      } else {
+        root.findViewById(R.id.launch_safe).setEnabled(!starting && !stopping);
+        recovery.setOnClickListener(v -> showRecovery());
+      }
+    } catch (RuntimeException failure) {
+      if (getContext() != null)
+        com.deepseekharness.app.core.DiagnosticLog.record(
+            getContext(), "UI_REFRESH_FAILED", failure.getClass().getSimpleName());
+      View view = getView();
+      if (view != null) {
+        TextView state = view.findViewById(R.id.launch_run_state);
+        if (state != null)
+          state.setText(
+              com.deepseekharness.app.util.UiText.choose(
+                  "运行状态暂时无法读取，请查看操作记录", "Run state unavailable. See operation history."));
+      }
+    }
+  }
+
+  private void showRecovery() {
+    startActivity(new Intent(requireContext(), StartupRecoveryActivity.class));
+  }
+
+  /**
+   * 把真实运行状态映射为语境小字、活动条与工作台状态。
+   *
+   * <p>只使用 controller / 环境检查已给出的结果；等待本身不产生新状态，也不显示阶段进度。
+   */
+  private void renderStatusChrome(
+      View root,
+      boolean starting,
+      boolean stopping,
+      boolean ready,
+      boolean entering,
+      boolean restoring,
+      boolean unresolved,
+      boolean restartBlocked,
+      boolean needsRecovery) {
+    int tone;
+    String context;
+    if (needsRecovery) {
+      context = UiText.choose("运行环境 · 需要恢复", "Runtime environment · needs recovery");
+      tone = R.color.shell_bad;
+    } else if (unresolved) {
+      context = UiText.choose("Web 实例 · 待确认", "Web instance · unconfirmed");
+      tone = R.color.shell_bad;
+    } else if (restartBlocked) {
+      context = UiText.choose("自动重启 · 已暂停", "Automatic restart · paused");
+      tone = R.color.shell_warn;
+    } else if (entering) {
+      context = UiText.choose("本机工作台 · 正在进入", "Local workspace · opening");
+      tone = R.color.shell_accent;
+    } else if (restoring) {
+      context = UiText.choose("Web 实例 · 正在核对", "Web instance · verifying");
+      tone = R.color.shell_accent;
+    } else if (stopping) {
+      context = UiText.choose("本机工作台 · 正在停止", "Local workspace · stopping");
+      tone = R.color.shell_accent;
+    } else if (starting) {
+      context = UiText.choose("本机工作台 · 正在启动", "Local workspace · starting");
+      tone = R.color.shell_accent;
+    } else if (ready) {
+      context = UiText.choose("本机工作台 · 已就绪", "Local workspace · ready");
+      tone = R.color.shell_good;
+    } else {
+      context = UiText.choose("本机工作台 · 未运行", "Local workspace · not running");
+      tone = R.color.shell_text_secondary;
+    }
+    TextView eyebrow = root.findViewById(R.id.launch_eyebrow);
+    if (eyebrow != null) eyebrow.setText(context);
+    TextView dot = root.findViewById(R.id.launch_run_dot);
+    if (dot != null) dot.setTextColor(requireContext().getColor(tone));
+    if (activityTrack != null) {
+      int track;
+      if (needsRecovery || unresolved || restartBlocked) track = ShellActivityTrack.ERROR;
+      else if (starting || stopping || entering || restoring) track = ShellActivityTrack.RUNNING;
+      else if (ready) track = ShellActivityTrack.SETTLED;
+      else track = ShellActivityTrack.IDLE;
+      activityTrack.setState(track);
+    }
+    TextView workbench = root.findViewById(R.id.launch_workbench);
+    if (workbench != null) {
+      String value;
+      int valueTone;
+      if (needsRecovery) {
+        value = UiText.choose("需恢复", "Repair");
+        valueTone = R.color.shell_bad;
+      } else if (unresolved) {
+        value = UiText.choose("待确认", "Pending");
+        valueTone = R.color.shell_bad;
+      } else if (entering) {
+        value = UiText.choose("进入中", "Opening");
+        valueTone = R.color.shell_good;
+      } else if (restoring) {
+        value = UiText.choose("核对中", "Check");
+        valueTone = R.color.shell_accent;
+      } else if (stopping) {
+        value = UiText.choose("停止中", "Stop");
+        valueTone = R.color.shell_accent;
+      } else if (starting) {
+        value = UiText.choose("启动中", "Start");
+        valueTone = R.color.shell_accent;
+      } else if (ready) {
+        value = UiText.choose("可进入", "Ready");
+        valueTone = R.color.shell_good;
+      } else {
+        value = UiText.choose("未运行", "Stopped");
+        valueTone = R.color.shell_text;
+      }
+      workbench.setText(value);
+      workbench.setTextColor(requireContext().getColor(valueTone));
+    }
+  }
+
+  private void offerForceStop(Activity activity, View root, TextView status, long generation) {
+    final long consentRevision =
+        new com.deepseekharness.app.core.DeviceGrants(activity).consentPolicy().revision();
+    // 进程与文件身份核验放在工作线程；本次候选只捕获一次，由对话框局部持有至确认。
+    new Thread(
+            () -> {
+              HarnessController.ForceStopRequest request = null;
+              try {
+                request = controller.prepareForceStop();
+              } catch (java.io.IOException denied) {
+                com.deepseekharness.app.core.DiagnosticLog.record(
+                    activity.getApplicationContext(),
+                    "WEB_FORCE_STOP_CANDIDATE",
+                    denied.getClass().getSimpleName());
+              }
+              final HarnessController.ForceStopRequest candidate = request;
+              ui.post(
+                  () -> {
+                    if (consentRevision
+                            != new com.deepseekharness.app.core.DeviceGrants(activity)
+                                .consentPolicy()
+                                .revision()
+                        || getView() != root
+                        || !isResumed()
+                        || activity.isFinishing()
+                        || activity.isDestroyed()
+                        || generation != controller.getWebGeneration()) return;
+                    if (candidate == null) {
+                      status.setText(
+                          com.deepseekharness.app.util.UiText.text(
+                              "尚未确认 Web 退出；进程身份无法核验，保留运行屏障。请查看诊断后重试停止。"));
+                      return;
+                    }
+                    new DshaDialogBuilder(requireContext(), true)
+                        .setTitle(com.deepseekharness.app.util.UiText.text("强制结束本次 Web？"))
+                        .setMessage(
+                            com.deepseekharness.app.util.UiText.text(
+                                "普通停止尚未确认 Web 退出。本次已核验进程属于 DSHA；强制结束可能中断正在写入的对话或文件。\n\n确认后只结束这次已核验的 Web 进程；身份或状态变化会拒绝执行。取消会保留现场与运行屏障。"))
+                        .setNegativeButton(android.R.string.cancel, null)
+                        .setPositiveButton(
+                            com.deepseekharness.app.util.UiText.text("强制结束"),
+                            (dialog, which) -> {
+                              if (consentRevision
+                                      != new com.deepseekharness.app.core.DeviceGrants(activity)
+                                          .consentPolicy()
+                                          .revision()
+                                  || getView() != root
+                                  || !isResumed()
+                                  || activity.isFinishing()
+                                  || activity.isDestroyed()) return;
+                              boolean accepted =
+                                  controller.forceStop(
+                                      candidate,
+                                      message ->
+                                          ui.post(
+                                              () -> {
+                                                if (getView() != root
+                                                    || generation != controller.getWebGeneration())
+                                                  return;
+                                                status.setText(
+                                                    com.deepseekharness.app.util.UiStateText.render(
+                                                        message));
+                                                refreshRunState();
+                                                refreshLanAddr();
+                                              }));
+                              if (!accepted)
+                                status.setText(
+                                    com.deepseekharness.app.util.UiText.text(
+                                        "Web 状态或进程身份已变化，本次强制结束未执行。请重新停止后确认。"));
+                              else
+                                status.setText(
+                                    com.deepseekharness.app.util.UiText.text("正在强制结束本次已核验的 Web…"));
+                            })
+                        .show();
+                  });
+            },
+            "web-force-stop-candidate")
+        .start();
+  }
+
+  /** Snapshot settings, actual listener generation and current interfaces independently of the view. */
+  LanAccessPresentation lanAccess() {
+    boolean enabled = controller.config().isLanMode();
+    boolean permission =
+        com.deepseekharness.app.bridge.LocalNetworkAccess.granted(requireContext());
+    long generation = controller.getWebGeneration();
+    boolean authenticated = LanProxyService.hasDshAuth(generation);
+    int port = LanProxyService.port(generation);
+    LanAddressPolicy.Discovery discovery =
+        enabled && permission && authenticated && port > 0
+            ? LanAddressPolicy.currentDiscovery()
+            : null;
+    return LanAccessPresentation.capture(
+        enabled, permission, generation, authenticated, port, discovery);
+  }
+
+  /** LAN status remains visible when disabled; opening this view never enables a listener. */
+  private void refreshLanAddr() {
+    if (lanAddrText == null || !isAdded() || controller == null) return;
+    LanAccessPresentation access = lanAccess();
+    lanAddrText.setText(lanStatusForDisplay(access));
+    lanAddrText.setOnClickListener(v -> showAccessAddresses());
+    lanAddrText.setVisibility(View.VISIBLE);
+    renderAccessAddresses(access);
+  }
+
+  void showAccessAddresses() {
+    if (!isAdded() || controller == null) return;
+    if (accessDialog != null) accessDialog.dismiss();
+    var dialog =
+        new DshaDialogBuilder(requireContext())
+            .setTitle(R.string.ui2_address)
+            .setMessage("")
+            .setNegativeButton(UiText.choose("关闭", "Close"), null)
+            .setPositiveButton(UiText.choose("复制本机地址", "Copy local URL"), null)
+            .setNeutralButton(UiText.choose("局域网访问", "LAN access"), null)
+            .create();
+    accessDialog = dialog;
+    dialog.setOnDismissListener(
+        ignored -> {
+          if (accessDialog == dialog) accessDialog = null;
+        });
+    dialog.show();
+    renderAccessAddresses(lanAccess());
+  }
+
+  private void renderAccessAddresses(LanAccessPresentation access) {
+    var dialog = accessDialog;
+    if (dialog == null || !dialog.isShowing() || !isAdded()) return;
+    String local = webEntryUrl();
+    long generation = controller.getWebGeneration();
+    dialog.setMessage(
+        UiText.format(
+            UiText.choose("本机访问\n%s\n\n%s", "On this phone\n%s\n\n%s"),
+            local.isEmpty()
+                ? UiText.choose("启动 DSH 并等待就绪后显示本机地址。", "Start DSH and wait for its local URL.")
+                : local,
+            lanStatusForDisplay(access)));
+    Button localButton = dialog.getButton(android.content.DialogInterface.BUTTON_POSITIVE);
+    localButton.setEnabled(!local.isEmpty());
+    localButton.setOnClickListener(
+        ignored -> {
+          if (isAdded()
+              && generation == controller.getWebGeneration()
+              && !local.isEmpty()
+              && local.equals(webEntryUrl())) copyAddr("DSH", local);
+          else connectionChanged();
+        });
+    Button lanButton = dialog.getButton(android.content.DialogInterface.BUTTON_NEUTRAL);
+    lanButton.setText(
+        needsLanPassword(access)
+            ? getString(R.string.lan_password_open)
+            : lanActionLabel(access.state));
+    lanButton.setOnClickListener(ignored -> onLanAction(lanAccess()));
+  }
+
+  private boolean needsLanPassword(LanAccessPresentation access) {
+    return access.state != LanAccessPresentation.State.DISABLED
+        && !controller.config().hasLanPassword();
+  }
+
+  private String lanStatusForDisplay(LanAccessPresentation access) {
+    if (needsLanPassword(access)) return getString(R.string.lan_password_required_launch);
+    if (access.state == LanAccessPresentation.State.READY)
+      return getString(R.string.lan_address_overview, String.join("\n", access.services));
+    return lanStatus(access);
+  }
+
+  static String lanStatus(LanAccessPresentation access) {
+    return switch (access.state) {
+      case DISABLED ->
+          UiText.choose(
+              "局域网访问：未开启。可在此手动开启，供同一可信网络的设备连接。",
+              "LAN access: off. Enable it here to connect devices on the same trusted network.");
+      case PERMISSION_REQUIRED ->
+          UiText.choose(
+              "局域网访问已开启，但未获得系统本地网络权限；本机访问仍可使用。",
+              "LAN access is enabled, but the system local network permission is missing. Local access is still available.");
+      case WAITING_AUTH ->
+          UiText.choose(
+              "局域网访问已开启，正在等待本轮 DSH 就绪并完成认证。",
+              "LAN access is enabled. Waiting for this DSH run to be ready and authenticated.");
+      case LISTENER_UNAVAILABLE ->
+          UiText.choose(
+              "局域网访问已开启，但本轮代理尚未成功监听。可重试局域网连接；仍失败时查看启动诊断。",
+              "LAN access is enabled, but its listener is not ready. Retry LAN access or check startup diagnostics if it still fails.");
+      case DISCOVERY_DENIED ->
+          UiText.choose(
+              "局域网代理已监听，但系统拒绝读取网络地址。请检查应用的网络权限后刷新。",
+              "The LAN listener is ready, but the system denied access to network addresses. Check app network permissions and refresh.");
+      case DISCOVERY_FAILED ->
+          UiText.choose(
+              "局域网代理已监听，但暂时无法读取网络接口。请检查 Wi-Fi 或以太网连接后刷新。",
+              "The LAN listener is ready, but network interfaces could not be read. Check Wi-Fi or Ethernet and refresh.");
+      case IPV6_ONLY ->
+          UiText.choose(
+              "局域网代理已监听，检测到 IPv6，但没有可分享的私有 IPv4 地址；此代理使用 IPv4。请连接提供私有 IPv4 地址的 Wi-Fi 或以太网。",
+              "The LAN listener is ready. IPv6 was detected, but no shareable private IPv4 address is available. This proxy uses IPv4. Connect to Wi-Fi or Ethernet that provides private IPv4.");
+      case NO_ADDRESS ->
+          UiText.choose(
+              "局域网代理已监听，但没有可分享的 Wi-Fi 或以太网私有 IPv4 地址。请连接局域网后刷新；VPN 或移动数据地址不会作为局域网链接。",
+              "The LAN listener is ready, but no shareable Wi-Fi or Ethernet private IPv4 address is available. Connect to a LAN and refresh. VPN and cellular addresses are excluded.");
+      case READY -> String.join("\n", access.services);
+    };
+  }
+
+  private static String lanActionLabel(LanAccessPresentation.State state) {
+    return switch (state) {
+      case DISABLED -> UiText.choose("开启局域网访问", "Enable LAN access");
+      case PERMISSION_REQUIRED -> UiText.choose("允许本地网络", "Allow local network");
+      case LISTENER_UNAVAILABLE -> UiText.choose("重试局域网连接", "Retry LAN access");
+      case READY -> UiText.choose("局域网连接链接", "LAN connection links");
+      default -> UiText.choose("刷新地址", "Refresh addresses");
+    };
+  }
+
+  private void onLanAction(LanAccessPresentation access) {
+    if (!isAdded()) return;
+    if (needsLanPassword(access)) {
+      if (accessDialog != null) accessDialog.dismiss();
+      UiMotion.page(requireContext(), getParentFragmentManager().beginTransaction())
+          .addToBackStack(null)
+          .replace(R.id.fragment_container, new ConfigFragment())
+          .commit();
+    } else if (access.state == LanAccessPresentation.State.DISABLED) {
+      new DshaDialogBuilder(requireContext())
+          .setTitle(UiText.choose("开启局域网访问？", "Enable LAN access?"))
+          .setMessage(R.string.lan_enable_password_notice)
+          .setNegativeButton(android.R.string.cancel, null)
+          .setPositiveButton(
+              UiText.choose("开启", "Enable"),
+              (dialog, which) -> {
+                if (!isAdded() || getView() == null || !isResumed()) return;
+                controller.config().setLanMode(true);
+                requestLanAccess();
+                refreshLanAddr();
+              })
+          .show();
+    } else if (access.state == LanAccessPresentation.State.PERMISSION_REQUIRED
+        || access.state == LanAccessPresentation.State.LISTENER_UNAVAILABLE) {
+      requestLanAccess();
+      refreshLanAddr();
+    } else if (access.state == LanAccessPresentation.State.READY) {
+      if (access.services.size() == 1) showLanAddress(access.services.get(0));
+      else
+        new DshaDialogBuilder(requireContext())
+            .setTitle(UiText.choose("选择局域网地址", "Choose a LAN address"))
+            .setItems(
+                access.services.toArray(new String[0]),
+                (dialog, which) -> showLanAddress(access.services.get(which)))
+            .setNegativeButton(android.R.string.cancel, null)
+            .show();
+    } else refreshLanAddr();
+  }
+
+  private void requestLanAccess() {
+    if (!isAdded() || !controller.config().isLanMode()) return;
+    try {
+      com.deepseekharness.app.HarnessService.ensureLanForeground(requireContext());
+      if (getActivity() instanceof MainActivity)
+        ((MainActivity) getActivity()).requestLocalNetwork();
+      else
+        com.deepseekharness.app.bridge.LocalNetworkAccess.applyConfiguredFeatures(requireContext());
+    } catch (RuntimeException failure) {
+      Toast.makeText(
+              requireContext(),
+              UiText.choose(
+                  "无法开启局域网连接，请检查系统权限和启动诊断后重试。",
+                  "LAN access could not start. Check system permissions and startup diagnostics, then retry."),
+              Toast.LENGTH_LONG)
+          .show();
+    }
+  }
+
+  private void showLanAddress(String service) {
+    if (!isAdded()) return;
+    final long generation = controller.getWebGeneration();
+    if (!lanAccess().stillOffers(generation, service)) {
+      connectionChanged();
+      return;
+    }
+    new DshaDialogBuilder(requireContext())
+        .setTitle(UiText.choose("局域网地址", "LAN address"))
+        .setMessage(getString(R.string.lan_address_detail, service))
+        .setNegativeButton(android.R.string.cancel, null)
+        .setPositiveButton(
+            UiText.choose("复制地址", "Copy address"),
+            (dialog, which) -> {
+              if (!isAdded()
+                  || generation != controller.getWebGeneration()
+                  || !controller.config().hasLanPassword()
+                  || !lanAccess().stillOffers(generation, service)) {
+                connectionChanged();
+                return;
+              }
+              copyAddr(UiText.choose("局域网地址", "LAN address"), service);
+            })
+        .show();
+  }
+
+  private void connectionChanged() {
+    if (isAdded())
+      Toast.makeText(
+              requireContext(),
+              UiText.choose(
+                  "连接已变化，请重新查看链接。", "The connection changed. View its current link again."),
+              Toast.LENGTH_LONG)
+          .show();
+  }
+
+  private void copyAddr(String label, String addr) {
+    try {
+      android.content.ClipboardManager cm =
+          (android.content.ClipboardManager)
+              requireContext().getSystemService(Context.CLIPBOARD_SERVICE);
+      if (cm != null) {
+        cm.setPrimaryClip(com.deepseekharness.app.bridge.SensitiveClipboard.text(label, addr));
+        Toast.makeText(
+                requireContext(),
+                com.deepseekharness.app.util.UiText.choose(
+                    "已复制连接地址，请只分享给可信设备",
+                    "Connection address copied. Share only with trusted devices"),
+                Toast.LENGTH_SHORT)
+            .show();
+      }
+    } catch (Throwable t) {
+      Toast.makeText(
+              requireContext(),
+              com.deepseekharness.app.util.UiText.format("复制失败：%s", t.getMessage()),
+              Toast.LENGTH_SHORT)
+          .show();
+    }
+  }
+}

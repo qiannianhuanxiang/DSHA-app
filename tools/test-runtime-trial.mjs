@@ -1,0 +1,179 @@
+#!/usr/bin/env node
+import {testRuntime} from './test-runtime-fixture.mjs';
+// 桌面协议回归：真实 JSON 存储后端 + 合成浏览器事件。不是 Android / Gecko 健康证明。
+import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import {pathToFileURL,fileURLToPath} from 'node:url';
+import vm from 'node:vm';
+import {randomUUID} from 'node:crypto';
+import {spawnSync} from 'node:child_process';
+
+const repository=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
+const selected = path.join(testRuntime('raw'), 'node_modules');
+const modules = path.resolve(process.argv[2] || selected);
+assert.equal(modules, selected, 'Runtime trial must use the current proven raw modules');
+const expectedVersion=JSON.parse(await fs.readFile(path.join(modules,'@deepseek-ai/dsh/package.json'),'utf8')).version;
+const parent=path.resolve(process.argv[3]||path.join(repository,'app/build/backup-upgrade-baseline'));
+if(!parent.startsWith(path.join(repository,'app/build')+path.sep))throw Error('Unsafe test output directory');
+await fs.mkdir(parent,{recursive:true});
+const owned=await fs.mkdtemp(path.join(parent,'trial-protocol-'));
+const results=[];
+async function test(name,run){try{await run();results.push({name,status:'PASS'});}catch(error){results.push({name,status:'FAIL',error:error.code||error.name,message:error.message});throw error;}}
+async function loadTrialPlugin(){
+ const directory=path.join(owned,`.dsha-runtime-trial-test-${randomUUID()}`);
+ await fs.mkdir(directory);
+ await fs.symlink(modules,path.join(directory,'node_modules'),process.platform==='win32'?'junction':'dir');
+ await Promise.all([
+  fs.copyFile(path.join(repository,'app/src/main/assets/runtime-trial-plugin.js'),path.join(directory,'index.mjs')),
+  fs.copyFile(path.join(repository,'app/src/main/assets/runtime-trial-page.js'),path.join(directory,'page.js')),
+ ]);
+ try{return {plugin:await import(pathToFileURL(path.join(directory,'index.mjs')).href+`?v=${randomUUID()}`),directory}}
+ catch(error){await fs.rm(directory,{recursive:true,force:true});throw error}
+}
+function trialContext(backend){
+ let header;
+ return {
+  storage:{backend:{get(name){assert.equal(name,'json');return backend}}},
+  sessionPersistence:{
+   async create(value){header=value;return {async flush(){},async close(){}}},
+   async open(id){return {header:{...header,id,version:4},async read(){return {events:[]}},async close(){}}},
+  },
+  webServer:{port:3080,register(){return ()=>{}}},connection:{requestRejection(){return undefined}},
+  effect(install){return install()},on(){return ()=>{}},
+ };
+}
+try{
+ await test('private_trial_preload_preserves_real_cli_main_and_other_options',async()=>{
+  // Run the exact production option-consumption prelude with real Node --import
+  // and locked official bin.js. ARM64 native calls remain device-only evidence.
+  const source=await fs.readFile(path.join(repository,'app/src/main/assets/runtime-trial-entry.js'),'utf8');
+  const boundary=source.indexOf('\ntry {');assert.ok(boundary>0);
+  const preload=path.join(owned,'trial-preload.mjs'),other=path.join(owned,'other-preload.mjs');
+  await fs.writeFile(preload,source.slice(0,boundary));
+  await fs.writeFile(other,"process.stderr.write('DSHA_TEST_OTHER_PRELOAD_READY\\n');\n");
+  const rest='--import='+pathToFileURL(other).href+' --conditions=dsha-trial-host-check';
+  const child=spawnSync(process.execPath,[path.join(modules,'@deepseek-ai/dsh/lib/bin.js'),'--version'],{encoding:'utf8',timeout:15000,windowsHide:true,env:{...process.env,NODE_OPTIONS:'--import='+pathToFileURL(preload).href+' '+rest}});
+  assert.equal(child.error,undefined);assert.equal(child.status,0,child.stderr);
+  assert.equal(child.stdout,expectedVersion+'\n');assert.equal(child.stderr,'DSHA_TEST_OTHER_PRELOAD_READY\n');
+ });
+ await test('private_trial_preload_is_not_inherited_by_fresh_storage_child',async()=>{
+  const preload=path.join(owned,'trial-preload.mjs'),other=path.join(owned,'other-preload.mjs'),probe=path.join(owned,'child-probe.mjs');
+  await fs.writeFile(probe,"import {spawnSync} from 'node:child_process';\nif((process.env.NODE_OPTIONS||'')!==process.env.DSHA_TEST_OPTIONS_AFTER)throw Error('OPTIONS_CHANGED');\nconst child=spawnSync(process.execPath,['--eval',\"process.stdout.write('DSHA_TRIAL_FRESH_REOPEN_OK\\\\n')\"],{encoding:'utf8',env:process.env});\nif(child.error||child.status!==0)throw Error('CHILD_FAILED');process.stdout.write(child.stdout);process.stderr.write(child.stderr);\n");
+  for(const rest of ['', '--import='+pathToFileURL(other).href+' --conditions=dsha-trial-host-check']){
+   const child=spawnSync(process.execPath,[probe],{encoding:'utf8',timeout:15000,windowsHide:true,env:{...process.env,NODE_OPTIONS:'--import='+pathToFileURL(preload).href+' '+rest,DSHA_TEST_OPTIONS_AFTER:rest}});
+   assert.equal(child.error,undefined);assert.equal(child.status,0,child.stderr);
+   assert.equal(child.stdout,'DSHA_TRIAL_FRESH_REOPEN_OK\n');
+   assert.equal(child.stderr,rest?'DSHA_TEST_OTHER_PRELOAD_READY\nDSHA_TEST_OTHER_PRELOAD_READY\n':'');
+  }
+ });
+ await test('android_health_gate_requires_fresh_process_reopen',async()=>{
+  const host=await fs.readFile(path.join(repository,'app/src/main/java/com/deepseekharness/app/runtime/RuntimeTrial.java'),'utf8');
+  const bootstrap=await fs.readFile(path.join(repository,'app/src/main/java/com/deepseekharness/app/runtime/ProotBootstrap.java'),'utf8');
+  const receipt=await fs.readFile(path.join(repository,'app/src/main/java/com/deepseekharness/app/backup/RuntimeDescriptor.java'),'utf8');
+  const plugin=await fs.readFile(path.join(repository,'app/src/main/assets/runtime-trial-plugin.js'),'utf8');
+  const builder=await fs.readFile(path.join(repository,'tools/build-dsh-runtime.py'),'utf8');
+  assert.match(host,/for\s*\(\s*String\s+check\s*:\s*List\.of\([\s\S]*?"storageFreshReopened"[\s\S]*?\)\s*\)/);
+  assert.match(host,/proof\.put\(\s*"storageFreshReopened"\s*,\s*true\s*\)/);
+  assert.match(receipt,/for\s*\(\s*String\s+check\s*:\s*Arrays\.asList\([\s\S]*?"storageFreshReopened"[\s\S]*?\)\s*\)\s*if\s*\(!Boolean\.TRUE\.equals\(receipt\.get\(check\)\)\)/);
+  // process.execPath may be the host-side proroot bridge.  A fresh child must
+  // be launched through the guest Node path so it receives the same path
+  // translation and can independently read the durable record.
+  assert.match(plugin,/const trialNode\s*=\s*process\.platform===['"]win32['"]\?process\.execPath:['"]\/usr\/local\/bin\/node['"];[\s\S]*spawnSync\(trialNode/);
+  assert.match(plugin,/DSHA_TRIAL_STORAGE_RECORD_KEYS/);
+  assert.match(plugin,/hints\.reserve\(join\(process\.env\.DSHA_TRIAL_STORAGE_ROOT/);
+  assert.match(plugin,/Session\.create\(sessionId,\[\],\{version:4,id:sessionId,[\s\S]*cwd:process\.cwd\(\)/);
+  assert.match(builder,/SESSION_PERSISTENCE_JSONL_MODULE/);
+  assert.match(builder,/DSHA_SESSION_DIRECT_HINTS_V1/);
+  assert.match(builder,/resolveHintedGeneration/);
+  const runtimeTools=await fs.readFile(path.join(repository,'app/src/main/java/com/deepseekharness/app/runtime/RuntimeTools.java'),'utf8');
+  assert.match(runtimeTools,/runtime-patches\.json/);
+  assert.match(runtimeTools,/ManagedPatchChain\.apply/);
+  const shipped=await fs.readFile(path.join(testRuntime('managed'),'node_modules/@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js'),'utf8');
+  assert.match(shipped,/DSHA_SESSION_DIRECT_HINTS_V1[\s\S]*publishSessionExclusive|publishSessionExclusive[\s\S]*DSHA_SESSION_DIRECT_HINTS_V1/);
+});
+ await test('real_locked_json_backend_reopens_isolated_record',async()=>{
+  const {JsonStorageBackend}=await import(pathToFileURL(path.join(modules,'@deepseek-ai/dsh-storage-json/lib/index.js')));
+  const backend=new JsonStorageBackend(path.join(owned,'storage')),nonce=randomUUID().replaceAll('-','');
+  const descriptor={name:'dsha_trial_'+nonce,version:1,tables:['items'],hasGlobal:false,layout:'per-record'};
+  let unit=await backend.kv.open(descriptor);await unit.putRecord('items','probe',{nonce});await unit.close();
+  unit=await backend.kv.open(descriptor);assert.equal((await unit.loadAll()).tables.items.probe.nonce,nonce);await unit.close();await backend.close();
+ });
+ await test('trial_plugin_uses_isolated_dsh_home_and_real_json_backend',async()=>{
+  const {JsonStorageBackend}=await import(pathToFileURL(path.join(modules,'@deepseek-ai/dsh-storage-json/lib/index.js')));
+  const loaded=await loadTrialPlugin(),home=path.join(owned,'plugin-success'),nonce=randomUUID().replaceAll('-','');
+  const before={home:process.env.DSH_HOME,nonce:process.env.DSHA_RUNTIME_TRIAL_NONCE};
+  process.env.DSH_HOME=home;process.env.DSHA_RUNTIME_TRIAL_NONCE=nonce;
+  const backend=new JsonStorageBackend(path.join(home,'storages'));
+  try{
+   await loaded.plugin.apply(trialContext(backend));
+   const record=JSON.parse(await fs.readFile(path.join(home,'storages',`dsha_trial_${nonce}`,'items','probe.json'),'utf8'));
+   assert.equal(record.version,1);assert.equal(record.record.nonce,nonce);
+  }finally{
+   await backend.close();await fs.rm(loaded.directory,{recursive:true,force:true});
+   if(before.home===undefined)delete process.env.DSH_HOME;else process.env.DSH_HOME=before.home;
+   if(before.nonce===undefined)delete process.env.DSHA_RUNTIME_TRIAL_NONCE;else process.env.DSHA_RUNTIME_TRIAL_NONCE=before.nonce;
+  }
+ });
+ await test('trial_plugin_reports_bounded_kv_reopen_diagnostics',async()=>{
+  const {JsonStorageBackend}=await import(pathToFileURL(path.join(modules,'@deepseek-ai/dsh-storage-json/lib/index.js')));
+  const loaded=await loadTrialPlugin(),home=path.join(owned,'plugin-diagnostic'),nonce=randomUUID().replaceAll('-','');
+  const before={home:process.env.DSH_HOME,nonce:process.env.DSHA_RUNTIME_TRIAL_NONCE};
+  process.env.DSH_HOME=home;process.env.DSHA_RUNTIME_TRIAL_NONCE=nonce;
+  const real=new JsonStorageBackend(path.join(home,'storages'));let opened=0;
+  const backend=new Proxy(real,{get(target,property,receiver){
+   if(property==='kv')return {open:async descriptor=>{
+    const unit=await target.kv.open(descriptor);opened++;
+    if(opened!==2)return unit;
+    return {putRecord:(...args)=>unit.putRecord(...args),deleteRecord:(...args)=>unit.deleteRecord(...args),setGlobal:(...args)=>unit.setGlobal(...args),close:()=>unit.close(),loadAll:async()=>({tables:{items:{}},global:null})};
+   }};
+   return Reflect.get(target,property,receiver);
+  }});
+  try{
+   let failure;try{await loaded.plugin.apply(trialContext(backend))}catch(error){failure=error}
+   assert.ok(failure instanceof Error);
+   assert.match(failure.message,/^Trial KV reopen mismatch; DSHA_TRIAL_KV_DIAG=/);
+   const diagnostic=JSON.parse(failure.message.split('DSHA_TRIAL_KV_DIAG=')[1]);
+   assert.equal(diagnostic.backendRole,'JsonStorageBackend');assert.equal(diagnostic.rootRole,'dsh-home-storages');assert.equal(diagnostic.rootBase,'storages');
+   assert.equal(diagnostic.layout,'per-record');assert.equal(diagnostic.tableRole,'items');assert.equal(diagnostic.recordRole,'probe.json');
+   assert.equal(diagnostic.backendWrite,'ok');assert.equal(diagnostic.recordRead,'ok');assert.equal(diagnostic.recordBytesNonzero,true);assert.equal(diagnostic.recordParse,'ok');assert.equal(diagnostic.recordJsonObject,true);assert.equal(diagnostic.recordVersion,'match');assert.equal(diagnostic.recordNonce,'match');assert.equal(diagnostic.backendReload,'mismatch');
+   assert.equal(diagnostic.freshProcess.status,'not-attempted');
+   assert.equal(diagnostic.unitDirectory.expected,true);assert.equal(diagnostic.tableDirectory.expected,true);
+   assert.match(diagnostic.rootHash,/^[a-f0-9]{64}$/);assert.match(diagnostic.patch.entryHash,/^(?:[a-f0-9]{64}|unavailable)$/);
+   assert.equal(typeof diagnostic.patch.directRecordHints,'boolean');
+   assert.doesNotMatch(failure.message,new RegExp(home.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')));
+  }finally{
+   await real.close();await fs.rm(loaded.directory,{recursive:true,force:true});
+   if(before.home===undefined)delete process.env.DSH_HOME;else process.env.DSH_HOME=before.home;
+   if(before.nonce===undefined)delete process.env.DSHA_RUNTIME_TRIAL_NONCE;else process.env.DSHA_RUNTIME_TRIAL_NONCE=before.nonce;
+  }
+ });
+ await test('locked_session_header_contract',async()=>{
+  const {Session,SESSION_FORMAT_VERSION}=await import(pathToFileURL(path.join(modules,'@deepseek-ai/dsh-session/lib/index.js')));
+  const id=randomUUID(),session=Session.create(id);assert.equal(session.header.id,id);assert.equal(session.header.version,4);assert.equal(SESSION_FORMAT_VERSION,4);
+ });
+ const home='/root/.dsha-runtime-trial-'+ 'a'.repeat(32)+'/isolated-user-home';
+ const readyFrame={type:'item',streamId:'test-stream',value:{type:'ready',clientId:'test-client',host:{home}}};
+ const source=(await fs.readFile(path.join(repository,'app/src/main/assets/runtime-trial-page.js'),'utf8')).replace('__DSHA_TRIAL_NONCE__','a'.repeat(32)).replace('__DSHA_TRIAL_HOME__',JSON.stringify(home));
+ function browser(responses){let tick,cleared=0,requests=0;const sockets=[];
+  function Socket(){this.events={};this.addEventListener=(name,fn)=>{this.events[name]=fn};sockets.push(this)}
+  const context={window:{WebSocket:Socket,addEventListener(){}},URL,Object,JSON,location:{href:'http://127.0.0.1:3080/',host:'127.0.0.1:3080'},
+   document:{getElementById:()=>({children:[{}]}),querySelector:()=>null},setInterval(fn){tick=fn;return 7},clearInterval(id){assert.equal(id,7);cleared++},
+   fetch:async()=>{requests++;const response=responses.shift();if(response instanceof Error)throw response;return response||{ok:true}}};
+  vm.runInNewContext(source,context);return{connect(url='ws://127.0.0.1:3080/api/remote.mux',frame=readyFrame){new context.window.WebSocket(url);const socket=sockets.at(-1);socket.events.open?.();socket.events.message?.({data:JSON.stringify(frame)});},async tick(){tick();await new Promise(resolve=>setImmediate(resolve));},get requests(){return requests},get cleared(){return cleared}};
+ }
+ for(const response of [{ok:false},new Error('synthetic_network_failure')])await test('synthetic_renderer_retry_'+(response instanceof Error?'network':'http'),async()=>{
+  const page=browser([response,{ok:true}]);page.connect();await page.tick();assert.equal(page.requests,1);assert.equal(page.cleared,0);
+  await page.tick();assert.equal(page.requests,2);assert.equal(page.cleared,1);
+ });
+ await test('synthetic_foreign_socket_cannot_acknowledge_trial',async()=>{const page=browser([]);page.connect('ws://127.0.0.1:9999/socket');await page.tick();assert.equal(page.requests,0);assert.equal(page.cleared,0);});
+ await test('synthetic_error_or_unrelated_frame_is_not_a_backend_handshake',async()=>{for(const frame of [{type:'error',streamId:'bad',error:{}},{type:'item',streamId:'another',value:{message:'not ready'}}]){const page=browser([]);page.connect(undefined,frame);await page.tick();assert.equal(page.requests,0)}});
+ await test('synthetic_wrong_trial_home_cannot_acknowledge',async()=>{const page=browser([]);page.connect(undefined,{...readyFrame,value:{...readyFrame.value,host:{home:'/other-generation'}}});await page.tick();assert.equal(page.requests,0)});
+}catch{process.exitCode=1;}
+finally{
+ const report={version:1,platform:process.platform,node:process.version,fixture:'synthetic, private temporary directory',androidRendererVerified:false,results};
+ await fs.writeFile(path.join(parent,'runtime-trial-protocol.json'),JSON.stringify(report,null,2)+'\n');console.log(JSON.stringify(report));
+ const resolved=await fs.realpath(owned),allowed=await fs.realpath(parent);
+ if(!resolved.startsWith(allowed+path.sep)||!path.basename(resolved).startsWith('trial-protocol-'))throw Error('Unsafe fixture cleanup');
+ await fs.rm(resolved,{recursive:true});
+}

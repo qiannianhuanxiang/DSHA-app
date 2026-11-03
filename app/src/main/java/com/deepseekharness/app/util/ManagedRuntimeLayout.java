@@ -1,0 +1,114 @@
+package com.deepseekharness.app.util;
+
+import java.util.ArrayList;
+import java.util.List;
+
+/** APK 受管文件边界；会话、配置、项目和第三方插件从不属于局部更新目标。 */
+public final class ManagedRuntimeLayout {
+  private ManagedRuntimeLayout() {}
+
+  public static final String ROOT = GuestPaths.ROOT_RELATIVE + "/";
+  public static final String DSH = "usr/local/lib/node_modules/@deepseek-ai/dsh";
+
+  /** 原生能力命令（dsha-native.py 的入口）：Termux:API 风格包装与 dsha-am / dsha-su。 */
+  public static final String[] NATIVE_COMMANDS = {
+    "termux-clipboard-get",
+    "termux-clipboard-set",
+    "termux-notification",
+    "termux-toast",
+    "termux-vibrate",
+    "termux-torch",
+    "termux-open-url",
+    "termux-share",
+    "termux-location",
+    "termux-sensor",
+    "termux-battery-status",
+    "termux-dialog",
+    "termux-wake-lock",
+    "termux-wake-unlock",
+    "termux-info",
+    "dsha-am",
+    "dsha-su"
+  };
+
+  public static List<String> paths() {
+    List<String> out = new ArrayList<>();
+    out.add(DSH);
+    out.add("usr/local/share/dsha/dsh-runtime.version");
+    out.add("usr/local/share/dsha/ca-certificates.crt");
+    out.add("usr/local/share/dsha/dns-compat.cjs");
+    out.add("usr/local/share/dsha/managed-assets-v2");
+    out.add("etc/profile.d/dsha-runtime-env.sh");
+    out.add("usr/local/lib/dsha-pnpm");
+    out.add("root/.dsha-pnpm-version");
+    out.add("root/dsh-bin/pnpm");
+    out.add("root/dsha-builtin.txt");
+    out.add("root/dsha-app-integration");
+    for (String name : BuiltinPlugins.DEFAULT_BUILTINS)
+      out.add(BuiltinPlugins.entityDir(name).substring(1));
+    for (String name :
+        new String[] {
+          "plugin-manager.py",
+          "plugin-lifecycle.py",
+          "plugin-dependencies.py",
+          "plugin-transactions.py",
+          "materialize-cas-links.py",
+          "backup-plugin-graph.py",
+          "rc1-migration.py",
+          "rc1-settings-migration.cjs",
+          "plugin-semver.cjs",
+          "register-builtin-plugins.py",
+          "startup-observer.cjs",
+          "device-shell-policy.py",
+          "adb-shell.py",
+          "adb-pair.py",
+          "adb-setup.sh",
+          "script-version",
+          "builtin-plugins.json",
+          "runtime-tools.json",
+          "bridge-token-compat.cjs",
+          "dsha-native.py"
+        }) out.add("root/.dsh/" + name);
+    for (String name :
+        new String[] {"dsh", "npm", "npx", "dsha-plugin", "adb-shell", "install-ubuntu-tools"})
+      out.add("root/dsh-bin/" + name);
+    for (String name : NATIVE_COMMANDS) out.add("root/dsh-bin/" + name);
+    return out;
+  }
+
+  public static boolean alias(String path) {
+    if (path.equals("usr/local/bin/dsh")
+        || path.equals("usr/local/bin/tsc")
+        || path.equals("usr/local/bin/tsserver")) return true;
+    String prefix = "usr/local/lib/node_modules/";
+    if (!path.startsWith(prefix)) return false;
+    String name = path.substring(prefix.length());
+    return !name.equals("npm")
+        && !path.equals(DSH)
+        && name.matches("(?:@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*");
+  }
+
+  public static boolean allowed(String path) {
+    if (path == null || path.contains("..") || path.contains("\\") || path.startsWith("/"))
+      return false;
+    if (path.equals("linux/.offline-identity")
+        || path.equals("linux/.offline-version")
+        || path.equals("linux/.offline-extracted")) return true;
+    if (path.equals("linux/.runtime-descriptor.json") || path.equals("linux/.runtime-health.json"))
+      return true;
+    if (!path.startsWith(ROOT)) return false;
+    String relative = path.substring(ROOT.length());
+    return paths().contains(relative) || alias(relative);
+  }
+
+  public static boolean sameBase(String expected, String installed) {
+    if (expected == null || installed == null) return false;
+    String[] want = expected.split(":", -1), old = installed.split(":", -1);
+    return want.length == 3
+        && old.length == 3
+        && want[1].equals(old[1])
+        && want[1].matches("[0-9]{1,9}")
+        && old[0].matches("[0-9]{1,9}")
+        && old[2].matches("[A-Za-z0-9._+-]{1,80}");
+  }
+}

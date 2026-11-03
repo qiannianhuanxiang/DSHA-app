@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="adb_pairing_service_label">ADB 无线配对</string>
+    <string name="accessibility_service_label">DSHA 配对助手</string>
+</resources>

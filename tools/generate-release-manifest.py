@@ -1,0 +1,134 @@
+#!/usr/bin/env python3
+"""从最终 APK 生成官网/App 共用清单和 GitHub 发布说明，拒绝错误签名或混装。"""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import zipfile
+from urllib.parse import quote, urlparse
+from release_names import apk_filename, apk_name_version
+
+PUBLISH_CERT = json.loads((Path(__file__).resolve().parents[1]/'ci/release-identity.json').read_text(encoding='utf-8'))['certificateSha256']
+
+
+def release_channel(version, explicit=None):
+    """正式发布可沿用已验收的 rc 文件名，通道以显式发布决定为准。"""
+    if explicit is not None:
+        if explicit not in ('stable', 'preview'):
+            raise ValueError('无效发布通道')
+        return explicit
+    return 'preview' if '-' in version else 'stable'
+
+
+def retain_channels(current, previous):
+    """新预览发布时保留可下载的稳定版；官网仍展示首个当前发布。"""
+    if previous is None:
+        return [current]
+    if (previous.get('schemaVersion') != 1 or previous.get('packageName') != 'dsh.android.client'
+            or previous.get('certificateSha256') != PUBLISH_CERT):
+        raise ValueError('上一发布清单的结构、包名或签名不一致')
+    latest = {current['channel']: current}
+    for release in previous['releases']:
+        channel = release.get('channel')
+        if channel not in ('stable', 'preview') or not isinstance(release.get('versionCode'), int):
+            raise ValueError('上一发布清单的通道或版本码无效')
+        if release['versionCode'] > current['versionCode']:
+            raise ValueError('新发布的版本码不能低于已有发布')
+        if release['versionCode'] == current['versionCode']:
+            if release['version'] != current['version'] or channel != current['channel']:
+                raise ValueError('同一版本码不能更换版本名称或通道')
+            continue
+        if channel not in latest or release['versionCode'] > latest[channel]['versionCode']:
+            latest[channel] = release
+    return [current] + [value for channel, value in latest.items() if channel != current['channel']]
+
+
+def run(command):
+    return subprocess.check_output([str(x) for x in command], text=True, encoding='utf-8', errors='replace')
+
+
+def inspect(apk, flavor, build_tools, java):
+    badging = run([build_tools / ('aapt2.exe' if os.name == 'nt' else 'aapt2'), 'dump', 'badging', apk])
+    package = re.search(r"package: name='([^']+)' versionCode='(\d+)' versionName='([^']+)'", badging)
+    sdk = re.search(r"(?:minSdkVersion|sdkVersion):'(\d+)'", badging)
+    abi = re.search(r"native-code: (.+)", badging)
+    if not package or package[1] != 'dsh.android.client' or not sdk or not abi:
+        raise ValueError(f'{apk.name}: 无法读取 DSHA 包信息')
+    if int(sdk[1]) != (30 if flavor == 'standard' else 23) or abi[1].strip() != "'arm64-v8a'":
+        raise ValueError(f'{apk.name}: 系统要求或架构不匹配')
+    if 'application-debuggable' in badging:
+        raise ValueError(f'{apk.name}: 不允许发布调试包')
+    signing = run([java, '-jar', build_tools / 'lib/apksigner.jar', 'verify', '--min-sdk-version', '23', '--verbose', '--print-certs', apk])
+    certs = re.findall(r'Signer #\d+ certificate SHA-256 digest: ([a-fA-F0-9]+)', signing)
+    if [c.lower() for c in certs] != [PUBLISH_CERT]:
+        raise ValueError(f'{apk.name}: 与历史发布签名不一致')
+    for scheme in ('v1','v2','v3'):
+        if not re.search(r'Verified using '+scheme+r' scheme[^\n]+true',signing):raise ValueError('签名方案缺失:'+scheme)
+    with zipfile.ZipFile(apk) as archive:
+        runtime=json.loads(archive.read('assets/runtime-descriptor.json'))
+    digest = hashlib.sha256()
+    with apk.open('rb') as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b''):
+            digest.update(chunk)
+    return dict(filename=apk.name, flavor=flavor, minSdk=int(sdk[1]), abi='arm64-v8a',
+                bytes=apk.stat().st_size, sha256=digest.hexdigest(),
+                versionCode=int(package[2]), versionName=package[3], dshVersion=runtime['dshVersion'], runtimeId=runtime['runtimeId'])
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--standard', required=True, type=Path)
+    parser.add_argument('--low', required=True, type=Path)
+    parser.add_argument('--build-tools', required=True, type=Path)
+    parser.add_argument('--java', default='java')
+    parser.add_argument('--notes', required=True, type=Path)
+    parser.add_argument('--output', default='app/build/release-manifest.json', type=Path)
+    parser.add_argument('--previous-manifest', type=Path, help='上一份已发布更新清单；默认复用现有输出文件，保留另一通道')
+    parser.add_argument('--channel', choices=('stable', 'preview'), help='显式指定发布通道；正式推广已验收 rc 包时使用 stable')
+    parser.add_argument('--origin', default='https://dsha.cc')
+    args = parser.parse_args()
+    release_root = Path(__file__).resolve().parents[1] / 'release'
+    if args.output.resolve().is_relative_to(release_root.resolve()):
+        parser.error('--output 必须位于 release 之外；release 仅存放 APK 与 .apk.sha256')
+    previous_path = args.previous_manifest or args.output
+    previous = json.loads(previous_path.read_text(encoding='utf-8')) if previous_path.exists() else None
+    origin = args.origin.rstrip('/')
+    if urlparse(origin).scheme != 'https' or urlparse(origin).path:
+        parser.error('--origin 必须是 HTTPS 站点根地址')
+    artifacts = [inspect(args.standard, 'standard', args.build_tools, args.java),
+                 inspect(args.low, 'low', args.build_tools, args.java)]
+    version, code = artifacts[0]['versionName'], artifacts[0]['versionCode']
+    if not re.fullmatch(r'\d+\.\d+(?:\.\d+)?(?:-[A-Za-z0-9.-]+)?', version):
+        raise ValueError('版本名称无效')
+    if artifacts[1]['versionName'] != version + 'low' or artifacts[1]['versionCode'] != code:
+        raise ValueError('两版 APK 版本不一致')
+    if artifacts[0]['runtimeId']!=artifacts[1]['runtimeId'] or artifacts[0]['dshVersion']!=artifacts[1]['dshVersion']:
+        raise ValueError('两版受管运行身份不一致')
+    notes = args.notes.read_text(encoding='utf-8').strip()
+    download_version = apk_name_version()
+    for artifact, apk in zip(artifacts, (args.standard, args.low)):
+        expected = apk_filename(artifact['flavor'])
+        if artifact['filename'] != expected:
+            raise ValueError(f'发布文件名应为 {expected}')
+        artifact['url'] = origin + '/downloads/' + quote(download_version) + '/' + quote(artifact['filename'])
+        apk.with_suffix('.apk.sha256').write_bytes(f'{artifact["sha256"]}  {apk.name}\n'.encode('utf-8'))
+    release = dict(version=version, apkNameVersion=download_version, versionCode=code, channel=release_channel(version, args.channel),
+                   pageUrl=origin + '/download/', notes=notes, dshVersion=artifacts[0]['dshVersion'], runtimeId=artifacts[0]['runtimeId'], artifacts=artifacts)
+    manifest = dict(schemaVersion=1, packageName='dsh.android.client', certificateSha256=PUBLISH_CERT,
+                    releases=retain_channels(release, previous))
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+    github = f'# v{version}\n\n{notes}\n\n版本码 {code}；两版共享包名及历史发布签名。\n\n'
+    github += '| 版本 | 最低 Android API | 安装包 | 大小 | SHA-256 |\n|---|---:|---|---:|---|\n'
+    for a in artifacts:
+        url = f'https://github.com/DSH-APP/DSHA/releases/download/v{version}/{a["filename"]}'
+        github += f'| {a["flavor"]} | {a["minSdk"]} | [{a["filename"]}]({url}) | {a["bytes"]/1048576:.2f} MiB | `{a["sha256"]}` |\n'
+    args.output.with_name('github-release-body.md').write_text(github, encoding='utf-8')
+    print(f'已核验两份 APK：{version} / {code}，清单：{args.output}')
+
+
+if __name__ == '__main__':
+    main()

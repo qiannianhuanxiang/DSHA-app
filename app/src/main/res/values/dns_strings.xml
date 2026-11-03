@@ -1,0 +1,10 @@
+<resources>
+
+    <string name="dns_auto">自动兼容（推荐）</string>
+    <string name="dns_ipv4">IPv4 DNS 兼容</string>
+    <string name="dns_native">原生双栈解析</string>
+
+
+
+
+</resources>

@@ -1,0 +1,12 @@
+{
+  "dshVersion": "0.2.1-rc.3",
+  "module": "@deepseek-ai/dsh-llm-deepseek/lib/index.js",
+  "packageVersion": "0.2.1-rc.3",
+  "canonicalSourceSha256": "21fedb71f8d9aafea73b35ee13bc73737a8271d7ffa261697d4208e8563196cb",
+  "patches": [
+    {
+      "before": "\tconst model = connection.models.find((entry) => entry.id === options.model);\n\tconst inHistory =",
+      "after": "\t// DSHA_MESSAGES_TOOL_HISTORY_READ_ONLY_RC2_V1: validation precedes request serialization/HTTP.\n\tfor (const message of history) {\n\t\tif (message.role === \"assistant\" && message.content.some(block => block.type === \"tool-call\" && !(typeof block.id === \"string\" && block.id.trim() !== \"\" && typeof block.name === \"string\" && block.name.trim() !== \"\")))\n\t\t\tthrow new LlmError(\"DSHA_INVALID_TOOL_HISTORY: incomplete tool identity; retained history is read only. Start a new session.\", \"INVALID_REQUEST\");\n\t\tif (message.role === \"tool\" && (typeof message.toolCallId !== \"string\" || !message.toolCallId.trim()))\n\t\t\tthrow new LlmError(\"DSHA_INVALID_TOOL_HISTORY: missing result call id; retained history is read only.\", \"INVALID_REQUEST\");\n\t}\n\tconst model = connection.models.find((entry) => entry.id === options.model);\n\tconst inHistory ="
+    }
+  ]
+}

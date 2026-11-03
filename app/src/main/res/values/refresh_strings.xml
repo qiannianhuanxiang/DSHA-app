@@ -1,0 +1,32 @@
+<resources>
+
+    <string name="device_open_access">管理文件访问权限</string>
+
+
+
+
+
+
+
+
+
+
+
+    <string name="about_tagline">DeepSeek Harness 安卓启动器</string>
+
+    <string name="about_community">QQ 交流群</string>
+
+    <string name="about_close_button">关闭</string>
+
+
+
+    <string name="device_checking">正在读取授权状态…</string>
+    <string name="device_unrestricted_shell">不受限制的设备 shell</string>
+
+
+
+
+
+
+
+</resources>

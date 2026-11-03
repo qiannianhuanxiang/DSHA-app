@@ -1,0 +1,87 @@
+name: Source checks
+on:
+  push:
+    # 个人测试分支由各自工作流门禁；终端分支只运行 Standard。
+    # 保留本工作流历史合同，不在上述分支重复执行双 flavor 任务。
+    branches-ignore:
+      - Sunset-3090-Q
+      - Sunset-zhongdua-G
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: source-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify toolchain against source configuration
+        id: toolchain
+        run: python3 tools/ci-toolchain.py --github-output
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: ${{ steps.toolchain.outputs.java }}
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ steps.toolchain.outputs.node }}
+      - name: Verify checked-in contracts
+        run: |
+          python3 tools/prepare-runtime-tools.py --check
+          python3 tools/verify-runtime-descriptor-source.py
+          python3 tools/generate-third-party-notices.py --check
+          python3 tools/check-third-party-notices.py
+          python3 tools/generate-builtin-plugins.py --verify
+          python3 tools/generate-credential-paths.py --check
+          python3 tools/prepare-semver-reference.py
+          python3 tools/format-java-tree.py --check
+          python3 tools/run-host-tests.py --check-manifest
+          python3 tools/check-source-hygiene.py
+          python3 tools/check-ui-i18n.py
+          python3 tools/generate-changelog.py --check
+          python3 tools/check-document-links.py
+      - name: Isolated source and protocol regressions
+        run: python3 tools/run-host-tests.py --stage fast
+      - name: Source-only Standard unit tests (up to five external-fixture skips)
+        run: |
+          platform=$(python3 tools/ci-toolchain.py --field androidPlatform)
+          buildtools=$(python3 tools/ci-toolchain.py --field buildTools)
+          sdkmanager "platforms;$platform" "build-tools;$buildtools"
+          chmod +x gradlew
+          ./gradlew :app:testStandardDebugUnitTest -Pdsha.sourceOnlyTests=true -x :app:prepareStandardAssets -x :app:prepareRecoveryAssets --no-daemon --max-workers=2
+      - name: Report source-only test scope
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+          lines = ["### Source-only unit tests",
+                   "This job is not a complete fixed-input test run. Only the five Standard external-fixture tests may skip for missing inputs; existing inputs remain validated."]
+          for flavor in ("Standard",):
+              reports = list(Path(f"app/build/test-results/test{flavor}DebugUnitTest").glob("TEST-*.xml"))
+              if not reports:
+                  lines.append(f"- {flavor}: no JUnit reports; execution not established.")
+                  continue
+              suites = [ET.parse(report).getroot() for report in reports]
+              counts = {key: sum(int(suite.get(key, "0")) for suite in suites)
+                        for key in ("tests", "failures", "errors", "skipped")}
+              lines.append(f"- {flavor}: " + ", ".join(f"{key}={value}" for key, value in counts.items()))
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write("\n".join(lines) + "\n")
+          PY
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: source-regressions
+          path: |
+            app/build/host-tests
+            app/build/test-results
+          if-no-files-found: error
+          retention-days: 14

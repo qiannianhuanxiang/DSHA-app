@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent" android:layout_height="match_parent"
+    android:background="@color/terminal_surface" android:orientation="vertical">
+
+    <!-- 正常会话没有常驻标题；只显示启动、关闭或退出等必要状态。 -->
+    <TextView android:id="@+id/pty_title" android:layout_width="match_parent"
+        android:layout_height="wrap_content" android:padding="6dp"
+        android:textColor="@color/terminal_foreground" android:textSize="13sp"
+        android:visibility="gone" android:textIsSelectable="true" />
+
+    <!-- 仅保留旧夹具ID；生产入口由 TerminalPane 宿主菜单提供。 -->
+    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:orientation="vertical" android:visibility="gone"
+        android:importantForAccessibility="noHideDescendants">
+        <TextView android:id="@+id/pty_font_dec" android:layout_width="wrap_content"
+            android:layout_height="48dp" android:text="@string/ui_font_smaller" />
+        <TextView android:id="@+id/pty_font_inc" android:layout_width="wrap_content"
+            android:layout_height="48dp" android:text="@string/ui_font_larger" />
+        <TextView android:id="@+id/pty_simple" android:layout_width="wrap_content"
+            android:layout_height="48dp" android:text="@string/ui_m0177" />
+        <include layout="@layout/view_terminal_tabs" />
+    </LinearLayout>
+
+    <view class="com.deepseekharness.app.ui.PtyTerminalFragment$InputFrame"
+        android:id="@+id/pty_input_frame" android:layout_width="match_parent" android:layout_height="0dp"
+        android:layout_weight="1" android:paddingStart="2dp" android:paddingEnd="2dp">
+        <com.termux.view.TerminalView
+            android:id="@+id/pty_view" android:layout_width="match_parent"
+            android:layout_height="match_parent" android:background="@color/terminal_surface"
+            android:layoutDirection="ltr" android:focusable="true" android:focusableInTouchMode="true" />
+        <TextView android:id="@+id/pty_empty" android:layout_width="match_parent"
+            android:layout_height="match_parent" android:gravity="center" android:padding="24dp"
+            android:text="@string/ui_m0145" android:textColor="@color/terminal_foreground"
+            android:visibility="gone" />
+    </view>
+
+    <LinearLayout android:id="@+id/pty_keys" android:layout_width="match_parent"
+        android:layout_height="wrap_content" android:orientation="vertical"
+        android:layoutDirection="ltr" />
+</LinearLayout>

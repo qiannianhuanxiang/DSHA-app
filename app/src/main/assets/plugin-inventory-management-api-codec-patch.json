@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "dshVersion": "0.2.1-rc.3",
+  "module": "@deepseek-ai/dsh-api-remotes/lib/client.js",
+  "sourceSha256": "f149235a96b9366b17f29dd466caff6fc5c299c136658b31855ff17c1bf112b6",
+  "patches": [
+    {
+      "before": "const TYPERT_REMOTE$11 = createTypertRemoteInfo({\n\t\t\tpackage: \"@deepseek-ai/dsh-host-plugin-inventory\",\n\t\t\tmethods: { \"pluginInventory/list\": {",
+      "after": "const TYPERT_REMOTE$11 = createTypertRemoteInfo({\n\t\t\tpackage: \"@deepseek-ai/dsh-host-plugin-inventory\",\n\t\t\tmethods: {\n// DSHA_PLUGIN_MANAGEMENT_API_CODEC_V1\n'pluginInventory/management': {\n service: 'pluginInventory',\n description: 'Read only the current management Service capability. This does not prove activation or mutation completion; list retains full diagnostics.',\n invocation: { kind: 'direct' },\n parameters: [],\n result: { mode: 'strict', typeSymbol: '@deepseek-ai/dsh-host-plugin-inventory#ManagementCapability', create: () => zod.z.object({ managementAvailable: zod.z.boolean().readonly() }), description: 'Live presence of the current pluginManager Service.' },\n},\n\"pluginInventory/list\": {"
+    }
+  ],
+  "packageIntegrity": "sha512-Y9hs4P7dcLTlf8ZEsj/9zHPhNMz91G5LLTOgGyj34Qs+51bXgl3IZN5DDAZakB/6BrdANfuyPzPLwnZ4z1iW6A=="
+}

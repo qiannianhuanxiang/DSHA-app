@@ -1,0 +1,12 @@
+{
+  "dshVersion": "0.2.1-rc.3",
+  "module": "@deepseek-ai/dsh-client-ui-plugin-manager/lib/client.js",
+  "patches": [
+    {
+      "before": "enabled: subject.selection ?? false,",
+      "after": "enabled: subject.selection ?? true, // DSHA_NEW_INSTALL_ENABLED_V2: retain explicit catalog selection, including false."
+    }
+  ],
+  "sourceSha256": "61beea0fe856b054fe9dee4cfa5492f54df973ffd18ab85d5ea37beff52991d1",
+  "packageIntegrity": "sha512-krOW4/f4tdUbbW4hZ97LNxdVTIjZR3axp400zaJiSJ+FQTuVKlIMxYN8OCnYBaWCCpClhoARp+WYZgG53hbRpw=="
+}

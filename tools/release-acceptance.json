@@ -1,0 +1,245 @@
+{
+  "schema": 1,
+  "baseDeviceChecks": [
+    "web-ready",
+    "existing-data-preserved",
+    "plugins-visible",
+    "recovery-ready",
+    "no-crash"
+  ],
+  "changeRules": [
+    {
+      "id": "system-language",
+      "paths": [
+        "*/util/SystemLanguage.java",
+        "*/util/AppLocaleDispatch.java",
+        "*/util/UiLanguagePreference.java",
+        "*/ui/LanguageController.java"
+      ],
+      "flavors": [
+        "standard",
+        "low"
+      ],
+      "deviceChecks": [
+        "native-language-follow-system"
+      ]
+    },
+    {
+      "id": "documents-provider",
+      "paths": [
+        "*/DshaDocumentsProvider.java",
+        "*/util/DocumentPaths.java",
+        "*/backup/UserDataLayout.java",
+        "*/backup/AndroidBackupFileSystem.java"
+      ],
+      "flavors": [
+        "standard",
+        "low"
+      ],
+      "deviceChecks": [
+        "document-provider-files"
+      ]
+    },
+    {
+      "id": "browser-upload",
+      "paths": [
+        "*/ui/WebPreviewActivity.java",
+        "*/ui/GeckoPreviewActivity.java",
+        "*/ui/WebUploads.java",
+        "*/util/BrowserUploadRequestState.java",
+        "*/util/WebUploadSessionBudget.java"
+      ],
+      "flavors": [
+        "standard",
+        "low"
+      ],
+      "deviceChecks": [
+        "two-file-upload",
+        "upload-navigation-cancel"
+      ]
+    },
+    {
+      "id": "recovery-browser",
+      "paths": [
+        "*/ui/Recovery*Surface.java",
+        "*/ui/RecoveryWebActivity.java",
+        "*/ui/RecoveryActivity.java",
+        "*/ui/WebPageScripts.java",
+        "*/util/RecoveryLocalePolicy.java",
+        "*/util/RecoveryStatusText.java",
+        "*/recovery/RecoveryRuntime.java",
+        "*/assets/recovery-web-integration/*",
+        "*/assets/web-integration/es-compat.js",
+        "*/assets/web-integration/compat.js",
+        "*/assets/web-integration/startup.js",
+        "*/assets/pdf-compat-patch.json",
+        "*/assets/language-patch.json",
+        "*/assets/web-integration/language.js",
+        "tools/prepare-recovery-assets.py",
+        "tools/recovery_runtime_overlay.py"
+      ],
+      "flavors": [
+        "standard",
+        "low"
+      ],
+      "deviceChecks": [
+        "recovery-language-rotation"
+      ]
+    },
+    {
+      "id": "retained-history",
+      "paths": [
+        "*/ui/RetainedDataActivity.java",
+        "*/backup/RetainedCatalogue.java",
+        "*/ui/NativeDataActivity.java"
+      ],
+      "flavors": [
+        "standard",
+        "low"
+      ],
+      "deviceChecks": [
+        "retained-history-pagination"
+      ]
+    },
+    {
+      "id": "maintenance",
+      "paths": [
+        "*/core/MaintenanceCoordinator.java",
+        "*/core/RuntimeTasks.java",
+        "*/util/MaintenanceGate.java",
+        "*/util/RuntimeWorkPort.java",
+        "*/core/HarnessController.java",
+        "*/runtime/RuntimeHostPorts.java",
+        "*/core/ConfigStore.java",
+        "*/DshaApp.java",
+        "*/PtySession.java",
+        "*/core/TerminalSessionOwner.java",
+        "*/core/SimpleTerminalBackend.java",
+        "*/util/TerminalSession.java",
+        "*/util/TerminalTabs.java",
+        "*/ui/TerminalFragment.java",
+        "*/ui/PtyTerminalFragment.java"
+      ],
+      "flavors": [
+        "standard",
+        "low"
+      ],
+      "deviceChecks": [
+        "terminal-close-and-web-restart"
+      ]
+    },
+    {
+      "id": "bounded-proroot",
+      "paths": [
+        "*/runtime/IsolatedInstallProcess.java",
+        "*/runtime/BoundedGuestLifetime.java",
+        "*/core/DiagnosticRepository.java",
+        "tools/native-session/*",
+        "app/src/main/jniLibs/arm64-v8a/libdsha-session.so",
+        "*/runtime/RuntimeHostPorts.java",
+        "*/runtime/ProotBootstrap.java",
+        "*/runtime/BoundedGuestSessions.java",
+        "*/core/ConfigStore.java",
+        "*/DshaApp.java"
+      ],
+      "flavors": [
+        "standard",
+        "low"
+      ],
+      "deviceChecks": [
+        "bounded-proroot-diagnostic"
+      ]
+    },
+    {
+      "id": "microphone",
+      "paths": [
+        "*/ui/BrowserMicrophone.java",
+        "*/ui/WebViewMicrophone.java",
+        "*/ui/GeckoMicrophoneDelegate.java",
+        "*/util/Microphone*.java"
+      ],
+      "flavors": [
+        "standard",
+        "low"
+      ],
+      "deviceChecks": [
+        "microphone-origin-and-cancellation"
+      ]
+    },
+    {
+      "id": "screen-grant",
+      "paths": [
+        "*/util/ScreenSessionGrant.java",
+        "*/HttpShellService.java"
+      ],
+      "flavors": [
+        "standard",
+        "low"
+      ],
+      "deviceChecks": [
+        "screen-confirmation-revocation"
+      ]
+    },
+    {
+      "id": "plugin-install-flow",
+      "paths": [
+        "*/core/PluginRepository.java",
+        "*/ui/PluginFragment.java"
+      ],
+      "flavors": [
+        "standard",
+        "low"
+      ],
+      "deviceChecks": [
+        "plugin-install-auto"
+      ]
+    },
+    {
+      "id": "plugin-downloads",
+      "paths": [
+        "app/src/main/assets/plugin-network.py",
+        "app/src/main/assets/plugin-manager.py",
+        "app/src/main/assets/plugin-dependencies.py",
+        "app/src/main/assets/plugin-lifecycle.py",
+        "*/util/PluginDownloadSource.java",
+        "app/src/main/res/layout/plugin_list_header.xml"
+      ],
+      "flavors": [
+        "standard",
+        "low"
+      ],
+      "deviceChecks": [
+        "plugin-download-sources",
+        "plugin-install-commit"
+      ]
+    },
+    {
+      "id": "background-lan",
+      "paths": [
+        "*/HarnessService.java",
+        "*/ForegroundActivity.java",
+        "*/util/PowerPolicy.java"
+      ],
+      "flavors": [
+        "standard",
+        "low"
+      ],
+      "deviceChecks": [
+        "lan-background-requests"
+      ]
+    },
+    {
+      "id": "legacy-install-status",
+      "paths": [
+        "*/util/IsolatedCommand.java"
+      ],
+      "flavors": [
+        "standard",
+        "low"
+      ],
+      "deviceChecks": [
+        "bounded-proroot-diagnostic"
+      ]
+    }
+  ]
+}

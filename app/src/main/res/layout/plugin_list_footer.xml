@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 插件页尾部（UI v5）：空状态 + 本地插件导入/导出；保留 PluginFragment 使用的 id。 -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android" xmlns:app="http://schemas.android.com/apk/res-auto" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical">
+
+    <TextView android:id="@+id/pluginEmpty" style="@style/ShellStatusText" android:layout_width="match_parent" android:layout_height="wrap_content" android:gravity="center" android:padding="16dp" android:visibility="gone" />
+
+    <TextView android:id="@+id/pluginLocalTitle" style="@style/ShellSectionLabel" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="20dp" android:layout_marginBottom="10dp" android:text="@string/ui2_local_plugins" />
+
+    <LinearLayout android:id="@+id/pluginLocalCard" style="@style/ShellCard" android:layout_width="match_parent" android:layout_height="wrap_content">
+
+        <LinearLayout android:id="@+id/btnImport" style="@style/ShellRow" android:layout_width="match_parent" android:layout_height="wrap_content">
+            <ImageView style="@style/ShellRowIcon" android:layout_width="@dimen/shell_row_icon" android:layout_height="@dimen/shell_row_icon" android:contentDescription="@null" android:src="@drawable/ic_ui_import" />
+            <LinearLayout android:layout_width="0dp" android:layout_height="wrap_content" android:layout_marginStart="12dp" android:layout_weight="1" android:orientation="vertical">
+                <TextView style="@style/ShellRowTitle" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/ui2_import" />
+                <TextView style="@style/ShellRowSub" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="4dp" android:text="@string/ui2_import_sub" />
+            </LinearLayout>
+            <ImageView android:layout_width="@dimen/shell_row_chevron" android:layout_height="@dimen/shell_row_chevron" android:contentDescription="@null" android:src="@drawable/ic_ui2_chevron" app:tint="@color/shell_text_muted" />
+        </LinearLayout>
+
+        <View style="@style/ShellDivider" />
+
+        <LinearLayout android:id="@+id/btnExport" style="@style/ShellRow" android:layout_width="match_parent" android:layout_height="wrap_content">
+            <ImageView style="@style/ShellRowIcon" android:layout_width="@dimen/shell_row_icon" android:layout_height="@dimen/shell_row_icon" android:contentDescription="@null" android:src="@drawable/ic_ui_export" />
+            <LinearLayout android:layout_width="0dp" android:layout_height="wrap_content" android:layout_marginStart="12dp" android:layout_weight="1" android:orientation="vertical">
+                <TextView style="@style/ShellRowTitle" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/ui2_export" />
+                <TextView style="@style/ShellRowSub" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="4dp" android:text="@string/ui2_export_sub" />
+            </LinearLayout>
+            <ImageView android:layout_width="@dimen/shell_row_chevron" android:layout_height="@dimen/shell_row_chevron" android:contentDescription="@null" android:src="@drawable/ic_ui2_chevron" app:tint="@color/shell_text_muted" />
+        </LinearLayout>
+    </LinearLayout>
+
+    <Button android:id="@+id/btnPluginRestore" style="@style/ShellSecondaryButton" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="10dp" android:layout_marginBottom="10dp" android:text="@string/ui_m0104" android:visibility="gone" />
+</LinearLayout>

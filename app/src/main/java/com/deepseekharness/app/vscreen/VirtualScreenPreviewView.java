@@ -1,0 +1,240 @@
+package com.deepseekharness.app.vscreen;
+
+import android.content.Context;
+import android.graphics.Bitmap;
+import android.graphics.Matrix;
+import android.view.MotionEvent;
+import android.view.ScaleGestureDetector;
+import androidx.appcompat.widget.AppCompatImageView;
+import org.json.JSONObject;
+
+/** 预览矩阵同时用于显示和逆向映射，黑边不能变成虚拟屏坐标。 */
+final class VirtualScreenPreviewView extends AppCompatImageView {
+  interface Touch {
+    void input(
+        String generation, long seq, float x1, float y1, float x2, float y2, int ms, boolean tap);
+
+    void stream(String generation, long seq, String stroke, int action, float x, float y);
+
+    default boolean streamAvailable() {
+      return true;
+    }
+
+    default boolean admit(JSONObject displayed, String stroke) {
+      return true;
+    }
+  }
+
+  private final Matrix matrix = new Matrix(), inverse = new Matrix();
+  private final ScaleGestureDetector scale;
+  private Bitmap bitmap;
+  private float zoom = 1, offsetX, offsetY, downX, downY, lastX, lastY;
+  private int screenW, screenH;
+  private String generation = "";
+  private long seq = -1, downAt;
+  private JSONObject displayed;
+  private boolean touching, transformed, pan;
+  private long lastStream;
+  private final com.deepseekharness.app.util.TouchGestureDispatch gesture =
+      new com.deepseekharness.app.util.TouchGestureDispatch();
+  Touch listener;
+
+  VirtualScreenPreviewView(Context c) {
+    super(c);
+    setScaleType(ScaleType.MATRIX);
+    setBackgroundColor(0xff101218);
+    scale =
+        new ScaleGestureDetector(
+            c,
+            new ScaleGestureDetector.SimpleOnScaleGestureListener() {
+              @Override
+              public boolean onScale(ScaleGestureDetector d) {
+                zoom = Math.max(1, Math.min(4, zoom * d.getScaleFactor()));
+                transformed = true;
+                fit();
+                return true;
+              }
+            });
+    setContentDescription(
+        com.deepseekharness.app.util.UiText.choose(
+            "虚拟屏预览，双指缩放", "Virtual screen preview, pinch to zoom"));
+  }
+
+  void pan(boolean enabled) {
+    if (enabled) cancelStream();
+    pan = enabled;
+  }
+
+  void cancelStream() {
+    gesture.cancel();
+    touching = false;
+  }
+
+  boolean frame(Bitmap next, JSONObject value) {
+    if (touching) {
+      next.recycle();
+      return false;
+    }
+    if (screenW != value.optInt("width") || screenH != value.optInt("height")) {
+      zoom = 1;
+      offsetX = offsetY = 0;
+    }
+    screenW = value.optInt("width");
+    screenH = value.optInt("height");
+    seq = value.optLong("frameSeq", -1);
+    generation = value.optString("generation");
+    displayed = value;
+    Bitmap old = bitmap;
+    bitmap = next;
+    setImageBitmap(next);
+    fit();
+    if (old != null && old != next) old.recycle();
+    return true;
+  }
+
+  /** A capture gap invalidates input immediately without flashing a live display black. */
+  boolean unavailable(String code, String activeGeneration) {
+    boolean frameGap =
+        switch (code) {
+          case "STALE_FRAME", "FRAME_NOT_READY", "FRAME_ENCODE_FAILED" -> true;
+          default -> false;
+        };
+    boolean retain =
+        frameGap
+            && bitmap != null
+            && activeGeneration != null
+            && !activeGeneration.isEmpty()
+            && activeGeneration.equals(generation);
+    cancelStream();
+    seq = -1;
+    displayed = null;
+    if (!retain) clear();
+    return retain;
+  }
+
+  void clear() {
+    cancelStream();
+    setImageDrawable(null);
+    if (bitmap != null) bitmap.recycle();
+    bitmap = null;
+    seq = -1;
+    displayed = null;
+  }
+
+  @Override
+  protected void onSizeChanged(int w, int h, int oldW, int oldH) {
+    super.onSizeChanged(w, h, oldW, oldH);
+    fit();
+  }
+
+  private void fit() {
+    if (bitmap == null) return;
+    float factor =
+        Math.min(getWidth() / (float) bitmap.getWidth(), getHeight() / (float) bitmap.getHeight())
+            * zoom;
+    float maxX = Math.max(0, (bitmap.getWidth() * factor - getWidth()) / 2),
+        maxY = Math.max(0, (bitmap.getHeight() * factor - getHeight()) / 2);
+    offsetX = Math.max(-maxX, Math.min(maxX, offsetX));
+    offsetY = Math.max(-maxY, Math.min(maxY, offsetY));
+    matrix.reset();
+    matrix.postScale(factor, factor);
+    matrix.postTranslate(
+        (getWidth() - bitmap.getWidth() * factor) / 2 + offsetX,
+        (getHeight() - bitmap.getHeight() * factor) / 2 + offsetY);
+    setImageMatrix(matrix);
+  }
+
+  private float[] point(float x, float y) {
+    if (bitmap == null || !matrix.invert(inverse)) return null;
+    float[] p = {x, y};
+    inverse.mapPoints(p);
+    if (p[0] < 0 || p[1] < 0 || p[0] >= bitmap.getWidth() || p[1] >= bitmap.getHeight())
+      return null;
+    p[0] = p[0] * screenW / bitmap.getWidth();
+    p[1] = p[1] * screenH / bitmap.getHeight();
+    return p;
+  }
+
+  @Override
+  public boolean onTouchEvent(MotionEvent e) {
+    scale.onTouchEvent(e);
+    switch (e.getActionMasked()) {
+      case MotionEvent.ACTION_DOWN:
+        touching = true;
+        transformed = false;
+        downX = lastX = e.getX();
+        downY = lastY = e.getY();
+        downAt = lastStream = android.os.SystemClock.elapsedRealtime();
+        final Touch target = listener;
+        final String frameGeneration = generation, stroke = java.util.UUID.randomUUID().toString();
+        final long frameSeq = seq;
+        float[] start = point(downX, downY);
+        boolean enabled = target != null && !pan && seq > 0 && start != null;
+        boolean admitted = enabled && target.admit(displayed, stroke);
+        touching = admitted;
+        gesture.down(
+            target == null
+                ? null
+                : new com.deepseekharness.app.util.TouchGestureDispatch.Sink() {
+                  public void stream(int action, float x, float y) {
+                    target.stream(frameGeneration, frameSeq, stroke, action, x, y);
+                  }
+
+                  public void input(
+                      float x1, float y1, float x2, float y2, int duration, boolean tap) {
+                    target.input(frameGeneration, frameSeq, x1, y1, x2, y2, duration, tap);
+                  }
+                },
+            target != null && target.streamAvailable(),
+            admitted,
+            start);
+        getParent().requestDisallowInterceptTouchEvent(true);
+        return true;
+      case MotionEvent.ACTION_POINTER_DOWN:
+        cancelStream();
+        transformed = true;
+        return true;
+      case MotionEvent.ACTION_MOVE:
+        if (pan || e.getPointerCount() > 1) {
+          cancelStream();
+          offsetX += e.getX() - lastX;
+          offsetY += e.getY() - lastY;
+          transformed = true;
+          fit();
+        } else if (android.os.SystemClock.elapsedRealtime() - lastStream > 24) {
+          gesture.move(point(e.getX(), e.getY()));
+          lastStream = android.os.SystemClock.elapsedRealtime();
+        }
+        lastX = e.getX();
+        lastY = e.getY();
+        return true;
+      case MotionEvent.ACTION_UP:
+        touching = false;
+        getParent().requestDisallowInterceptTouchEvent(false);
+        if (transformed || pan) cancelStream();
+        else {
+          boolean tap =
+              Math.hypot(e.getX() - downX, e.getY() - downY)
+                  < android.view.ViewConfiguration.get(getContext()).getScaledTouchSlop();
+          if (gesture.up(
+              point(e.getX(), e.getY()),
+              (int) Math.min(3000, android.os.SystemClock.elapsedRealtime() - downAt),
+              tap)) performClick();
+        }
+        return true;
+      case MotionEvent.ACTION_CANCEL:
+        cancelStream();
+        touching = false;
+        getParent().requestDisallowInterceptTouchEvent(false);
+        return true;
+      default:
+        return true;
+    }
+  }
+
+  @Override
+  public boolean performClick() {
+    super.performClick();
+    return true;
+  }
+}

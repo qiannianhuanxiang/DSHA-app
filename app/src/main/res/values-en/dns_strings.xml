@@ -1,0 +1,10 @@
+<resources>
+
+    <string name="dns_auto">Automatic compatibility (recommended)</string>
+    <string name="dns_ipv4">IPv4 DNS compatibility</string>
+    <string name="dns_native">Native dual-stack resolution</string>
+
+
+
+
+</resources>

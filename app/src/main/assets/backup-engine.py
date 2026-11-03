@@ -1,0 +1,1005 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""备份格式 v3：独立快照、逐文件摘要、预检和可回滚的多目录提交。
+
+只在容器内运行；--root 可指向独立测试目录。旧归档先归一化，绝不按归档
+中的绝对链接写入宿主目录。备份与预检均不修改运行中的 .dsh。
+"""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path, PurePosixPath
+import re
+import shutil
+import stat
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+import uuid
+from contextlib import contextmanager
+
+SCOPES = {"full": None, "sessions": ("sessions", "storages", "attachments"),
+          "settings": ("settings.yaml",),
+          "plugins": ("profiles", "plugin-src", "plugin-sources.json", "plugin-history", "plugin-safe-mode.json")}
+HOT = ("sessions", "storages", "attachments", "settings.yaml")
+MANIFEST = ".dsha-backup-manifest.json"
+# 离线安装用户的 API key 不会落到工作目录 .env。备份时由 Android
+# 的 native-config 按「包含 API Key」开关显式注入这个受控文件；源树中
+# 若残留旧文件也不能在用户关闭开关后意外随包带走。
+def credential_paths():
+    base = Path(__file__).resolve().parent
+    for path in (base / 'credential-paths.json', base / '.dsha-credential-paths.json', base / '.dsh/credential-paths.json'):
+        if not path.is_file(): continue
+        value = json.loads(path.read_text(encoding='utf8'))
+        if value.get('schemaVersion') != 1:
+            raise ValueError('CREDENTIAL_PATHS_INVALID')
+        for section, field in (('externalMachine','exact'),('externalMachine','prefixes'),('backupMachine','additionalExact')):
+            entries = (value.get(section) or {}).get(field)
+            if not isinstance(entries,list) or any(not isinstance(name,str) or not name or '/' in name or '\\' in name for name in entries):
+                raise ValueError('CREDENTIAL_PATHS_INVALID')
+        for entry in value.get('sessionExclusions',[]):
+            if not isinstance(entry,dict) or not isinstance(entry.get('root'),str) or not isinstance(entry.get('relative'),str) or '/' in entry['relative'] or '\\' in entry['relative'] or entry['relative'] in ('','..','.'):
+                raise ValueError('CREDENTIAL_PATHS_INVALID')
+        key=(value.get('names') or {}).get('legacyApiKey')
+        if not isinstance(key,str) or not key or '/' in key or '\\' in key:
+            raise ValueError('CREDENTIAL_PATHS_INVALID')
+        return value
+    raise ValueError('CREDENTIAL_PATHS_MISSING')
+
+
+_CREDENTIAL_PATHS = credential_paths()
+API_KEY_FILE = _CREDENTIAL_PATHS['names']['legacyApiKey']
+# 属于「这台机器」而不是用户的凭据/标识：换机后无意义，恢复后由对应组件重新生成。
+# 实测确认：把它们打进备份等于把可用凭据写进公共目录（见 docs/security-model.md）。
+LOCAL_DEVICE_FILES = set(_CREDENTIAL_PATHS['externalMachine']['exact']) | set(_CREDENTIAL_PATHS['backupMachine']['additionalExact'])
+LOCAL_DEVICE_PREFIXES = tuple(_CREDENTIAL_PATHS['externalMachine']['prefixes'])
+
+
+def machine_name(name):
+    return name in LOCAL_DEVICE_FILES or name.startswith(LOCAL_DEVICE_PREFIXES)
+
+
+def root_exclusions(name):
+    return {entry['relative'] for entry in _CREDENTIAL_PATHS['sessionExclusions'] if entry['root'] == name}
+# 凭据文件里需要剔除的「本机」记录（字段级剔除，保留用户的 API key）
+CREDENTIAL_FILE = ".credentials.yaml"
+CREDENTIAL_RECORDS = ("client-connection/",)
+SKIP = {".pnpm-store", ".cache", "session_projcache", "dist-cache",
+        "node_modules", MANIFEST, ".dsha-plugin-src", "DSHA-README.txt"}
+# 这个文件由 make_backup 根据 native-config 重新生成，避免复制旧的或
+# 用户手工留下的明文凭据。它仍会进入清单，恢复侧可以在需要时回填。
+SKIP.add(API_KEY_FILE)
+# 仅排除 App 管理的顶层缓存；插件内同名目录与配对密钥均属于备份内容。
+TOP_CACHE = {"plugin-previews", "plugin-updates.json", ".plugins.lock"}
+# APK 管理的缓存只有摘要一致时才排除；用户修改或另加的文件仍备份。
+def adb_wheel_identity():
+    base = Path(__file__).resolve().parent
+    for path in (base / 'adb-wheels.lock.json', base / '.dsha-adb-wheels.lock.json', base / '.dsh/adb-wheels.lock.json'):
+        if not path.is_file(): continue
+        value = json.loads(path.read_text(encoding='utf8'))
+        wheels = value.get('wheels')
+        if value.get('schema') != 1 or not re.fullmatch('[a-f0-9]{64}', str(value.get('archiveSha256', ''))) or not isinstance(wheels, dict) or any(not re.fullmatch('[a-f0-9]{64}', str(sha)) for sha in wheels.values()):
+            raise ValueError('ADB_WHEEL_IDENTITY_INVALID')
+        return value
+    raise ValueError('ADB_WHEEL_IDENTITY_MISSING')
+
+
+_ADB_WHEEL_IDENTITY = adb_wheel_identity()
+ADB_ARCHIVE_SHA256 = _ADB_WHEEL_IDENTITY['archiveSha256']
+ADB_WHEEL_CACHE = _ADB_WHEEL_IDENTITY['wheels']
+MAX_BYTES = 16 * 1024 ** 3
+MAX_FILES = 300000
+RESERVE = 32 * 1024 ** 2
+GLOBAL_NM = (Path("/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules"),
+             Path("/usr/local/lib/node_modules"))
+
+
+def package_name(name):
+    return isinstance(name, str) and re.fullmatch(r"(?:@[A-Za-z0-9_-][A-Za-z0-9._-]*/)?[A-Za-z0-9_-][A-Za-z0-9._-]*", name)
+
+
+def dump(path, value):
+    path = Path(path)
+    tmp = path.with_name(path.name + ".tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        json.dump(value, f, ensure_ascii=False, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+def digest(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def remove(path):
+    path = Path(path)
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.exists():
+        shutil.rmtree(path)
+
+
+def unlink_symlink(path):
+    """若目标是软链，先摘掉**链接本身**再让调用方建普通文件。
+
+    O_EXCL 会拒绝已有的符号链接（包括悬空链接）。此处只摘掉暂存槽位
+    中的链接本身，使受控恢复可以发布普通文件；不能沿链接覆盖目标。
+    """
+    path = Path(path)
+    if path.is_symlink():
+        path.unlink()
+
+
+def trim_local_records(text, prefixes=CREDENTIAL_RECORDS):
+    """Use the pinned YAML parser, remove local records, fail closed on unsupported input."""
+    if len(text.encode('utf8')) > 1024 * 1024:
+        raise ValueError('CREDENTIAL_TRIM_FAILED')
+    if not text.strip():
+        return text, []
+    base = Path(__file__).resolve().parent
+    scripts = (base / 'credential-yaml-filter.cjs', base / '.dsha-credential-yaml-filter.cjs')
+    script = next((path for path in scripts if path.is_file()), None)
+    module = Path('/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/yaml')
+    # Host fixtures use only their recorded current npm runtime, not a global
+    # or user project module. Production never accepts an arbitrary module path.
+    if not module.is_dir() and len(Path(__file__).resolve().parents) > 4:
+        repo = Path(__file__).resolve().parents[4]
+        pointer = repo / 'app/build/test-runtimes/current.json'
+        if pointer.is_file() and (repo / 'tools/dsh-runtime/package-lock.json').is_file():
+            fixture = json.loads(pointer.read_text(encoding='utf8'))
+            module = Path(fixture['raw']) / 'node_modules/yaml'
+    if script is None or not (module / 'package.json').is_file():
+        raise ValueError('CREDENTIAL_TRIM_FAILED: controlled YAML parser unavailable')
+    environment = dict(os.environ)
+    environment.pop('NODE_OPTIONS', None); environment.pop('NODE_PATH', None)
+    process = subprocess.run(['node', str(script), str(module)], input=json.dumps({'text': text, 'prefixes': list(prefixes)}),
+                             text=True, encoding='utf8', stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20, env=environment)
+    if process.returncode or len(process.stdout) > 2 * 1024 * 1024:
+        raise ValueError('CREDENTIAL_TRIM_FAILED')
+    result = json.loads(process.stdout)
+    if not isinstance(result.get('text'), str) or not isinstance(result.get('removed'), list):
+        raise ValueError('CREDENTIAL_TRIM_FAILED')
+    return result['text'], result['removed']
+
+
+def copy_credentials(src, dst, checks=None):
+    """复制凭据文件，剔除本机记录。返回被剔除的键列表。"""
+    src, dst = Path(src), Path(dst)
+    resolved = src.resolve(strict=True)
+    before = resolved.stat()
+    text = resolved.read_text(encoding="utf-8")
+    trimmed, removed = trim_local_records(text)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    dst.write_text(trimmed, encoding="utf-8")
+    os.chmod(dst, 0o600)
+    after = resolved.stat()
+    if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+        raise ValueError("备份期间凭据文件变化，请停止 Web 后重试：" + str(src))
+    if checks is not None:
+        checks.append((resolved, (after.st_size, after.st_mtime_ns), None))
+    return removed
+
+
+def copy_data(src, dst, exclude=(), ancestors=(), checks=None, exclude_root=()):
+    """热目录解引用，同时检测循环、特殊文件和复制期间的变化。"""
+    src, dst = Path(src), Path(dst)
+    resolved = src.resolve(strict=True)
+    if resolved in ancestors:
+        raise ValueError("数据目录含循环链接：" + str(src))
+    mode = resolved.stat().st_mode
+    if stat.S_ISDIR(mode):
+        dst.mkdir(parents=True, exist_ok=True)
+        effective_exclude = set(exclude) | set(exclude_root)
+        before = sorted(p.name for p in resolved.iterdir() if p.name not in effective_exclude)
+        for name in before:
+            copy_data(resolved / name, dst / name, exclude, ancestors + (resolved,), checks)
+        after = sorted(p.name for p in resolved.iterdir() if p.name not in effective_exclude)
+        if before != after:
+            raise ValueError("备份期间目录内容变化，请停止 Web 后重试：" + str(src))
+        if checks is not None:
+            checks.append((resolved, before, effective_exclude))
+    elif stat.S_ISREG(mode):
+        before = resolved.stat()
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(resolved, dst)
+        os.chmod(dst, stat.S_IMODE(mode) & 0o777)
+        after = resolved.stat()
+        if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+            raise ValueError("备份期间文件变化，请停止 Web 后重试：" + str(src))
+        if checks is not None:
+            checks.append((resolved, (after.st_size, after.st_mtime_ns), None))
+    else:
+        raise ValueError("不能备份特殊文件：" + str(src))
+
+
+def bundled_cache(path, expected, checks=None):
+    matches = bool(expected) and not path.is_symlink() and path.is_file() and digest(path) == expected
+    if matches and checks is not None:
+        checks.append((path, expected))
+    return matches
+
+
+def copy_wheel_cache(src, dst, checks, cache_checks):
+    """只丢弃 APK 可重建的原始 wheel；自定义 wheel、说明和嵌套目录保持原样。"""
+    if src.is_symlink() or not src.is_dir():
+        return copy_data(src, dst, exclude=SKIP, checks=checks)
+    before = sorted(p.name for p in src.iterdir() if p.name not in SKIP)
+    generated = {src_name for src_name in before
+                 if bundled_cache(src / src_name, ADB_WHEEL_CACHE.get(src_name), cache_checks)}
+    excluded = SKIP | generated
+    names = sorted(p.name for p in src.iterdir() if p.name not in excluded)
+    for name in names:
+        copy_data(src / name, dst / name, exclude=SKIP, checks=checks)
+    checks.append((src, before, SKIP))
+
+
+def inventory(stage):
+    result = {}
+    for path in sorted(Path(stage).rglob("*")):
+        name = path.relative_to(stage).as_posix()
+        if name == MANIFEST:
+            continue
+        if path.is_symlink():
+            raise ValueError("快照中不应残留软链接：" + name)
+        if path.is_file():
+            result[name] = {"size": path.stat().st_size, "sha256": digest(path)}
+        elif path.is_dir():
+            result[name] = {"directory": True}
+    return result
+
+
+def plugin_support(filename):
+    import importlib.util
+    path = Path(__file__).parent / filename
+    if not path.is_file():
+        path = Path(__file__).parent / ('.dsha-' + filename)
+    specification = importlib.util.spec_from_file_location(filename.replace('-', '_'), path)
+    module = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(module)
+    return module
+
+
+def signed_system_plugins():
+    """固定签名系统插件集合；不信旧 profile 或旧备份自带的动态清单。"""
+    builtin = plugin_support('register-builtin-plugins.py')
+    return frozenset(builtin.DEFAULT_BUILTINS)
+
+
+def inline_plugins(root, stage, checks=None):
+    builtin = plugin_support('register-builtin-plugins.py')
+    builtin.ROOT = ''
+    builtin.DSH_HOME = str(root / '.dsh')
+    builtin.PROFILE = str(root / '.dsh/profiles/web')
+    builtin.NODE_MODULES = str(root / '.dsh/profiles/web/node_modules')
+    # 在扫描之前记住包目录及 scope 目录；扫描期间的新安装也必须使本次快照失败。
+    if checks is not None:
+        bases = [root / 'node_modules', root / '.dsh/node_modules', root / '.dsh/profiles/node_modules',
+                 root / '.dsh/plugin-src'] + list((root / '.dsh/profiles').glob('*/node_modules'))
+        if str(root) == '/root':
+            bases += list(GLOBAL_NM)
+        for base in bases:
+            base = Path(base)
+            if base.is_dir():
+                children = list(base.iterdir())
+                checks.append((base.resolve(), sorted(path.name for path in children), set()))
+                for child in children:
+                    if child.name.startswith('@') and child.is_dir():
+                        checks.append((child.resolve(), sorted(path.name for path in child.iterdir()), set()))
+    discovered = builtin.discover_plugins(home_directory=str(root), include_global=str(root) == '/root')
+    return plugin_support('backup-plugin-graph.py').archive_plugins(
+        root, stage, copy_data, SKIP, checks, package_name, GLOBAL_NM, discovered,
+        frozenset(builtin.DEFAULT_BUILTINS))
+
+
+def make_backup(root, output, scope, app_version="unknown", app_code=0,
+                workdir="deepseek-harness", native_config=None, allow_empty_data=False):
+    root, output = Path(root), Path(output)
+    if (root / ".dsha-restore-journal.json").exists():
+        raise ValueError("上次恢复尚未完成，请先启动 DSHA 完成事务恢复")
+    absent = not os.path.lexists(root / ".dsh")
+    if not (root / ".dsh").is_dir() and not (allow_empty_data and absent and scope == "full" and native_config):
+        raise ValueError("NO_DSH_DIR：尚无可备份的环境数据")
+    if absent:
+        scope = "settings"  # 未完成安装只保护已有原生设置，不能伪装为全量对话归档。
+    with tempfile.TemporaryDirectory(prefix=".dsha-snapshot-", dir=root) as temp:
+        stage = Path(temp)
+        checks = []
+        cache_checks = []
+        (stage / ".dsh").mkdir()
+        names = SCOPES[scope]
+        if absent:
+            names = []
+        elif names is None:
+            names = sorted(p.name for p in (root / ".dsh").iterdir() if p.name not in SKIP | TOP_CACHE)
+            checks.append((root / ".dsh", names, SKIP | TOP_CACHE))
+        pruned_credentials = []
+        for name in names:
+            if name == "plugin-src":
+                continue  # 已安装源码按 profile 依赖内联，避免重复和无引用缓存。
+            src = root / ".dsh" / name
+            if os.path.lexists(src):
+                if scope == "full" and machine_name(name):
+                    continue
+                if scope == "full" and name == CREDENTIAL_FILE and src.is_file():
+                    pruned_credentials = copy_credentials(src, stage / ".dsh" / name, checks)
+                    continue
+                if scope == "full" and name == "adb-wheels.tar.gz" and bundled_cache(src, ADB_ARCHIVE_SHA256, cache_checks):
+                    continue
+                if scope == "full" and name == "wheels":
+                    copy_wheel_cache(src, stage / ".dsh" / name, checks, cache_checks)
+                    continue
+                copy_data(src, stage / ".dsh" / name,
+                          exclude=SKIP - {"node_modules"} if name == "plugin-history" else SKIP, checks=checks,
+                          exclude_root=root_exclusions(name))
+        plugins = inline_plugins(root, stage, checks) if not absent and scope in ("full", "plugins") else []
+        # Explicit legacy transition exports never copy an unredacted process
+        # log or the entire workspace .env. Native settings supply only the
+        # credential the user selected. Historical .dsha-workdir members remain
+        # readable by the old-format importer; current project export is separate.
+        native_values = {}
+        if native_config and scope in ("full", "settings"):
+            native_values = json.loads(Path(native_config).read_text(encoding="utf-8"))
+            if not isinstance(native_values, dict):
+                raise ValueError("NATIVE_CONFIG_FORMAT")
+            dump(stage / ".dsha-native-config.json", native_values)
+            # API key 只在 native-config 明确包含非空值时落入归档；
+            # exportBackupSettings() 已按用户的备份开关决定是否放入该字段。
+            # 这样离线包用户和在线 .env 用户走同一条恢复契约，且关闭开关
+            # 时不会把 rootfs 中的旧 .dsha-apikey 偷渡到公共备份。
+            api_key = native_values.get("apiKey")
+            if isinstance(api_key, str) and api_key.strip():
+                key_file = stage / ".dsh" / API_KEY_FILE
+                key_file.parent.mkdir(parents=True, exist_ok=True)
+                key_file.write_text(api_key.strip() + "\n", encoding="utf-8")
+                try:
+                    os.chmod(key_file, 0o600)
+                except OSError:
+                    pass
+        for path, previous, excluded in checks:
+            if excluded == 'DSHA_MANAGED_PACKAGE_PROOF':
+                current = plugin_support('register-builtin-plugins.py').package_content_proof(path)
+                if current != previous:
+                    raise ValueError('备份期间受管插件内容变化，请停止 Web 后重试：' + str(path))
+                continue
+            if excluded is None:
+                now = path.stat()
+                current = (now.st_size, now.st_mtime_ns)
+            else:
+                current = sorted(p.name for p in path.iterdir() if p.name not in excluded)
+            if current != previous:
+                raise ValueError("备份期间数据变化，请停止 Web 后重试：" + str(path))
+        for path, expected in cache_checks:
+            if not bundled_cache(path, expected):
+                raise ValueError("备份期间缓存内容变化，请停止 Web 后重试：" + str(path))
+        entries = inventory(stage)
+        if not any(not row.get("directory") for row in entries.values()):
+            raise ValueError("NOTHING_TO_PACK：所选范围没有可备份内容")
+        total = sum(row.get("size", 0) for row in entries.values())
+        if total > MAX_BYTES or len(entries) > MAX_FILES:
+            raise ValueError("备份超出容量或文件数上限")
+        version = "unknown"
+        installed = Path("/usr/local/lib/node_modules/@deepseek-ai/dsh/package.json")
+        if installed.is_file():
+            version = json.loads(installed.read_text()).get("version", "unknown")
+        manifest = {"formatVersion": 4, "scope": scope, "createdAt": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                    "appVersion": app_version, "appVersionCode": app_code, "dshVersion": version,
+                    "workdir": workdir, "plugins": plugins, "pluginDependencyGraph": getattr(plugins, "graph", {}),
+                    "systemPluginState": getattr(plugins, "system_plugins", []),
+                    "inventory": entries, "bytes": total,
+                    "prunedCredentialRecords": pruned_credentials}
+        dump(stage / MANIFEST, manifest)
+        temp_out = output.with_name(output.name + ".part")
+        try:
+            with tarfile.open(temp_out, "w:gz", compresslevel=3) as tar:
+                for path in sorted(stage.iterdir()):
+                    tar.add(path, arcname=path.name)
+            with tempfile.TemporaryDirectory(prefix=".dsha-verify-", dir=root) as verify:
+                inspect_archive(temp_out, Path(verify), scope)
+            os.replace(temp_out, output)
+        finally:
+            if temp_out.exists():
+                temp_out.unlink()
+        return {"scope": scope, "files": sum(not v.get("directory") for v in entries.values()),
+                "warnings": plugin_warnings(manifest),
+                "bytes": output.stat().st_size, "unpackedBytes": total, "sha256": digest(output)}
+
+
+def plugin_warnings(manifest):
+    return ['插件原有依赖缺失，源码已保留，恢复后仍需补装：' + row['name'] + ' → ' + name
+            for row in manifest.get('pluginDependencyGraph', {}).values()
+            for name in row.get('missing', [])]
+
+
+def safe_name(name):
+    if name in (".", "./"):
+        return ""
+    parts = PurePosixPath(name).parts
+    if not parts or name.startswith("/") or ".." in parts or "\\" in name or ":" in name:
+        raise ValueError("归档路径不安全：" + name[:120])
+    return "/".join(p for p in parts if p != ".")
+
+
+def inspect_archive(archive, stage, filename_scope="full"):
+    """完整读完 gzip，手动提取普通文件；拒绝重复、越界和未知成员类型。"""
+    stage = Path(stage)
+    stage.mkdir(parents=True, exist_ok=True)
+    seen, links, total, files = set(), [], 0, 0
+    with tarfile.open(archive, "r:gz") as tar:
+        for member in tar:
+            name = safe_name(member.name)
+            if not name:
+                continue
+            if name in seen:
+                raise ValueError("归档包含重复路径：" + name)
+            seen.add(name)
+            total += member.size
+            if len(seen) > MAX_FILES or member.size < 0 or total > MAX_BYTES:
+                raise ValueError("归档超过解压上限")
+            dst = stage / name
+            if member.isdir():
+                dst.mkdir(parents=True, exist_ok=True)
+            elif member.isfile():
+                files += 1
+                if shutil.disk_usage(stage).free < member.size + RESERVE:
+                    raise ValueError("空间不足，尚未修改现有数据")
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                unlink_symlink(dst)
+                with tar.extractfile(member) as src, dst.open("xb") as out:
+                    shutil.copyfileobj(src, out, 1024 * 1024)
+                if dst.stat().st_size != member.size:
+                    raise ValueError("归档文件不完整：" + name)
+                os.chmod(dst, member.mode & 0o777)
+            elif member.issym():
+                links.append((name, member.linkname))
+            else:
+                raise ValueError("归档含不支持的成员：" + name)
+        # tar 结束块后仍需读到 gzip 尾部，验证 CRC 和截断。
+        while tar.fileobj.read(1024 * 1024):
+            pass
+    manifests = [p for p in stage.rglob(MANIFEST) if "node_modules" not in p.parts]
+    if not manifests:
+        manifests = list(stage.rglob("backup-manifest.json"))
+    manifest = None
+    for path in sorted(manifests, key=lambda p: len(p.parts)):
+        value = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(value, dict):
+            raise ValueError("备份清单格式无效")
+        if manifest is not None and value != manifest:
+            raise ValueError("归档中有互相冲突的备份清单")
+        manifest = value
+    scope = (manifest or {}).get("scope") or filename_scope or "full"
+    if scope not in SCOPES:
+        raise ValueError("备份范围无法识别，现有数据未覆盖")
+    if filename_scope != "full" and scope != filename_scope:
+        raise ValueError("备份文件名与清单范围不符，请核对文件")
+    if manifest and manifest.get("formatVersion", 1) > 4:
+        raise ValueError("备份格式较新，请更新 DSHA 后恢复")
+    if manifest and manifest.get("formatVersion") in (3, 4):
+        if links or manifest.get("inventory") != inventory(stage):
+            raise ValueError("备份内容与 SHA-256 清单不符，现有数据未覆盖")
+    if manifest and manifest.get('formatVersion') == 4:
+        plugin_support('backup-plugin-graph.py').validate_graph(manifest.get('pluginDependencyGraph', {}), stage, package_name)
+    candidates = sorted((p for p in stage.rglob(".dsh") if p.is_dir()), key=lambda p: len(p.parts))
+    dsh = candidates[0] if candidates else stage
+    if not candidates and not any((stage / n).exists() for n in ("sessions", "profiles", "settings.yaml", "storages")):
+        raise ValueError("备份里未找到可恢复的 .dsh 数据")
+    # 旧备份的公开链接只接受包内实际快照，绝不读取另一台设备的绝对目标。
+    for name, target in links:
+        path = stage / name
+        if "node_modules" in Path(name).parts:
+            continue
+        if path.parent == dsh and path.name in HOT:
+            continue
+        if target.startswith("/"):
+            raise ValueError("旧备份缺少可移植的链接内容：" + name)
+        resolved = (path.parent / target).resolve()
+        if not resolved.is_relative_to(stage.resolve()) or not resolved.exists():
+            raise ValueError("归档含越界或悬空链接：" + name)
+        copy_data(resolved, path)
+    snapshots = sorted((p for p in stage.rglob(".dsha-pub") if p.is_dir()), key=lambda p: len(p.parts))
+    if snapshots:
+        for name in HOT:
+            if (snapshots[0] / name).exists():
+                remove(dsh / name)
+                copy_data(snapshots[0] / name, dsh / name)
+    for name, _ in links:
+        path = stage / name
+        if path.parent == dsh and path.name in HOT and not path.exists():
+            raise ValueError("旧备份只有链接、缺少实际数据：" + path.name)
+    allowed = SCOPES[scope]
+    payload = [p for p in dsh.iterdir() if p.name not in (MANIFEST, "DSHA-README.txt", ".dsha-plugin-src")]
+    if allowed and any(p.name not in allowed for p in payload):
+        raise ValueError("部分备份含超出声明范围的数据")
+    if not payload and not (scope == "settings" and (stage / ".dsha-native-config.json").is_file()):
+        raise ValueError("备份没有可恢复的数据")
+    for pkg in (dsh / "profiles").glob("*/package.json"):
+        if not isinstance(json.loads(pkg.read_text(encoding="utf-8")), dict):
+            raise ValueError("插件 profile JSON 无效")
+    return {"scope": scope, "files": files, "bytes": total, "warnings": plugin_warnings(manifest or {}),
+            "manifest": manifest or {}, "dsh": str(dsh), "legacy": not manifest or manifest.get("formatVersion") not in (3, 4)}
+
+
+def private_target(root, target):
+    """A maintenance destination stays under its trusted private root; links are leaf objects."""
+    root = Path(os.path.abspath(root))
+    target = Path(target)
+    if not target.is_absolute() or str(target) != os.path.abspath(target):
+        raise ValueError("RESTORE_PRIVATE_PATH")
+    if target == root or not target.is_relative_to(root):
+        raise ValueError("RESTORE_EXTERNAL_TARGET_PRESERVED")
+    mode = root.lstat().st_mode
+    if not stat.S_ISDIR(mode):
+        raise ValueError("RESTORE_PRIVATE_ROOT")
+    at = root
+    for part in target.relative_to(root).parts[:-1]:
+        at /= part
+        try:
+            mode = at.lstat().st_mode
+        except FileNotFoundError:
+            continue
+        if not stat.S_ISDIR(mode):
+            raise ValueError("RESTORE_PARENT_LINK_OR_SPECIAL")
+    return target
+
+
+def journal_state(root):
+    """Validate every historic row before the first mutation; retain unsupported originals."""
+    journal = private_target(root, Path(root) / ".dsha-restore-journal.json")
+    if not os.path.lexists(journal):
+        return journal, None
+    if not stat.S_ISREG(journal.lstat().st_mode) or journal.stat().st_size > 1024 * 1024:
+        raise ValueError("RESTORE_JOURNAL_TYPE")
+    state = json.loads(journal.read_text(encoding="utf-8"))
+    if (not isinstance(state, dict) or not isinstance(state.get("complete"), bool)
+            or not isinstance(state.get("steps"), list) or len(state["steps"]) > 2048):
+        raise ValueError("RESTORE_JOURNAL_SCHEMA")
+    seen = set()
+    for row in state["steps"]:
+        if not isinstance(row, dict) or not isinstance(row.get("existed"), bool):
+            raise ValueError("RESTORE_JOURNAL_ROW")
+        values = []
+        for key in ("dst", "old", "new"):
+            if not isinstance(row.get(key), str):
+                raise ValueError("RESTORE_JOURNAL_ROW")
+            values.append(private_target(root, row[key]))
+        dst, old, new = values
+        token = new.name.removeprefix(dst.name + ".restore-stage-")
+        if (not re.fullmatch(r"[0-9]{8}-[0-9]{6}-[a-f0-9]{8}", token)
+                or new != dst.with_name(dst.name + ".restore-stage-" + token)
+                or old != dst.with_name(dst.name + ".pre-restore-" + token)
+                or str(dst) in seen):
+            raise ValueError("RESTORE_JOURNAL_BINDING")
+        seen.add(str(dst))
+    return journal, state
+
+
+def recover(root):
+    """Replay only fully checked private rows; an external/unknown old journal stays untouched."""
+    root = Path(os.path.abspath(root))
+    journal, state = journal_state(root)
+    if state is None:
+        return
+    if not state["complete"]:
+        for row in reversed(state["steps"]):
+            dst, old, new = map(Path, (row["dst"], row["old"], row["new"]))
+            if os.path.lexists(old):
+                remove(dst)
+                os.replace(old, dst)
+            elif not row["existed"] and not os.path.lexists(new):
+                remove(dst)
+    for row in state["steps"]:
+        remove(row["new"])
+    journal.unlink()
+
+
+def apply_system_plugin_state(candidate, state, signed):
+    """只恢复启停意图；系统插件源码与版本始终由当前 APK 提供。"""
+    if state is None:
+        return
+    if not isinstance(state, list) or len(state) > 1024:
+        raise ValueError('系统插件状态清单无效')
+    for row in state:
+        if (not isinstance(row, dict) or row.get('name') not in signed
+                or not isinstance(row.get('profile'), str)
+                or not re.fullmatch(r'[A-Za-z0-9_-][A-Za-z0-9._-]*', row['profile'])
+                or not isinstance(row.get('enabled'), bool)
+                or not isinstance(row.get('disabled'), bool)):
+            raise ValueError('系统插件状态记录无效')
+        package = candidate / 'profiles' / row['profile'] / 'package.json'
+        if not package.is_file():
+            continue
+        metadata = json.loads(package.read_text(encoding='utf-8'))
+        profile = metadata.setdefault('dsh', {}).setdefault('profile', {})
+        bundles = list(profile.get('bundles') or [])
+        if row['enabled'] and row['name'] not in bundles:
+            bundles.append(row['name'])
+        if not row['enabled']:
+            bundles = [name for name in bundles if name != row['name']]
+        profile['bundles'] = bundles
+        metadata.setdefault('dependencies', {})[row['name']] = (
+            'link:/root/dsha-' + row['name'].removeprefix('dsh-'))
+        dump(package, metadata)
+        marker = package.parent / 'node_modules' / (row['name'] + '.disabled')
+        if row['disabled']:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text('', encoding='utf-8')
+        elif row['enabled'] and marker.is_file() and not marker.is_symlink():
+            marker.unlink()
+
+
+def repair_profile_links(candidate, stage, root, generation, plugin_stage, records,
+                         signed_system=()):
+    """只修复候选树的模块链接；所需插件缺失时终止，不能伪报完整恢复。"""
+    signed_system = frozenset(signed_system)
+    all_system = signed_system | {'@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app'}
+    indexed = {(r["profile"], r["name"]) for r in records}
+    legacy_inline = sorted((p for p in stage.rglob(".dsha-plugin-src") if p.is_dir()), key=lambda p: len(p.parts))
+    if (candidate / "plugin-src").is_dir():
+        legacy_inline.append(candidate / "plugin-src")
+    for pkg_path in sorted((candidate / "profiles").glob("*/package.json")):
+        pkg = json.loads(pkg_path.read_text(encoding="utf-8"))
+        original = json.dumps(pkg, sort_keys=True)
+        deps = pkg.get("dependencies") or {}
+        bundles = ((pkg.get("dsh") or {}).get("profile") or {}).get("bundles") or []
+        for name in set(deps) | set(bundles):
+            if not package_name(name):
+                raise ValueError("插件包名无效")
+            if name in all_system:
+                # 旧归档中即使带着同名实体，也只保留 profile 的启停声明；
+                # 当前 APK 会在启动前重新注册系统实体与受管链接。
+                remove(pkg_path.parent / "node_modules" / name)
+                if name in signed_system:
+                    deps[name] = 'link:/root/dsha-' + name.removeprefix('dsh-')
+                continue
+            if (pkg_path.parent.name, name) in indexed:
+                continue
+            nm = pkg_path.parent / "node_modules" / name
+            if (nm / "package.json").is_file():
+                continue
+            target = next((base / name for base in GLOBAL_NM if (base / name / "package.json").is_file()), None)
+            source = next((base / name for base in legacy_inline if (base / name / "package.json").is_file()), None)
+            if source is not None:
+                relative = name if pkg_path.parent.name == "web" else ".profiles/" + pkg_path.parent.name + "/" + name
+                destination = plugin_stage / relative
+                if source.resolve() != destination.resolve():
+                    copy_data(source, destination)
+                target = generation / relative
+                deps[name] = "link:" + str(target)
+            if target is None:
+                spec = deps.get(name, "")
+                if isinstance(spec, str) and spec.startswith(("link:", "file:")):
+                    original = Path(spec.split(":", 1)[1])
+                    if not original.is_absolute():
+                        original = root / ".dsh" / "profiles" / pkg_path.parent.name / original
+                    if (original / "package.json").is_file():
+                        target = original.resolve()
+            if target is None:
+                # 已禁用的插件声明可以保留；启用项必须可解析。
+                if name in bundles:
+                    raise ValueError("备份缺少已启用插件的源码或依赖，请先补装：" + name)
+                continue
+            nm.parent.mkdir(parents=True, exist_ok=True)
+            remove(nm)
+            final_nm = root / '.dsh' / nm.relative_to(candidate)
+            nm.symlink_to(os.path.relpath(target, final_nm.parent), target_is_directory=True)
+        if deps:
+            pkg["dependencies"] = deps
+        if original != json.dumps(pkg, sort_keys=True):
+            dump(pkg_path, pkg)
+
+
+def workspace_replacements(source, root, stage):
+    registry = source / "storages" / "workspace.json"
+    if not registry.is_file():
+        return []
+    data = json.loads(registry.read_text(encoding="utf-8"))
+    replacements = []
+    for record in ((data.get("tables") or {}).get("workspaces") or {}).values():
+        value = (record or {}).get("path")
+        if not isinstance(value, str) or not value.startswith("/"):
+            continue
+        path = Path(value)
+        try:
+            resolved = private_target(root, path)
+        except ValueError:
+            continue  # Keep external workspace references; never recreate their contents.
+        if path.is_dir():
+            continue
+        empty = stage / ("workspace-" + uuid.uuid4().hex[:12])
+        empty.mkdir()
+        replacements.append((empty, resolved))
+    # 嵌套工作目录由最上层目录一次创建，避免先创建子目录导致父目标发生冲突。
+    selected = [(src, dst) for src, dst in replacements if not any(dst != other and dst.is_relative_to(other) for _, other in replacements)]
+    for src, dst in selected:
+        for _, child in replacements:
+            if child != dst and child.is_relative_to(dst):
+                (src / child.relative_to(dst)).mkdir(parents=True, exist_ok=True)
+    return selected
+
+
+def commit(root, replacements, fail_after=None, defer=False):
+    """所有副本先落到目标所在文件系统，再记录日志并切换；旧数据保留。"""
+    root = Path(os.path.abspath(root))
+    replacements = [(Path(src), private_target(root, dst)) for src, dst in replacements]
+    recover(root)
+    token = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:8]
+    steps = []
+    journal = root / ".dsha-restore-journal.json"
+    try:
+        for src, dst in replacements:
+            dst = Path(dst)
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            new = dst.with_name(dst.name + ".restore-stage-" + token)
+            old = dst.with_name(dst.name + ".pre-restore-" + token)
+            steps.append({"dst": str(dst), "old": str(old), "new": str(new), "existed": os.path.lexists(dst)})
+            if Path(src).is_dir():
+                shutil.copytree(src, new, symlinks=True)
+            else:
+                shutil.copy2(src, new, follow_symlinks=False)
+        state = {"steps": steps, "complete": False}
+        dump(journal, state)
+        for index, row in enumerate(steps):
+            if row["existed"]:
+                os.replace(row["dst"], row["old"])
+            if fail_after == index:
+                raise OSError("测试注入：提交中断")
+            os.replace(row["new"], row["dst"])
+        if not defer:
+            finalize(root)
+        return [r["old"] for r in steps if r["existed"]]
+    except BaseException:
+        if journal.exists():
+            recover(root)
+        else:
+            for row in steps:
+                remove(row["new"])
+        raise
+
+
+def finalize(root):
+    root = Path(os.path.abspath(root))
+    journal, state = journal_state(root)
+    if state is None:
+        raise ValueError("RESTORE_JOURNAL_MISSING")
+    state["complete"] = True
+    dump(journal, state)
+    recover(root)
+
+
+def preserve_plugin_source(alias, preserved):
+    """同名未登记源码保留一次；内容不同则另存版本，重复恢复不得冲突或无限复制。"""
+    def signature(path):
+        result = hashlib.sha256()
+        def visit(current, relative):
+            if current.is_symlink():
+                value = {'link': os.readlink(current)}
+            elif current.is_file():
+                value = {'sha256': digest(current), 'mode': stat.S_IMODE(current.stat().st_mode)}
+            elif current.is_dir():
+                value = {'directory': True}
+            else:
+                raise ValueError('待保留的插件源码包含特殊文件')
+            result.update(json.dumps([relative, value], sort_keys=True).encode('utf-8'))
+            if value.get('directory'):
+                for child in sorted(current.iterdir()):
+                    visit(child, relative + '/' + child.name)
+        visit(path, '')
+        return result.hexdigest()
+    if os.path.lexists(preserved):
+        value = signature(alias)
+        if signature(preserved) == value:
+            remove(alias)
+            return
+        preserved = preserved.parent / '.versions' / value / preserved.name
+        if os.path.lexists(preserved):
+            if signature(preserved) != value:
+                raise ValueError('插件源码版本摘要冲突，所有文件已保留')
+            remove(alias)
+            return
+    preserved.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(alias, preserved)
+
+
+def restore_archive(root, archive, filename_scope="full", workdir="deepseek-harness", fail_after=None, defer=False):
+    root = Path(root)
+    recover(root)
+    with tempfile.TemporaryDirectory(prefix=".dsha-restore-", dir=root) as temp:
+        stage = Path(temp)
+        info = inspect_archive(archive, stage, filename_scope)
+        scope, source = info["scope"], Path(info["dsh"])
+        current = root / ".dsh"
+        candidate = stage / ".candidate"
+        # 部分恢复只复制现有树的链接本体，未选中的公开数据不会被读取或改写。
+        if scope != "full" and current.is_dir():
+            shutil.copytree(current, candidate, symlinks=True)
+        else:
+            candidate.mkdir()
+            # Machine records never come from an archive. A full logical data
+            # replacement retains this machine's current records and safety
+            # intent, copying link objects rather than reading their targets.
+            if current.is_dir():
+                for child in current.iterdir():
+                    if not machine_name(child.name):
+                        continue
+                    destination = candidate / child.name
+                    mode = child.lstat().st_mode
+                    if stat.S_ISDIR(mode):
+                        shutil.copytree(child, destination, symlinks=True)
+                    elif stat.S_ISREG(mode) or stat.S_ISLNK(mode):
+                        shutil.copy2(child, destination, follow_symlinks=False)
+                    else:
+                        raise ValueError('本机状态类型未知，原件保留：' + child.name)
+        selected = SCOPES[scope] or [p.name for p in source.iterdir() if p.name not in SKIP and not machine_name(p.name)]
+        replacements = []
+        for name in selected:
+            if machine_name(name):
+                continue
+            src = source / name
+            if not src.exists():
+                continue
+            dst = candidate / name
+            remove(dst)
+            # A selected external link is replaced only inside the private candidate.
+            # The external original remains at its existing path and is never renamed.
+            if name == CREDENTIAL_FILE:
+                copy_credentials(src, dst)
+            else:
+                copy_data(src, dst, exclude_root=root_exclusions(name))
+        manifest = info["manifest"]
+        if scope in ("full", "plugins"):
+            signed_system = signed_system_plugins()
+            all_system = signed_system | {'@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app'}
+            generation = root / ".dsh" / "plugin-src"
+            plugin_stage = candidate / "plugin-src"
+            if manifest.get("formatVersion") == 3:
+                remove(plugin_stage)
+            apply_system_plugin_state(candidate, manifest.get('systemPluginState'), signed_system)
+            graph = manifest.get('pluginDependencyGraph', {}) if manifest.get('formatVersion') == 4 else {}
+            if graph:
+                plugin_support('backup-plugin-graph.py').restore_graph(
+                    graph, stage, plugin_stage, generation, copy_data, package_name, signed_system)
+            for record in manifest.get("plugins", []):
+                slot, name, profile = record["slot"], record["name"], record["profile"]
+                if (not re.fullmatch(r"[a-f0-9]{20}", slot)
+                        or not re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9._-]*", profile)
+                        or not package_name(name)):
+                    raise ValueError("插件清单路径无效")
+                if name in all_system:
+                    # 兼容旧 v3/v4 混合归档：忽略旧系统源码及图节点，下一次
+                    # 启动由当前签名 APK 重建；用户第三方记录继续逐项恢复。
+                    remove(candidate / 'profiles' / profile / 'node_modules' / name)
+                    continue
+                relative = name if profile == "web" else ".profiles/" + profile + "/" + name
+                if manifest.get('formatVersion') == 4:
+                    key = record.get('node')
+                    if not isinstance(key, str) or key not in graph or graph[key]['name'] != name:
+                        raise ValueError('插件记录与依赖图不符')
+                    target = generation / '.deps' / key
+                    alias = plugin_stage / relative
+                    if os.path.lexists(alias):
+                        preserved = plugin_stage / '.preserved' / slot / relative
+                        preserve_plugin_source(alias, preserved)
+                    alias.parent.mkdir(parents=True, exist_ok=True)
+                    alias.symlink_to(os.path.relpath(plugin_stage / '.deps' / key, alias.parent), target_is_directory=True)
+                    if record.get('unregistered'):
+                        continue
+                    pkg_path = candidate / 'profiles' / profile / 'package.json'
+                    pkg = json.loads(pkg_path.read_text(encoding='utf-8'))
+                    bundles = ((pkg.get('dsh') or {}).get('profile') or {}).get('bundles') or []
+                    if name not in pkg.get('dependencies', {}) and not (record.get('bundledOnly') and name in bundles):
+                        raise ValueError('插件记录与配置不符')
+                    pkg.setdefault('dependencies', {})[name] = 'link:' + str(target)
+                    dump(pkg_path, pkg)
+                    nm = pkg_path.parent / 'node_modules' / name
+                    nm.parent.mkdir(parents=True, exist_ok=True)
+                    remove(nm); nm.symlink_to(os.path.relpath(plugin_stage / '.deps' / key, nm.parent), target_is_directory=True)
+                    continue
+                src = stage / ".dsha-plugin-src" / slot
+                copy_data(src, plugin_stage / relative)
+                pkg_path = candidate / "profiles" / profile / "package.json"
+                pkg = json.loads(pkg_path.read_text(encoding="utf-8"))
+                if name not in pkg.get("dependencies", {}):
+                    raise ValueError("插件清单与 profile 依赖不一致")
+                pkg.setdefault("dependencies", {})[name] = "link:" + str(generation / relative)
+                dump(pkg_path, pkg)
+                nm = pkg_path.parent / "node_modules" / name
+                nm.parent.mkdir(parents=True, exist_ok=True)
+                remove(nm)
+                nm.symlink_to(os.path.relpath(plugin_stage / relative, nm.parent), target_is_directory=True)
+            repair_profile_links(candidate, stage, root, generation, plugin_stage,
+                                 manifest.get("plugins", []), signed_system)
+        restore_warnings = list(info.get("warnings") or [])
+        if scope == "full":
+            wd = Path(workdir)
+            if not wd.is_absolute():
+                wd = root / wd
+            for name in (".env", "dsh-web.log"):
+                src = stage / ".dsha-workdir" / name
+                if src.exists():
+                    try:
+                        target = private_target(root, wd / name)
+                    except ValueError:
+                        restore_warnings.append("EXTERNAL_WORKSPACE_PRESERVED:" + name)
+                        continue
+                    replacements.append((src, target))
+        # 原生设置仍由 ConfigStore 导入，不让 Python 接触 Android 私有偏好文件。
+        native = stage / ".dsha-native-config.json"
+        native_data = json.loads(native.read_text(encoding="utf-8")) if native.exists() and scope in ("full", "settings") else None
+        if native_data is not None and not isinstance(native_data, dict):
+            raise ValueError("原生设置格式无效")
+        if scope in ("full", "sessions"):
+            replacements.extend(workspace_replacements(source, root, stage))
+        replacements.append((candidate, current))
+        backups = commit(root, replacements, fail_after, defer)
+        return {"scope": scope, "files": info["files"], "legacy": info["legacy"],
+                "previous": backups, "nativeConfig": native_data, "committed": True,
+                "warnings": restore_warnings}
+
+
+@contextmanager
+def data_lock(root):
+    with open(Path(root) / ".dsha-data.lock", "a") as lock:
+        if os.name != "nt":
+            import fcntl
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise ValueError("有插件或备份任务正在修改数据，请完成后再试")
+        try:
+            yield
+        finally:
+            if os.name != "nt":
+                fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("command", choices=("backup", "inspect", "restore", "recover", "finalize"))
+    parser.add_argument("--root", default="/root")
+    parser.add_argument("--archive")
+    parser.add_argument("--scope", choices=SCOPES, default="full")
+    parser.add_argument("--app-version", default="unknown")
+    parser.add_argument("--app-code", type=int, default=0)
+    parser.add_argument("--workdir", default="deepseek-harness")
+    parser.add_argument("--native-config")
+    parser.add_argument("--defer-commit", action="store_true")
+    parser.add_argument("--allow-empty-data", action="store_true")
+    args = parser.parse_args()
+    with data_lock(args.root):
+        execute(args)
+
+
+def execute(args):
+    if args.command == "backup":
+        result = make_backup(args.root, args.archive, args.scope, args.app_version,
+                             args.app_code, args.workdir, args.native_config, args.allow_empty_data)
+    elif args.command == "inspect":
+        with tempfile.TemporaryDirectory(prefix=".dsha-inspect-", dir=args.root) as temp:
+            result = inspect_archive(args.archive, Path(temp), args.scope)
+            result.pop("dsh")
+            result["manifest"].pop("inventory", None)
+    elif args.command == "restore":
+        result = restore_archive(args.root, args.archive, args.scope, args.workdir, defer=args.defer_commit)
+    elif args.command == "finalize":
+        finalize(args.root)
+        result = {"committed": True}
+    else:
+        recover(args.root)
+        result = {"recovered": True}
+    print("DSHA_BACKUP_RESULT=" + json.dumps(result, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as error:
+        print("备份/恢复失败：" + str(error), file=sys.stderr)
+        sys.exit(1)
