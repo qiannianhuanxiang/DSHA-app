@@ -79,6 +79,16 @@ public final class AssistantService extends Service {
     if (task == null || task.owner() != ControlTaskAuthority.Owner.LOCAL_DSH)
       return refused("ASSISTANT_TASK_CHANGED");
     if (!stopPrerequisites(context, task)) return refused("ASSISTANT_STOP_NOTIFICATION_REQUIRED");
+    // A pause raised for a stop notification outlives the service that needed it.
+    // Clear it here too: stopPrerequisites only reaches stopChannelCurrent while
+    // the binding still matches, so a cleared binding would otherwise leave the
+    // pause in place and every begin() would fail before reaching a resume path.
+    {
+      var coordinator = PhoneControlCoordinator.get(context);
+      var state = coordinator.snapshot();
+      if (state.paused() && "ASSISTANT_STOP_NOTIFICATION_REQUIRED".equals(state.reason()))
+        coordinator.resume();
+    }
     try {
       PhoneControlCoordinator.get(context).checkBegin(task);
     } catch (IllegalStateException unavailable) {
@@ -237,8 +247,11 @@ public final class AssistantService extends Service {
       if (manager == null) return false;
       for (var posted : manager.getActiveNotifications()) {
         Notification notification = posted.getNotification();
-        if (posted.getId() != com.deepseekharness.app.util.NotificationIds.FLOATING_ASSISTANT
-            || !context.getPackageName().equals(posted.getPackageName())
+        // Match the stop action, not the numeric id: the service may post this
+        // notification under a different id (the FGS id is fixed at
+        // startForeground time), and a stale id comparison made every
+        // begin() fail with ASSISTANT_STOP_NOTIFICATION_REQUIRED.
+        if (!context.getPackageName().equals(posted.getPackageName())
             || (Build.VERSION.SDK_INT >= 26 && !STOP_CHANNEL.equals(notification.getChannelId()))
             || notification.actions == null) continue;
         for (Notification.Action action : notification.actions)
@@ -265,6 +278,19 @@ public final class AssistantService extends Service {
             && task != null
             && current.controller != null
             && current.controller.ownsTask(task);
+    // The service may have exited while leaving a pause behind. That pause was
+    // only ever meant to fence a live service; with no service there is nothing
+    // to fence, and nothing else would ever clear it, so every later begin()
+    // failed permanently. Release only this exact reason.
+    if (current == null && task != null) {
+      var coordinator = PhoneControlCoordinator.get(context);
+      var state = coordinator.snapshot();
+      if (state.paused()
+          && "ASSISTANT_STOP_NOTIFICATION_REQUIRED".equals(state.reason())
+          && task.equals(state.binding())) {
+        coordinator.resume();
+      }
+    }
     if (stopNotificationAvailable(context) && (!postedRequired || postedStopNotification(context)))
       return true;
     if (task != null) {
