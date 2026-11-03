@@ -1,0 +1,37 @@
+{
+  "dshVersion": "0.2.1-rc.3",
+  "patches": [
+    {
+      "before": "import { createRequire } from \"node:module\";",
+      "after": "import { createComboCache, countNewlines } from \"dsha-client-combo-cache\"; // DSHA_COMBO_CACHE_V1\nimport { createRequire } from \"node:module\";"
+    },
+    {
+      "before": "function newlineCount(value) {\n\tlet count = 0;\n\tfor (const char of value) if (char === \"\\n\") count += 1;\n\treturn count;\n}",
+      "after": "function newlineCount(value) {\n\treturn countNewlines(value);\n}"
+    },
+    {
+      "before": "function buildBatch(phase, records, sourceMapOf) {\n\tconst artifact = buildCombo(records, sourceMapOf);",
+      "after": "function buildBatch(phase, records, sourceMapOf, builder = buildCombo) {\n\tconst artifact = builder(records, sourceMapOf);"
+    },
+    {
+      "before": "\tcompose() {\n\t\tconst entries =",
+      "after": "\tcompose() {\n\t\tconst cachedCombo = createComboCache(buildCombo, this.dshaComboArtifacts);\n\t\tconst entries ="
+    },
+    {
+      "before": "artifacts.push(buildBatch(\"bootstrap\", records, this.readSourceMap));",
+      "after": "artifacts.push(buildBatch(\"bootstrap\", records, this.readSourceMap, cachedCombo));"
+    },
+    {
+      "before": "artifacts.push(buildBatch(\"application\", records, this.readSourceMap));",
+      "after": "artifacts.push(buildBatch(\"application\", records, this.readSourceMap, cachedCombo));"
+    },
+    {
+      "before": "const artifact = buildCombo([record], this.readSourceMap, record.entry.rev);",
+      "after": "const artifact = cachedCombo([record], this.readSourceMap, record.entry.rev);"
+    },
+    {
+      "before": "\t\tthis.previousBatchResponses = this.batchResponses;",
+      "after": "\t\tthis.dshaComboArtifacts = cachedCombo.cache;\n\t\tthis.previousBatchResponses = this.batchResponses;"
+    }
+  ]
+}

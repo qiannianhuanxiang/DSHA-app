@@ -1,0 +1,240 @@
+package com.deepseekharness.app.backup;
+
+import org.junit.*;
+import org.junit.rules.TemporaryFolder;
+import java.io.*;
+import java.nio.file.*;
+import java.util.*;
+import static org.junit.Assert.*;
+
+public class NativePluginGraphTest {
+  @Rule public TemporaryFolder temporary = new TemporaryFolder();
+  private final JvmBackupFileSystem fs = new JvmBackupFileSystem();
+
+  private void write(File file, String text) throws Exception {
+    file.getParentFile().mkdirs();
+    Files.writeString(file.toPath(), text);
+  }
+
+  @Test
+  public void preservesLocalSourceTransitiveDependenciesAndCustomWrappers() throws Exception {
+    File root = temporary.newFolder(),
+        dsh = new File(root, "root/.dsh"),
+        global = new File(root, "usr/local/lib/node_modules");
+    write(
+        new File(dsh, "profiles/web/package.json"),
+        "{\"dependencies\":{\"user-plugin\":\"1.0.0\"}}");
+    File plugin = new File(global, "user-plugin");
+    write(
+        new File(plugin, "package.json"),
+        "{\"name\":\"user-plugin\",\"version\":\"1.0.0\",\"dependencies\":{\"helper\":\"1\"}}");
+    write(new File(plugin, "index.js"), "user modified source");
+    write(
+        new File(plugin, "node_modules/helper/package.json"),
+        "{\"name\":\"helper\",\"version\":\"1.0.0\"}");
+    write(new File(plugin, "node_modules/helper/value"), "user dependency");
+    write(new File(plugin, "node_modules/.bin/custom"), "user wrapper");
+    var graph =
+        new NativePluginGraph(
+            fs, new GuestDataResolver(fs, root, null, List.of()), dsh, global, root, Map.of());
+    graph.collect(new BackupControl(null));
+    assertEquals(2, graph.sources.size());
+    assertEquals(Boolean.TRUE, graph.description().get("complete"));
+    graph.verify(new BackupControl(null));
+    List<String> captured = new ArrayList<>();
+    for (BackupSource source : graph.sources)
+      source.walk(
+          item -> {
+            if (item.kind.equals("FILE")) captured.add(item.path);
+          },
+          new BackupControl(null));
+    assertTrue(captured.contains("index.js"));
+    assertTrue(captured.contains("value"));
+    assertTrue(captured.contains("node_modules/.bin/custom"));
+    var profiles = (Map<?, ?>) graph.description().get("profiles");
+    assertNotNull(((Map<?, ?>) profiles.get("web")).get("user-plugin"));
+  }
+
+  @Test
+  public void onlyExactPackageProofCanExcludeBytes() throws Exception {
+    File root = temporary.newFolder(),
+        dsh = new File(root, "root/.dsh"),
+        global = new File(root, "usr/local/lib/node_modules"),
+        plugin = new File(global, "p");
+    write(new File(dsh, "profiles/web/package.json"), "{\"dependencies\":{\"p\":\"1\"}}");
+    write(new File(plugin, "package.json"), "{\"name\":\"p\"}");
+    write(new File(plugin, "user.js"), "original");
+    String proof = ManagedPackageProof.digest(fs, plugin, new BackupControl(null));
+    var resolver = new GuestDataResolver(fs, root, null, List.of());
+    var original = new NativePluginGraph(fs, resolver, dsh, global, root, Map.of("p", proof));
+    original.collect(new BackupControl(null));
+    assertTrue(original.sources.isEmpty());
+    write(new File(plugin, "user.js"), "modified");
+    assertThrows(IOException.class, () -> original.verify(new BackupControl(null)));
+    var modified = new NativePluginGraph(fs, resolver, dsh, global, root, Map.of("p", proof));
+    modified.collect(new BackupControl(null));
+    assertEquals(1, modified.sources.size());
+  }
+
+  @Test
+  public void runtimeLocationAndOfficialScopeDoNotExcludeUserOverridesOrUnregisteredInstalls()
+      throws Exception {
+    File root = temporary.newFolder(),
+        dsh = new File(root, "root/.dsh"),
+        global = new File(root, "usr/local/lib/node_modules"),
+        modules = new File(global, "@deepseek-ai/dsh/node_modules");
+    String name = "@deepseek-ai/dsh-ai-created";
+    File plugin = new File(modules, name);
+    write(new File(dsh, "profiles/web/package.json"), "{\"dependencies\":{}}");
+    write(
+        new File(plugin, "package.json"),
+        "{\"name\":\""
+            + name
+            + "\",\"version\":\"1.0.0\",\"dsh\":{\"bundle\":{\"patch\":\"cordis.patch.yml\"}}}");
+    write(new File(plugin, "cordis.patch.yml"), "[]\n");
+    String proof = ManagedPackageProof.digest(fs, plugin, new BackupControl(null));
+    var resolver = new GuestDataResolver(fs, root, null, List.of());
+    var managed = new NativePluginGraph(fs, resolver, dsh, global, root, Map.of(name, proof));
+    managed.collect(new BackupControl(null));
+    assertTrue(managed.sources.isEmpty());
+    write(
+        new File(plugin, "user-private-draft.js"),
+        "preserve user modification in the runtime tree");
+    assertThrows(IOException.class, () -> managed.verify(new BackupControl(null)));
+    var modified = new NativePluginGraph(fs, resolver, dsh, global, root, Map.of(name, proof));
+    modified.collect(new BackupControl(null));
+    assertEquals(1, modified.sources.size());
+    Map<?, ?> node =
+        (Map<?, ?>) ((Map<?, ?>) modified.description().get("nodes")).values().iterator().next();
+    assertEquals(false, node.get("managed"));
+    assertEquals(true, node.get("managedOverride"));
+    List<String> captured = new ArrayList<>();
+    modified.sources.get(0).walk(item -> captured.add(item.path), new BackupControl(null));
+    assertTrue(captured.contains("user-private-draft.js"));
+    var unknown = new NativePluginGraph(fs, resolver, dsh, global, root, Map.of());
+    unknown.collect(new BackupControl(null));
+    assertEquals(1, unknown.sources.size());
+    unknown.verify(new BackupControl(null));
+  }
+
+  @Test
+  public void undeclaredDependenciesKeepTheirBindingAndMetadataChangesInvalidateSnapshot()
+      throws Exception {
+    File root = temporary.newFolder(),
+        dsh = new File(root, "root/.dsh"),
+        global = new File(root, "usr/local/lib/node_modules"),
+        plugin = new File(global, "p");
+    write(new File(dsh, "profiles/web/package.json"), "{\"dependencies\":{\"p\":\"1\"}}");
+    write(new File(plugin, "package.json"), "{\"name\":\"p\",\"version\":\"1\"}");
+    write(
+        new File(plugin, "node_modules/extra/package.json"),
+        "{\"name\":\"extra\",\"version\":\"2\"}");
+    var graph =
+        new NativePluginGraph(
+            fs, new GuestDataResolver(fs, root, null, List.of()), dsh, global, root, Map.of());
+    graph.collect(new BackupControl(null));
+    var nodes = (Map<?, ?>) graph.description().get("nodes");
+    Map<?, ?> parent =
+        (Map<?, ?>)
+            nodes.values().stream()
+                .filter(value -> ((Map<?, ?>) value).get("name").equals("p"))
+                .findFirst()
+                .orElseThrow();
+    assertNotNull(((Map<?, ?>) parent.get("edges")).get("extra"));
+    write(new File(plugin, "package.json"), "{\"name\":\"p\",\"version\":\"3\"}");
+    assertThrows(IOException.class, () -> graph.verify(new BackupControl(null)));
+  }
+
+  @Test
+  public void signedBuiltinCopiesAreExcludedButEnableIntentIsRecorded() throws Exception {
+    File root = temporary.newFolder(),
+        dsh = new File(root, "root/.dsh"),
+        global = new File(root, "usr/local/lib/node_modules");
+    write(
+        new File(dsh, "profiles/web/package.json"),
+        "{\"dependencies\":{\"dsh-web-mobile\":\"link:/old\",\"user-plugin\":\"1\"},\"dsh\":{\"profile\":{\"bundles\":[\"dsh-web-mobile\",\"user-plugin\"]}}}");
+    File oldBuiltin = new File(dsh, "profiles/web/node_modules/dsh-web-mobile");
+    write(
+        new File(oldBuiltin, "package.json"), "{\"name\":\"dsh-web-mobile\",\"version\":\"old\"}");
+    write(new File(oldBuiltin, "old.js"), "must not enter backup");
+    File detached = new File(dsh, "plugin-src/dsh-web-mobile");
+    write(
+        new File(detached, "package.json"), "{\"name\":\"dsh-web-mobile\",\"version\":\"older\"}");
+    write(new File(detached, "draft.js"), "must not enter backup");
+    File history = new File(dsh, "plugin-history/old-system/package");
+    write(
+        new File(history, "package.json"), "{\"name\":\"dsh-web-mobile\",\"version\":\"oldest\"}");
+    File user = new File(dsh, "profiles/web/node_modules/user-plugin");
+    write(new File(user, "package.json"), "{\"name\":\"user-plugin\",\"version\":\"1\"}");
+    write(new File(user, "index.js"), "keep user bytes");
+    var graph =
+        new NativePluginGraph(
+            fs, new GuestDataResolver(fs, root, null, List.of()), dsh, global, root, Map.of());
+    graph.collect(new BackupControl(null));
+    assertEquals(1, graph.sources.size());
+    assertEquals("user-plugin", graph.sources.get(0).description().get("name"));
+    Map<?, ?> description = graph.description(), nodes = (Map<?, ?>) description.get("nodes");
+    assertFalse(
+        nodes.values().stream()
+            .anyMatch(value -> ((Map<?, ?>) value).get("name").equals("dsh-web-mobile")));
+    Map<?, ?> systems = (Map<?, ?>) description.get("systemPlugins"),
+        web = (Map<?, ?>) systems.get("web"),
+        state = (Map<?, ?>) web.get("dsh-web-mobile");
+    assertEquals(true, state.get("enabled"));
+    assertEquals(false, state.get("disabled"));
+    assertEquals("DEPENDENCIES_CAPTURED_IN_GRAPH", graph.exclusion(oldBuiltin));
+    assertEquals("DEPENDENCIES_CAPTURED_IN_GRAPH", graph.exclusion(detached));
+    assertEquals("DEPENDENCIES_CAPTURED_IN_GRAPH", graph.exclusion(history.getParentFile()));
+  }
+
+  @Test
+  public void mappedProfilesUseResolvedRootForBuiltinExclusions() throws Exception {
+    File root = temporary.newFolder();
+    File dsh = new File(root, "actual"), original = new File(root, "legacy");
+    File global = new File(root, "global");
+    write(
+        new File(dsh, "profiles/web/package.json"),
+        "{\"dependencies\":{\"dsh-web-mobile\":\"link:/root/dsha-web-mobile\"}}");
+    write(
+        new File(dsh, "profiles/web/node_modules/dsh-web-mobile/package.json"),
+        "{\"name\":\"dsh-web-mobile\"}");
+    write(new File(dsh, "profiles/web/node_modules/.bin/custom"), "keep user wrapper");
+    GuestDataResolver resolver =
+        new GuestDataResolver(
+            fs,
+            root,
+            null,
+            List.of(),
+            path -> {
+              String base = original.getAbsolutePath();
+              String value = path.getAbsolutePath();
+              return value.equals(base) || value.startsWith(base + File.separator)
+                  ? new File(dsh.getAbsolutePath() + value.substring(base.length()))
+                  : path;
+            });
+    NativePluginGraph graph = new NativePluginGraph(fs, resolver, dsh, global, root, Map.of());
+    graph.collect(new BackupControl(null));
+    File resolvedProfiles = resolver.resolve(new File(original, "profiles")).file;
+    FileBackupSource source =
+        new FileBackupSource(
+            fs,
+            "profiles",
+            "plugins",
+            resolvedProfiles,
+            false,
+            (path, node) -> graph.exclusion(new File(resolvedProfiles, path)),
+            resolver);
+    List<BackupSource.Item> items = new ArrayList<>();
+    source.walk(items::add, new BackupControl(null));
+    assertTrue(
+        items.stream()
+            .anyMatch(
+                item ->
+                    item.path.equals("web/node_modules/dsh-web-mobile")
+                        && item.kind.equals("EXCLUDED")
+                        && item.reason.equals("DEPENDENCIES_CAPTURED_IN_GRAPH")));
+    assertFalse(
+        items.stream()
+            .anyMatch(item -> item.path.equals("web/node_modules/dsh-web-mobile/package.json")));
+  }
+}

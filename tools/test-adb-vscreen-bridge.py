@@ -1,0 +1,160 @@
+#!/usr/bin/env python3
+"""Host-only fixtures for the managed ADB virtual-screen launch handshake."""
+import builtins
+import importlib.util
+import io
+import json
+from pathlib import Path
+import re
+import unittest
+from unittest import mock
+
+ASSET = Path(__file__).resolve().parents[1] / 'app/src/main/assets/adb-shell.py'
+SPEC = importlib.util.spec_from_file_location('dsha_adb_shell', ASSET)
+adb = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(adb)
+
+TICKET = '0123456789abcdef0123456789abcdef0123456789abcdef'
+SOURCE = '/data/app/com.dsh.client/base.apk'
+COMMAND = ('app_process -Djava.class.path=' + SOURCE + ' /system/bin '
+           'com.deepseekharness.app.vscreen.VirtualScreenCore --launch --port 0 --package com.dsh.client.experimental')
+
+
+def plan(ticket=TICKET):
+    return dict(version=1, kind='VIRTUAL_SCREEN',
+                argv=['app_process', '-Djava.class.path=' + SOURCE, '/system/bin',
+                      'com.deepseekharness.app.vscreen.VirtualScreenCore', '--launch', '--port', '0', '--package', 'com.dsh.client.experimental'],
+                sourceApk=SOURCE, selfPackage="com.dsh.client.experimental", nativeAuthorization='managed-vscreen-start',
+                nativeTicket=ticket, su=False)
+
+
+class Response:
+    def __init__(self, body): self.body = body
+    def __enter__(self): return self
+    def __exit__(self, *args): return False
+    def read(self, limit=-1): return self.body[:limit] if limit >= 0 else self.body
+
+
+class FakeDevice:
+    def __init__(self, events): self.events = events
+    def connect(self, **kwargs): return True
+    def shell(self, command, **kwargs):
+        self.events.append(('send', command))
+        marker = re.search(r'(__DSHA_EXIT_[a-f0-9]+__=)', command).group(1)
+        return ('\n' + marker + '0\n').encode()
+    def close(self): pass
+
+
+class ADBVirtualScreenBridgeTest(unittest.TestCase):
+    def test_bridge_failure_codes_keep_stage_without_exception_secrets(self):
+        import urllib.error
+        for stage in ('START', 'COMMIT'):
+            for failure, reason in ((urllib.error.HTTPError('http://private/?token=secret', 401, 'secret', {}, None), 'HTTP_ERROR'),
+                                    (TimeoutError('token=secret'), 'TIMEOUT'),
+                                    (urllib.error.URLError(ConnectionRefusedError('token=secret')), 'CONNECT_FAILED'),
+                                    (FileNotFoundError('private/path/secret'), 'CREDENTIAL_UNAVAILABLE'),
+                                    (ValueError('token=secret'), 'INVALID_RESPONSE')):
+                self.assertEqual('ADB_' + stage + '_BRIDGE_' + reason, adb.vscreen_bridge_failure(stage, failure))
+
+    def test_start_policy_rejections_have_safe_specific_codes(self):
+        for output, code in (('虚拟屏启动许可无效、过期或已使用 token=secret', 'TICKET_REJECTED'),
+                             ('无法核验 DSHA 安装包路径 /private/secret', 'PATH_UNVERIFIED'),
+                             ('ADB 通道不可用 token=secret', 'CHANNEL_UNAVAILABLE'),
+                             ('token=secret arbitrary error', 'PLAN_REJECTED')):
+            self.assertEqual('ADB_START_BRIDGE_' + code, adb.vscreen_start_rejection({'state': 'completed', 'output': output}))
+
+    def test_start_auth_and_ticket_rejection_remain_blocked_without_returning_plan(self):
+        for result, code in (('[UNAUTHORIZED]', 'AUTH_REJECTED'),
+                             (json.dumps({'state': 'completed', 'output': '虚拟屏启动许可无效、过期或已使用 token=secret'}), 'TICKET_REJECTED')):
+            body = json.dumps({'result': result}).encode()
+            opener = type('Opener', (), {'open': lambda self, *a, **k: Response(body)})()
+            with mock.patch.object(adb, 'bridge_request', return_value=Response(body)):
+                with self.assertRaisesRegex(adb.policy.Blocked, '^ADB_START_BRIDGE_' + code + '$'):
+                    adb.request_native_vscreen_start(COMMAND, TICKET)
+
+    def test_commit_lost_response_remains_unknown_and_never_replays(self):
+        import urllib.error
+        opener = type('Opener', (), {'open': lambda self, *a, **k: (_ for _ in ()).throw(urllib.error.URLError(ConnectionRefusedError('secret')))})()
+        with mock.patch.object(adb, 'bridge_request', side_effect=urllib.error.URLError(ConnectionRefusedError('secret'))):
+            with self.assertRaisesRegex(adb.ExecutionUnknown, '^ADB_COMMIT_BRIDGE_CONNECT_FAILED$'):
+                adb.request_native_vscreen_commit(TICKET)
+
+    def test_ticket_mode_rejects_root_or_caller_selected_endpoint(self):
+        parsed = adb.parse_args(['--vscreen-launch', '--timeout', '20', '--connect-timeout', '20', '--', COMMAND])
+        self.assertTrue(parsed[5])
+        self.assertEqual(COMMAND, parsed[6])
+        self.assertNotIn('--token', parsed[6])
+        self.assertEqual(TICKET, adb.read_vscreen_ticket(io.BytesIO(TICKET.encode('ascii'))))
+        for invalid in (TICKET[:-1], TICKET + '0'):
+            with self.subTest(invalid_length=len(invalid)), self.assertRaises(ValueError):
+                adb.read_vscreen_ticket(io.BytesIO(invalid.encode('ascii')))
+        for args in (['--vscreen-launch', '--su', '--', COMMAND],
+                     ['--vscreen-launch', '--port', '5555', '--', COMMAND],
+                     ['--vscreen-launch', '--vscreen-launch', '--', COMMAND]):
+            with self.subTest(args=args), self.assertRaises(ValueError): adb.parse_args(args)
+
+    def test_start_plan_is_returned_only_for_matching_ticket_and_exact_core_argv(self):
+        body = json.dumps({'result': json.dumps({'state': 'adb', 'plan': plan()})}).encode()
+        requests = []
+
+        def bridge_request(route, query=None, timeout=75):
+            requests.append((route, query, timeout))
+            return Response(body)
+
+        original_open = builtins.open
+        def open_fixture(path, *args, **kwargs):
+            if path == '/root/.dsh/.bridge_token': return io.BytesIO(b'bridge-secret')
+            return original_open(path, *args, **kwargs)
+        with mock.patch.object(adb, 'bridge_request', side_effect=bridge_request):
+            result = adb.request_native_vscreen_start(COMMAND, TICKET)
+        self.assertEqual(plan(), result)
+        self.assertEqual(('/device/vscreen/start', {'cmd': COMMAND, 'ticket': TICKET}, 15), requests[0])
+        self.assertNotIn('--token', result['argv'])
+        self.assertNotIn('DSHA_VSCREEN_STARTED', json.dumps(result))
+
+        wrong_ticket = json.dumps({'result': json.dumps({'state': 'adb', 'plan': plan('f' * 48)})}).encode()
+        with mock.patch.object(adb, 'bridge_request', return_value=Response(wrong_ticket)):
+            with self.assertRaises(adb.policy.Blocked): adb.request_native_vscreen_start(COMMAND, TICKET)
+
+    def test_ticket_is_consumed_before_one_remote_send_and_unknown_never_sends(self):
+        events = []
+        devices = []
+        def create_device(*args, **kwargs):
+            device = FakeDevice(events); devices.append(device); return device
+        original_open = builtins.open
+        def open_fixture(path, *args, **kwargs):
+            if path == adb.KEY: return io.BytesIO(b'private')
+            if path == adb.KEYPUB: return io.BytesIO(b'public')
+            return original_open(path, *args, **kwargs)
+        with mock.patch('builtins.open', side_effect=open_fixture), \
+             mock.patch.object(adb, 'request_native_vscreen_commit', side_effect=lambda ticket: events.append(('commit', ticket))):
+            result = adb.run_on_endpoint(create_device, lambda public, private: object(), plan(),
+                                         '127.0.0.1', 5555, adb.time.monotonic() + 10, 5)
+        self.assertEqual(0, result.exit_code)
+        self.assertEqual(['commit', 'send'], [event[0] for event in events])
+        self.assertEqual(1, len(devices))
+
+        events.clear()
+        with mock.patch('builtins.open', side_effect=open_fixture), \
+             mock.patch.object(adb, 'request_native_vscreen_commit', side_effect=adb.ExecutionUnknown('lost commit')):
+            with self.assertRaises(adb.ExecutionUnknown):
+                adb.run_on_endpoint(create_device, lambda public, private: object(), plan(),
+                                    '127.0.0.1', 5555, adb.time.monotonic() + 10, 5)
+        self.assertEqual([], events)
+
+    def test_exit_probe_requires_exact_birth_identity_and_remains_managed_only(self):
+        value = plan()
+        identity = '123:456:2000:00000000-0000-0000-0000-000000000001:00000000-0000-0000-0000-000000000002'
+        value['argv'][4:7] = ['--probe-exit', '--identity', identity]
+        sent = []
+        result = adb.policy.execute(value, lambda command: sent.append(command) or adb.ShellResult('proof', 0), adb.ShellResult)
+        self.assertEqual(0, result.exit_code)
+        self.assertEqual(1, len(sent))
+        for bad in (identity.replace('123:', '1:'), identity.replace('456:', '0:'),
+                    identity.replace('2000:', '-1:'), identity + ':extra'):
+            value['argv'][6] = bad
+            with self.assertRaises(adb.policy.Blocked):
+                adb.policy.execute(value, lambda command: self.fail('invalid identity was sent'), adb.ShellResult)
+
+
+if __name__ == '__main__': unittest.main(verbosity=2)

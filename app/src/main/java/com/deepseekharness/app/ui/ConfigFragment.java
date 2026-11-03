@@ -1,0 +1,536 @@
+package com.deepseekharness.app.ui;
+
+import android.content.ComponentName;
+import android.content.Context;
+import android.content.Intent;
+import android.net.Uri;
+import android.os.Bundle;
+import android.os.Environment;
+import android.provider.Settings;
+import android.view.Gravity;
+import android.view.LayoutInflater;
+import android.view.View;
+import android.view.ViewGroup;
+import android.widget.Button;
+import android.widget.CompoundButton;
+import android.widget.EditText;
+import android.widget.LinearLayout;
+import android.widget.ScrollView;
+import android.widget.TextView;
+import android.widget.Toast;
+
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
+import androidx.fragment.app.Fragment;
+
+import com.deepseekharness.app.DeviceBridgeService;
+import com.deepseekharness.app.DshaAccessibilityService;
+import com.deepseekharness.app.OverlayController;
+import com.deepseekharness.app.R;
+import com.deepseekharness.app.bridge.AdbBridge;
+import com.deepseekharness.app.core.ConfigStore;
+import com.deepseekharness.app.core.HarnessController;
+import com.deepseekharness.app.util.Constants;
+
+/**
+ * 配置子页：接口、显示与运行行为；设备授权由独立页面管理。
+ * 所有开关都落到 ConfigStore / SharedPreferences，并真正影响启动与预览。
+ */
+public class ConfigFragment extends Fragment {
+  // Settings 没有在所有 compileSdk stub 中暴露该常量，使用公开的 action 字符串保持 API 26+ 兼容。
+  private static final String ACTION_PICTURE_IN_PICTURE_SETTINGS =
+      "android.settings.PICTURE_IN_PICTURE_SETTINGS";
+  private View pictureSettings;
+  private TextView pictureStatus;
+  private CompoundButton pictureEnabled;
+  private boolean renderingPictureInPicture;
+  private static final java.util.concurrent.atomic.AtomicBoolean savingLanPassword =
+      new java.util.concurrent.atomic.AtomicBoolean();
+
+  @Nullable
+  @Override
+  public View onCreateView(
+      @NonNull LayoutInflater inflater,
+      @Nullable ViewGroup container,
+      @Nullable Bundle savedInstanceState) {
+    View v = inflater.inflate(R.layout.fragment_config, container, false);
+    ConfigStore c = new ConfigStore(requireContext());
+    Context ctx = requireContext();
+    android.widget.RadioGroup dns = v.findViewById(R.id.config_dns_mode);
+    dns.check(
+        "ipv4".equals(c.getDnsMode())
+            ? R.id.dns_ipv4
+            : "native".equals(c.getDnsMode()) ? R.id.dns_native : R.id.dns_auto);
+
+    v.findViewById(R.id.config_workspace_entry)
+        .setOnClickListener(x -> open(new WorkspaceFragment()));
+
+    EditText port = v.findViewById(R.id.config_port);
+    CompoundButton automaticPort = v.findViewById(R.id.config_automatic_port);
+    v.findViewById(R.id.config_restore_port_drafts)
+        .setOnClickListener(x -> BrowserOriginRestore.show(requireContext()));
+    CompoundButton checkUpdate = v.findViewById(R.id.config_check_update);
+    CompoundButton desktop = v.findViewById(R.id.config_desktop_mode);
+    pictureEnabled = v.findViewById(R.id.config_picture_in_picture);
+    pictureEnabled.setChecked(c.isPictureInPictureEnabled());
+    pictureEnabled.setOnCheckedChangeListener(
+        (button, enabled) -> {
+          if (renderingPictureInPicture) return;
+          c.setPictureInPictureEnabled(enabled);
+          renderPictureInPictureStatus();
+        });
+    pictureSettings = v.findViewById(R.id.config_picture_in_picture_settings);
+    pictureStatus = v.findViewById(R.id.config_picture_in_picture_status);
+    pictureSettings.setOnClickListener(x -> openPictureInPictureSettings());
+    renderPictureInPictureStatus();
+    CompoundButton staticLoader = v.findViewById(R.id.config_static_loader),
+        noSeccomp = v.findViewById(R.id.config_no_seccomp);
+    staticLoader.setChecked(c.isProrootStaticLoader());
+    noSeccomp.setChecked(c.isProotSeccompDisabled());
+    CompoundButton proroot = v.findViewById(R.id.config_proroot);
+    CompoundButton lan = v.findViewById(R.id.config_lan_mode);
+    CompoundButton overlay = v.findViewById(R.id.config_overlay_stream);
+    Button save = v.findViewById(R.id.config_save);
+
+    // 高级项折叠
+    View advBody = v.findViewById(R.id.config_adv_body);
+    v.findViewById(R.id.config_adv_header)
+        .setOnClickListener(
+            x ->
+                advBody.setVisibility(
+                    advBody.getVisibility() == View.VISIBLE ? View.GONE : View.VISIBLE));
+
+    // 这里只编辑运行选项；模型与凭据统一由 Web UI 管理。
+    port.setText(c.getPort());
+    automaticPort.setChecked("auto".equals(c.getWebPortMode()));
+    port.setEnabled(!automaticPort.isChecked());
+    checkUpdate.setChecked(c.isCheckUpdate());
+    desktop.setChecked(c.isDesktopMode());
+    CompoundButton gecko = v.findViewById(R.id.config_gecko_core);
+    gecko.setVisibility(View.GONE);
+    v.findViewById(R.id.config_gecko_hint)
+        .setVisibility(com.deepseekharness.app.BuildConfig.LOW_ANDROID ? View.VISIBLE : View.GONE);
+    gecko.setChecked(c.isGeckoCore());
+    proroot.setChecked(c.isProroot());
+    lan.setChecked(c.isLanMode());
+    TextView lanPasswordStatus = v.findViewById(R.id.config_lan_password_status);
+    lanPasswordStatus.setText(
+        c.hasLanPassword() ? R.string.lan_password_set : R.string.lan_password_missing);
+    v.findViewById(R.id.config_lan_password)
+        .setOnClickListener(x -> showLanPasswordDialog(c, lanPasswordStatus));
+    overlay.setChecked(pref(ctx, "overlay_stream", false));
+    final String[] runtimeMode = {c.getRuntimeMode()};
+    bindChoice(
+        v,
+        R.id.config_runtime_choice,
+        com.deepseekharness.app.util.UiText.choose("运行方式", "Runtime"),
+        new String[] {
+          com.deepseekharness.app.util.UiText.choose("proot（默认，稳定）", "proot (default, stable)"),
+          com.deepseekharness.app.util.UiText.choose(
+              "proroot（可选，实验）", "proroot (optional, experimental)"),
+          com.deepseekharness.app.util.UiText.choose(
+              "bxroot（实验，Android 11+）", "bxroot (experimental, Android 11+)")
+        },
+        "bxroot".equals(runtimeMode[0]) ? 2 : c.isProroot() ? 1 : 0,
+        index -> {
+          String next = index == 2 ? "bxroot" : index == 1 ? "proroot" : "proot";
+          if ("bxroot".equals(next)) {
+            var bxroot = new com.deepseekharness.app.runtime.BxrootRuntime(ctx);
+            if (!bxroot.available()) {
+              toast(bxroot.unavailableReason());
+              ((DshaSelectView) v.findViewById(R.id.config_runtime_choice))
+                  .setSelection(
+                      "bxroot".equals(runtimeMode[0]) ? 2
+                          : "proroot".equals(runtimeMode[0]) ? 1 : 0);
+              return;
+            }
+          }
+          runtimeMode[0] = next;
+          proroot.setChecked(index == 1);
+        });
+    bindChoice(
+        v,
+        R.id.config_dns_choice,
+        com.deepseekharness.app.util.UiText.choose("DNS 解析策略", "DNS policy"),
+        new String[] {
+          com.deepseekharness.app.util.UiText.choose("自动（推荐）", "Automatic (recommended)"),
+          "IPv4",
+          com.deepseekharness.app.util.UiText.choose("原生", "Native")
+        },
+        "ipv4".equals(c.getDnsMode()) ? 1 : "native".equals(c.getDnsMode()) ? 2 : 0,
+        index ->
+            dns.check(index == 1 ? R.id.dns_ipv4 : index == 2 ? R.id.dns_native : R.id.dns_auto));
+    bindChoice(
+        v,
+        R.id.config_core_choice,
+        com.deepseekharness.app.util.UiText.choose("网页内核", "Browser engine"),
+        com.deepseekharness.app.BuildConfig.LOW_ANDROID
+            ? new String[] {
+              com.deepseekharness.app.util.UiText.choose("自动选择内核", "Automatic engine"), "Gecko"
+            }
+            : new String[] {"System WebView"},
+        com.deepseekharness.app.BuildConfig.LOW_ANDROID && c.isGeckoCore() ? 1 : 0,
+        index -> gecko.setChecked(index == 1));
+
+    // 悬浮条外观与行为（照 1.1.9.1：底色预设 + 不透明度/行数/字号/停留 + 行为开关）
+    v.findViewById(R.id.config_overlay_style).setOnClickListener(x -> showOverlayStyleDialog());
+
+    v.findViewById(R.id.config_repo_link).setOnClickListener(x -> openRepo(ctx));
+
+    Runnable validateInputs =
+        () -> {
+          try {
+            if (!automaticPort.isChecked())
+              com.deepseekharness.app.util.ConfigInput.port(port.getText().toString());
+            save.setEnabled(true);
+          } catch (IllegalArgumentException invalid) {
+            save.setEnabled(false);
+          }
+        };
+    android.text.TextWatcher inputWatcher =
+        new android.text.TextWatcher() {
+          public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
+
+          public void onTextChanged(CharSequence s, int start, int before, int count) {
+            validateInputs.run();
+          }
+
+          public void afterTextChanged(android.text.Editable text) {}
+        };
+    automaticPort.setOnCheckedChangeListener(
+        (button, checked) -> {
+          port.setEnabled(!checked);
+          validateInputs.run();
+        });
+    port.addTextChangedListener(inputWatcher);
+    validateInputs.run();
+    save.setOnClickListener(
+        x -> {
+          final int chosenPort;
+          try {
+            chosenPort =
+                automaticPort.isChecked()
+                    ? c.getPortInt()
+                    : com.deepseekharness.app.util.ConfigInput.port(port.getText().toString());
+          } catch (IllegalArgumentException e) {
+            advBody.setVisibility(View.VISIBLE);
+            port.setError(e.getMessage());
+            port.requestFocus();
+            return;
+          }
+          port.setError(null);
+          if ("bxroot".equals(runtimeMode[0])) {
+            var bxroot = new com.deepseekharness.app.runtime.BxrootRuntime(ctx);
+            if (!bxroot.available()) {
+              toast(bxroot.unavailableReason());
+              return;
+            }
+          }
+          com.deepseekharness.app.util.EnvironmentTaskGate.Lease saving =
+              com.deepseekharness.app.util.EnvironmentTaskGate.tryAcquire(
+                  com.deepseekharness.app.util.UiText.text("保存配置"));
+          if (saving == null) {
+            toast(
+                com.deepseekharness.app.util.UiText.format(
+                    "正在%s，完成后再保存配置",
+                    com.deepseekharness.app.util.EnvironmentTaskGate.activeKind()));
+            return;
+          }
+          try {
+            saving.run(
+                () -> {
+                  c.setWebPort(automaticPort.isChecked() ? "auto" : "fixed", chosenPort);
+                  c.setCheckUpdate(checkUpdate.isChecked());
+                  c.setDesktopMode(desktop.isChecked());
+                  if (com.deepseekharness.app.BuildConfig.LOW_ANDROID)
+                    c.setGeckoCore(gecko.isChecked());
+                  c.setRuntimeMode(runtimeMode[0]);
+                  c.setProrootStaticLoader(staticLoader.isChecked());
+                  c.setProotSeccompDisabled(noSeccomp.isChecked());
+                  c.setDnsMode(
+                      dns.getCheckedRadioButtonId() == R.id.dns_ipv4
+                          ? "ipv4"
+                          : dns.getCheckedRadioButtonId() == R.id.dns_native ? "native" : "auto");
+                  c.setLanMode(lan.isChecked());
+                  boolean overlayEnabled = overlay.isChecked();
+                  setPref(ctx, "overlay_stream", overlayEnabled);
+                  // The settings switch is also the lifecycle switch for the
+                  // WindowManager overlay.  Previously only the preference changed;
+                  // an already visible bar stayed alive after disabling and a newly
+                  // enabled bar did not receive the refreshed style until a later
+                  // process event, which looked like the control did nothing.
+                  if (!overlayEnabled) OverlayController.teardown(ctx.getApplicationContext());
+                  else if (OverlayController.permitted(ctx))
+                    OverlayController.applyStyleNow(ctx.getApplicationContext());
+                  boolean lanApplied = applyLanMode(ctx, lan.isChecked());
+                  int lanMessage =
+                      lanSettingsMessage(lan.isChecked(), c.hasLanPassword(), lanApplied);
+                  if (lanMessage != 0) Toast.makeText(ctx, lanMessage, Toast.LENGTH_LONG).show();
+                  if (lan.isChecked() && getActivity() instanceof MainActivity)
+                    ((MainActivity) getActivity()).requestLocalNetwork();
+                  Toast.makeText(
+                          ctx,
+                          com.deepseekharness.app.util.UiText.text(
+                              "已保存；网页显示选项重新进入对话生效，端口与运行时需重启 Web"),
+                          Toast.LENGTH_LONG)
+                      .show();
+                  if (overlay.isChecked() && !OverlayController.permitted(ctx))
+                    openOverlayPermission();
+                  return null;
+                });
+          } catch (Exception e) {
+            toast(
+                com.deepseekharness.app.util.UiText.format(
+                    "配置保存未完成：%s",
+                    com.deepseekharness.app.util.SensitiveData.redact(String.valueOf(e))));
+          } finally {
+            saving.close();
+          }
+        });
+
+    return v;
+  }
+
+  @Override
+  public void onResume() {
+    super.onResume();
+    renderPictureInPictureStatus();
+  }
+
+  @Override
+  public void onDestroyView() {
+    pictureSettings = null;
+    pictureStatus = null;
+    pictureEnabled = null;
+    super.onDestroyView();
+  }
+
+  private void openPictureInPictureSettings() {
+    Context ctx = getContext();
+    if (ctx == null) return;
+    if (!PictureInPictureActivity.supported(ctx)) {
+      Toast.makeText(ctx, R.string.picture_in_picture_unsupported, Toast.LENGTH_LONG).show();
+      return;
+    }
+    Uri app = Uri.parse("package:" + ctx.getPackageName());
+    try {
+      startActivity(new Intent(ACTION_PICTURE_IN_PICTURE_SETTINGS, app));
+    } catch (RuntimeException unavailable) {
+      try {
+        startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, app));
+      } catch (RuntimeException ignored) {
+        Toast.makeText(ctx, R.string.picture_in_picture_settings_unavailable, Toast.LENGTH_LONG)
+            .show();
+      }
+    }
+  }
+
+  private void renderPictureInPictureStatus() {
+    Context ctx = getContext();
+    if (ctx == null || pictureSettings == null || pictureStatus == null) return;
+    boolean supported = PictureInPictureActivity.supported(ctx);
+    if (pictureEnabled != null) {
+      renderingPictureInPicture = true;
+      pictureEnabled.setChecked(new ConfigStore(ctx).isPictureInPictureEnabled());
+      pictureEnabled.setEnabled(supported);
+      renderingPictureInPicture = false;
+    }
+    pictureSettings.setEnabled(supported);
+    pictureSettings.setAlpha(supported ? 1f : 0.55f);
+    pictureStatus.setText(
+        !supported
+            ? R.string.picture_in_picture_unsupported
+            : !new ConfigStore(ctx).isPictureInPictureEnabled()
+                ? R.string.picture_in_picture_opted_out
+                : PictureInPictureActivity.allowed(ctx)
+                    ? R.string.picture_in_picture_allowed
+                    : R.string.picture_in_picture_disabled);
+  }
+
+  private void openOverlayPermission() {
+    try {
+      startActivity(
+          new Intent(
+              Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+              Uri.parse("package:" + requireContext().getPackageName())));
+    } catch (Exception e) {
+      toast(com.deepseekharness.app.util.UiText.text("未取得悬浮窗权限，请到系统设置 → 应用 → DSHA → 悬浮窗中允许"));
+    }
+  }
+
+  private void showLanPasswordDialog(ConfigStore config, TextView status) {
+    if (savingLanPassword.get()) {
+      Toast.makeText(requireContext(), R.string.lan_password_saving, Toast.LENGTH_SHORT).show();
+      return;
+    }
+    Context context = requireContext();
+    LinearLayout fields = new LinearLayout(context);
+    fields.setOrientation(LinearLayout.VERTICAL);
+    int padding = (int) (20 * getResources().getDisplayMetrics().density);
+    fields.setPadding(padding, 0, padding, 0);
+    EditText password = new EditText(context);
+    password.setHint(R.string.lan_password_new);
+    password.setInputType(
+        android.text.InputType.TYPE_CLASS_TEXT
+            | android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD);
+    password.setImportantForAutofill(View.IMPORTANT_FOR_AUTOFILL_NO);
+    EditText confirmation = new EditText(context);
+    confirmation.setHint(R.string.lan_password_confirm);
+    confirmation.setInputType(
+        android.text.InputType.TYPE_CLASS_TEXT
+            | android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD);
+    confirmation.setImportantForAutofill(View.IMPORTANT_FOR_AUTOFILL_NO);
+    fields.addView(password);
+    fields.addView(confirmation);
+    var dialog =
+        new DshaDialogBuilder(context)
+            .setTitle(R.string.lan_password_button)
+            .setMessage(R.string.lan_password_prompt)
+            .setView(fields)
+            .setNegativeButton(R.string.lan_password_cancel, null)
+            .setPositiveButton(R.string.lan_password_save, null)
+            .create();
+    dialog.show();
+    dialog
+        .getButton(android.content.DialogInterface.BUTTON_POSITIVE)
+        .setOnClickListener(
+            ignored -> {
+              String value = password.getText().toString();
+              if (!com.deepseekharness.app.util.LanPassword.validPassword(value)
+                  || !value.equals(confirmation.getText().toString())) {
+                confirmation.setError(getString(R.string.lan_password_invalid));
+                return;
+              }
+              if (!savingLanPassword.compareAndSet(false, true)) return;
+              password.setText("");
+              confirmation.setText("");
+              dialog.dismiss();
+              status.setText(R.string.lan_password_saving);
+              Context app = context.getApplicationContext();
+              new Thread(
+                      () -> {
+                        boolean saved = false;
+                        try {
+                          config.setLanPassword(value);
+                          saved = true;
+                        } catch (RuntimeException ignoredFailure) {
+                          // Do not log exception details: the input is a secret.
+                        }
+                        final boolean success = saved;
+                        new android.os.Handler(android.os.Looper.getMainLooper())
+                            .post(
+                                () -> {
+                                  boolean enabled = config.isLanMode();
+                                  boolean applied = success && applyLanMode(app, enabled);
+                                  savingLanPassword.set(false);
+                                  if (!isAdded() || getView() == null) return;
+                                  TextView currentStatus =
+                                      getView().findViewById(R.id.config_lan_password_status);
+                                  currentStatus.setText(
+                                      config.hasLanPassword()
+                                          ? R.string.lan_password_set
+                                          : R.string.lan_password_missing);
+                                  int message = lanPasswordSavedMessage(success, enabled, applied);
+                                  Toast.makeText(app, message, Toast.LENGTH_LONG).show();
+                                });
+                      },
+                      "dsha-lan-password")
+                  .start();
+            });
+  }
+
+  // Submission is not proof of a successful asynchronous bind. The Launch page
+  // observes the actual listener and network state.
+  static int lanSettingsMessage(boolean enabled, boolean hasPassword, boolean submitted) {
+    if (!enabled) return submitted ? 0 : R.string.lan_apply_failed;
+    if (!hasPassword) return R.string.lan_password_missing;
+    return submitted ? R.string.lan_apply_check : R.string.lan_apply_failed;
+  }
+
+  static int lanPasswordSavedMessage(boolean saved, boolean enabled, boolean submitted) {
+    if (!saved) return R.string.lan_password_failed;
+    if (!submitted) return R.string.lan_password_listener_failed;
+    return enabled ? R.string.lan_password_saved_check : R.string.lan_password_waiting;
+  }
+
+  /** Submit the desired state; successful submission does not mean binding succeeded. */
+  private static boolean applyLanMode(Context context, boolean on) {
+    try {
+      if (!on) {
+        com.deepseekharness.app.LanProxyService.stopLanListener();
+        com.deepseekharness.app.HarnessService.refreshPowerMode(context);
+        return true;
+      }
+      com.deepseekharness.app.HarnessService.ensureLanForeground(context);
+      HarnessController hc = HarnessController.get(context);
+      long gen = hc.getWebGeneration();
+      if (gen <= 0 || !com.deepseekharness.app.LanProxyService.hasDshAuth(gen)) return true;
+      com.deepseekharness.app.LanProxyService.start(
+          hc.proot().getRootfsDir().getAbsolutePath(), context, hc.getWebPort(), gen);
+      return true;
+    } catch (RuntimeException failure) {
+      return false;
+    }
+  }
+
+  private void open(Fragment f) {
+    UiMotion.page(requireContext(), getParentFragmentManager().beginTransaction())
+        .addToBackStack(null)
+        .replace(R.id.fragment_container, f)
+        .commit();
+  }
+
+  private void showOverlayStyleDialog() {
+    UiMotion.page(requireContext(), getParentFragmentManager().beginTransaction())
+        .replace(R.id.fragment_container, new OverlayFragment())
+        .addToBackStack("config")
+        .commit();
+  }
+
+  private void openRepo(Context ctx) {
+    try {
+      startActivity(
+          new Intent(
+              Intent.ACTION_VIEW,
+              Uri.parse(com.deepseekharness.app.util.Constants.REPOSITORY_URL)));
+    } catch (Exception e) {
+      toast(com.deepseekharness.app.util.UiText.text("无法打开浏览器"));
+    }
+  }
+
+  private boolean pref(Context ctx, String k, boolean def) {
+    return ctx.getSharedPreferences(Constants.PREFS, Context.MODE_PRIVATE).getBoolean(k, def);
+  }
+
+  private void setPref(Context ctx, String k, boolean v) {
+    ctx.getSharedPreferences(Constants.PREFS, Context.MODE_PRIVATE).edit().putBoolean(k, v).apply();
+  }
+
+  private void toast(String s) {
+    Context context = getContext();
+    if (context != null) Toast.makeText(context, s, Toast.LENGTH_SHORT).show();
+  }
+
+  private void bindChoice(
+      View root,
+      int id,
+      String prompt,
+      String[] labels,
+      int selected,
+      java.util.function.IntConsumer action) {
+    DshaSelectView choice = root.findViewById(id);
+    choice.setPrompt(prompt);
+    choice.setAdapter(
+        new android.widget.ArrayAdapter<>(requireContext(), R.layout.item_data_choice, labels));
+    choice.setSelection(selected);
+    choice.setOnItemSelectedListener(
+        new android.widget.AdapterView.OnItemSelectedListener() {
+          public void onNothingSelected(android.widget.AdapterView<?> parent) {}
+
+          public void onItemSelected(
+              android.widget.AdapterView<?> parent, View view, int position, long item) {
+            action.accept(position);
+          }
+        });
+  }
+}

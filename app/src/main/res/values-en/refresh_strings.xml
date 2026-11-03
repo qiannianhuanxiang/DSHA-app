@@ -1,0 +1,32 @@
+<resources>
+
+    <string name="device_open_access">Manage file access</string>
+
+
+
+
+
+
+
+
+
+
+
+    <string name="about_tagline">DeepSeek Harness for Android</string>
+
+    <string name="about_community">QQ community</string>
+
+    <string name="about_close_button">Close</string>
+
+
+
+    <string name="device_checking">Checking authorization…</string>
+    <string name="device_unrestricted_shell">Unrestricted device shell</string>
+
+
+
+
+
+
+
+</resources>

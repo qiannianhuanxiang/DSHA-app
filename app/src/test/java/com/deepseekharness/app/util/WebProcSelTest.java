@@ -1,0 +1,307 @@
+package com.deepseekharness.app.util;
+
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
+
+import org.junit.Test;
+
+/** WebProcSel 的判据断言：认得出 dsh 进程、绝不误杀 proot 容器启动器。 */
+public class WebProcSelTest {
+  private static final String BRIDGE =
+      "libproroot-bridge.so /data/app/pkg/lib/arm64/libproroot-linker.so "
+          + "--argv0 node --preload /data/app/pkg/lib/arm64/libproroot-runtime.so "
+          + "/data/data/com.dsh.client/files/linux/ubuntu/usr/local/bin/node ";
+
+  @Test
+  public void directVendorAndShimPreloadsRetainExactOwnedWebIdentity() {
+    String directory = "/data/app/pkg/lib/arm64/";
+    String prefix =
+        directory
+            + "libproroot-bridge.so "
+            + directory
+            + "libproroot-linker.so "
+            + "--preload "
+            + directory
+            + "libdsha-proroot-compat.so --argv0 node --preload "
+            + directory
+            + "libproroot-runtime.so /data/data/com.dsh.client/files/linux/ubuntu/usr/local/bin/node ";
+    String command =
+        prefix + "/usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js web --port 3080";
+    assertTrue(WebProcSel.looksLikeWeb(command));
+    assertTrue(WebProcSel.maySignalWeb(command.replace(' ', '\0') + '\0'));
+    String shell =
+        (prefix.substring(0, prefix.indexOf("--argv0"))
+                    + "--argv0 bash --preload "
+                    + directory
+                    + "libproroot-runtime.so "
+                    + "/data/data/com.dsh.client/files/linux/ubuntu/bin/bash -c ")
+                .replace(' ', '\0')
+            + "export DSH_HOME=/root/.dsh && export DSHA_STARTUP_PROFILE='web' && "
+            + "export DSHA_WEB_GENERATION=7 && echo $$ > /root/.dsha-web.pid 2>/dev/null; "
+            + "[ ! -e /root/.dsha-stopped ] || exit 0; exec dsh web --no-open --host 127.0.0.1 --port 3080\0";
+    // The managed pre-exec shell keeps the barrier; only the actual node can be signalled.
+    assertTrue(WebProcSel.looksLikeWeb(shell));
+    assertFalse(WebProcSel.maySignalWeb(shell));
+    assertFalse(
+        WebProcSel.looksLikeWeb("libproroot.so\0-r\0/rootfs\0" + command.replace(' ', '\0')));
+    assertFalse(
+        WebProcSel.maySignalWeb("libproroot.so\0-r\0/rootfs\0" + command.replace(' ', '\0')));
+    String trial =
+        prefix
+            + "/usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js --profile dsha-recovery-ce608c6a2f1b4e67 --port 0";
+    assertEquals("dsha-recovery-ce608c6a2f1b4e67", WebProcSel.trialProfile(trial));
+    for (String unsafe :
+        new String[] {
+          command.replace(
+              directory + "libdsha-proroot-compat.so",
+              "/data/user/0/app/files/libdsha-proroot-compat.so"),
+          command.replace(directory + "libproroot-runtime.so", "/tmp/libproroot-runtime.so"),
+          command.replace("libdsha-proroot-compat.so", "unknown.so"),
+          command.replace(
+              "--argv0 node", "--preload " + directory + "libdsha-proroot-compat.so --argv0 node"),
+          command.replace(directory, "/data/user/0/app/files/"),
+          prefix + "server.js --message dsh web",
+          prefix + "/usr/local/bin/dsh plugin list"
+        }) {
+      assertFalse(unsafe, WebProcSel.looksLikeWeb(unsafe));
+      assertFalse(unsafe, WebProcSel.maySignalWeb(unsafe));
+      assertEquals("", WebProcSel.trialProfile(unsafe));
+    }
+  }
+
+  @Test
+  public void vendorOptionalLibgccMatchesTheActualGuestRootAndKeepsProcessBoundaries() {
+    String directory = "/data/app/pkg/lib/arm64/";
+    String root = "/data/data/com.dsh.client/files/linux/ubuntu";
+    String gcc = root + "/usr/lib/aarch64-linux-gnu/libgcc_s.so.1";
+    String prefix =
+        directory
+            + "libproroot-bridge.so "
+            + directory
+            + "libproroot-linker.so "
+            + "--preload "
+            + directory
+            + "libdsha-proroot-compat.so --argv0 node --preload "
+            + directory
+            + "libproroot-runtime.so --preload "
+            + gcc
+            + " "
+            + root
+            + "/usr/local/bin/node ";
+    String web = prefix + "/usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js web --port 3080";
+    assertTrue(WebProcSel.looksLikeWeb(web));
+    assertTrue(WebProcSel.maySignalWeb(web.replace(' ', '\0') + '\0'));
+    String trial = prefix + "/usr/local/bin/dsh --profile dsha-recovery-ce608c6a2f1b4e67 --port 0";
+    assertEquals("dsha-recovery-ce608c6a2f1b4e67", WebProcSel.trialProfile(trial));
+    assertTrue(
+        WebProcSel.looksLikeWeb(
+            web.replace("--preload " + directory + "libdsha-proroot-compat.so ", "")));
+    String shell =
+        (prefix.substring(0, prefix.indexOf("--argv0"))
+                    + "--argv0 bash --preload "
+                    + directory
+                    + "libproroot-runtime.so --preload "
+                    + gcc
+                    + " "
+                    + root
+                    + "/usr/bin/bash -c ")
+                .replace(' ', '\0')
+            + "export DSH_HOME=/root/.dsh && export DSHA_STARTUP_PROFILE='web' && "
+            + "export DSHA_WEB_GENERATION=7 && echo $$ > /root/.dsha-web.pid 2>/dev/null; "
+            + "[ ! -e /root/.dsha-stopped ] || exit 0; exec dsh web --no-open --host 127.0.0.1 --port 3080\0";
+    assertTrue(WebProcSel.looksLikeWeb(shell));
+    assertFalse(WebProcSel.maySignalWeb(shell));
+    for (String unsafe :
+        new String[] {
+          web.replace(gcc, "/tmp/libgcc_s.so.1"),
+          web.replace(gcc, root + "/usr/lib/aarch64-linux-gnu/other.so"),
+          web.replace(gcc, "/different-root/usr/lib/aarch64-linux-gnu/libgcc_s.so.1"),
+          web.replace("--preload " + gcc, "--preload " + gcc + " --preload " + gcc),
+          web.replace(root + "/usr/local/bin/node", "/another-root/usr/local/bin/node"),
+          "libproroot.so -r /rootfs " + web,
+          prefix + "server.js --message dsh web",
+          prefix + "/usr/local/bin/dsh plugin list"
+        }) {
+      assertFalse(unsafe, WebProcSel.looksLikeWeb(unsafe));
+      assertFalse(unsafe, WebProcSel.maySignalWeb(unsafe));
+      assertEquals("", WebProcSel.trialProfile(unsafe));
+    }
+  }
+
+  @Test
+  public void recognizesOnlyProrootNodeWebPayload() {
+    String command = BRIDGE + "/usr/local/bin/dsh web --no-open --host 127.0.0.1 --port 3080";
+    assertTrue(WebProcSel.looksLikeWeb(command));
+    assertTrue(WebProcSel.looksLikeWeb(command.replace(' ', '\0') + '\0'));
+    assertTrue(
+        WebProcSel.looksLikeWeb(
+            BRIDGE
+                + "--expose-internals /usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js web"));
+    assertFalse(WebProcSel.looksLikeWeb("libproroot.so -r /rootfs " + command));
+    assertFalse(WebProcSel.looksLikeWeb("libproot.so -r /rootfs " + command));
+    assertFalse(WebProcSel.looksLikeWeb(BRIDGE + "server.js --message 'dsh web'"));
+    assertFalse(WebProcSel.looksLikeWeb(BRIDGE + "-e 'import(\"dsh web\")'"));
+    assertFalse(WebProcSel.looksLikeWeb(BRIDGE + "/usr/local/bin/dsh plugin list"));
+    assertFalse(
+        WebProcSel.looksLikeWeb(
+            BRIDGE.replace("--argv0 node", "--argv0 bash") + "/usr/local/bin/dsh web"));
+    assertFalse(WebProcSel.looksLikeWeb(command.replace("--preload", "-r")));
+    assertFalse(WebProcSel.looksLikeWeb(command.replace("libproroot-linker.so", "other.so")));
+    assertFalse(WebProcSel.looksLikeWeb(BRIDGE + "/usr/local/bin/dsh web-not-a-command"));
+    assertFalse(WebProcSel.looksLikeWeb("libproroot-bridge.so dsh web"));
+    assertFalse(
+        WebProcSel.looksLikeWeb(
+            command.replace("/usr/local/bin/dsh web", "/usr/local/bin/dsh\u0000web injected")));
+  }
+
+  @Test
+  public void recognizesRealProrootRecoveryCmdlineFromDevice() {
+    String command =
+        "/data/app/pkg/lib/arm64/libproroot-bridge.so\u0000"
+            + "/data/app/pkg/lib/arm64/libproroot-linker.so\u0000--argv0\u0000/usr/local/bin/node\u0000"
+            + "--preload\u0000/data/app/pkg/lib/arm64/libproroot-runtime.so\u0000"
+            + "/data/data/com.dsh.client/files/linux/ubuntu/usr/local/bin/node\u0000"
+            + "/usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js\u0000"
+            + "--profile\u0000dsha-recovery-ce608c6a2f1b4e67\u0000--no-open\u0000"
+            + "--host\u0000127.0.0.1\u0000--port\u00000\u0000";
+    assertTrue(WebProcSel.looksLikeWeb(command));
+    assertTrue(WebProcSel.maySignalWeb(command));
+    assertEquals("dsha-recovery-ce608c6a2f1b4e67", WebProcSel.trialProfile(command));
+    assertFalse(
+        WebProcSel.looksLikeWeb(
+            command.replace("--argv0\u0000/usr/local/bin/node", "--argv0\u0000/bin/bash")));
+    assertEquals(
+        "",
+        WebProcSel.trialProfile(
+            command.replace(
+                "--profile\u0000dsha-recovery-ce608c6a2f1b4e67",
+                "web\u0000--profile\u0000dsha-recovery-ce608c6a2f1b4e67")));
+  }
+
+  @org.junit.Test
+  public void pidFileContainsOnlyOneSafePid() {
+    org.junit.Assert.assertEquals(1234, WebProcSel.parsePid("1234\n"));
+    for (String value :
+        new String[] {
+          "", "0", "1", "-1234", "+1234", "1234;echo bad", "1234\n5678", "9999999999", "１２３４"
+        }) org.junit.Assert.assertEquals(value, -1, WebProcSel.parsePid(value));
+    org.junit.Assert.assertEquals(-1, WebProcSel.parsePid(null));
+  }
+
+  @Test
+  public void recognizesRealDshCmdline() {
+    String real =
+        "node --expose-internals " + "/usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js web";
+    assertTrue(WebProcSel.looksLikeWeb(real));
+    assertFalse(WebProcSel.looksLikeWeb("node .../bin.js web"));
+  }
+
+  @Test
+  public void neverKillsContainerLauncher() {
+    // proot/proroot 命令行里带着 rootfs 路径和待执行命令，可能包含 bin.js/web，
+    // 但必须被排除 —— 杀到它等于把整个环境一起带走。
+    assertFalse(
+        WebProcSel.looksLikeWeb(
+            "libproot.so -r /data/user/0/com.dsh.client/files/linux/ubuntu "
+                + "/usr/bin/env bash -c node .../bin.js web"));
+    assertFalse(WebProcSel.looksLikeWeb("libproroot-runtime.so -r ..."));
+    assertFalse(WebProcSel.looksLikeWeb("proot -w /root"));
+  }
+
+  @Test
+  public void ignoresUnrelatedProcesses() {
+    assertFalse(WebProcSel.looksLikeWeb(null));
+    assertFalse(WebProcSel.looksLikeWeb(""));
+    assertFalse(WebProcSel.looksLikeWeb("node server.js")); // 用户自己的 node 进程
+    assertFalse(WebProcSel.looksLikeWeb("com.dsh.client"));
+  }
+
+  @Test
+  public void textMentioningRuntimeIsNeverAnOwnedWebProcess() {
+    for (String command :
+        new String[] {
+          "grep dsh-app-boot logfile",
+          "vim /root/dsh-cmd.txt",
+          "node server.js --message dsh web",
+          "bash -c echo dsh web",
+          "cat /root/dsh-web-restart.sh",
+          "node /usr/local/bin/dsh plugin list"
+        }) assertFalse(command, WebProcSel.looksLikeWeb(command));
+    assertTrue(WebProcSel.looksLikeWeb("bash /root/dsh-watchdog.sh"));
+    assertFalse(WebProcSel.maySignalWeb("bash /root/dsh-watchdog.sh"));
+  }
+
+  @Test
+  public void ownPreExecShellKeepsBarrierButCannotBeSignalledByText() {
+    String command =
+        "export DSH_HOME=/root/.dsh && export DSHA_STARTUP_PROFILE='web' && export DSHA_WEB_GENERATION=7 && echo $$ > /root/.dsha-web.pid 2>/dev/null; [ ! -e /root/.dsha-stopped ] || exit 0; exec dsh web --no-open --host 127.0.0.1 --port 3080";
+    String proc = "/bin/bash\0-c\0" + command + "\0";
+    assertTrue(WebProcSel.looksLikeWeb(proc));
+    assertFalse(WebProcSel.maySignalWeb(proc));
+    String bridge =
+        "libproroot-bridge.so\0/data/app/lib/libproroot-linker.so\0--argv0\0bash\0--preload\0/data/app/lib/libproroot-runtime.so\0/data/user/0/app/files/linux/ubuntu/usr/bin/bash\0-c\0"
+            + command
+            + "\0";
+    assertTrue(WebProcSel.looksLikeWeb(bridge));
+    assertFalse(WebProcSel.maySignalWeb(bridge));
+    assertFalse(WebProcSel.looksLikeWeb("vim\0-c\0" + command + "\0"));
+    assertFalse(
+        WebProcSel.looksLikeWeb(proc.replace("echo $$ > /root/.dsha-web.pid", "echo example")));
+  }
+
+  @Test
+  public void currentCanonicalLaunchShellIsRetainedWithoutSignallingTheShell() {
+    for (String profile : new String[] {"web", "dsha-recovery-example"}) {
+      String command = WebLaunchCommand.build(true, "zh", profile, 0, 9);
+      String shell = "/bin/bash\0-c\0" + command + "\0";
+      assertTrue(WebProcSel.looksLikeWeb(shell));
+      assertFalse(WebProcSel.maySignalWeb(shell));
+      String oldEntry = command.replace(DshEntrypoint.exec(), "exec dsh");
+      assertTrue(WebProcSel.looksLikeWeb("/bin/bash\0-c\0" + oldEntry + "\0"));
+      assertFalse(WebProcSel.looksLikeWeb("/bin/bash\0-c\0echo " + command + "\0"));
+      assertFalse(
+          WebProcSel.looksLikeWeb(shell.replace("echo $$ > " + WebProcSel.PID_WEB, "echo sample")));
+      String bridge =
+          "libproroot-bridge.so\0/data/app/lib/libproroot-linker.so\0--argv0\0bash\0--preload\0/data/app/lib/libproroot-runtime.so\0/data/user/0/app/files/linux/ubuntu/usr/bin/bash\0-c\0"
+              + command
+              + "\0";
+      assertTrue(WebProcSel.looksLikeWeb(bridge));
+      assertFalse(WebProcSel.maySignalWeb(bridge));
+    }
+  }
+
+  @Test
+  public void portHexIsFourDigitUpperHex() {
+    assertEquals("0C08", WebProcSel.portHex(3080));
+    assertEquals("0C12", WebProcSel.portHex(3090));
+    assertEquals("15B3", WebProcSel.portHex(5555));
+  }
+
+  @Test
+  public void pidFileRelStripsLeadingSlash() {
+    assertEquals("root/.dsha-web.pid", WebProcSel.pidFileRel("/root/.dsha-web.pid"));
+    assertEquals("root/.dsha-watchdog.pid", WebProcSel.pidFileRel("/root/.dsha-watchdog.pid"));
+  }
+
+  @Test
+  public void sentinelIsAnAbsoluteGuestPath() {
+    assertTrue(WebProcSel.STOP_SENTINEL.startsWith("/root/"));
+  }
+
+  @Test
+  public void recoveryProfileStillStopsOnlyDirectWebNode() {
+    String command =
+        "node /usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js --profile dsha-recovery-0123456789abcdef --no-open --host 127.0.0.1 --port 3080";
+    assertTrue(WebProcSel.maySignalWeb(command));
+    assertTrue(WebProcSel.looksLikeWeb(command));
+    assertEquals("dsha-recovery-0123456789abcdef", WebProcSel.trialProfile(command));
+    assertFalse(WebProcSel.maySignalWeb("bash -c " + command));
+    assertFalse(WebProcSel.maySignalWeb("libproot.so " + command));
+    assertFalse(
+        WebProcSel.maySignalWeb(command.replace("dsha-recovery-0123456789abcdef", "user-profile")));
+    assertFalse(
+        WebProcSel.maySignalWeb(
+            command.replace("dsha-recovery-0123456789abcdef", "dsha-recovery-invalid")));
+  }
+}

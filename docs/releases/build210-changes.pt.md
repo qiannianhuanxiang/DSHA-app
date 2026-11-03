@@ -1,0 +1,6 @@
+# DSHA 0.2.1-rc.3-bxroot.8-dsh0.2.1-rc.3 / build210
+
+- - Adicionadas chamadas nativas ao estilo Termux (motor bxroot): o Ubuntu executa comandos nativos do Android diretamente (`getprop`, `toybox`, `pm`, …; programas guest de mesmo nome têm prioridade, ou use `bx-host <comando>`), e um shell nativo do Android pode voltar à mesma sessão Ubuntu via `$BXROOT_ENTER`. O UID continua sendo o deste app, sem elevação; os comandos de sistema disponíveis dependem das permissões do Android.
+- - Corrigido o problema em que janelas de sistema minúsculas (1×1), como o HyperDuo glyph e o selo de notas em sistemas tipo HyperOS, acionavam TARGET_WINDOW_OCCLUDED e tornavam toques e deslizes por coordenadas totalmente inutilizáveis: janelas de área desprezível não participam mais da decisão de oclusão (#212).
+- - Quando a parada de um aplicativo é bloqueada por "formato da lista de aplicativos não pôde ser verificado", o erro agora inclui a primeira linha inesperada (mascarada, truncada) e indica a lista do usuário ou do sistema, ajudando a identificar diferenças de saída do pm em cada ROM (#210 complemento).
+- - Manter dsh-web-mobile 3.2.2, DSH rc.3, acesso local e à rede local e dez idiomas. A validação no telefone continua suspensa.

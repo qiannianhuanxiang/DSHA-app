@@ -1,0 +1,7 @@
+{
+  "released-v0-real-shapes.jsonl": {
+    "source": "deepseek-ai/deepseek-harness packages/session/session-persistence-jsonl/tests/fixtures/released-v0-real-shapes.jsonl (existing alpha15 checkout)",
+    "sha256": "79f44919a664f867c22d91eb42f97b3de1c88df1a66bd79c0aa3945926873668",
+    "expectedRc1Result": "unsupported chronology; preserve original, no V4 successor"
+  }
+}

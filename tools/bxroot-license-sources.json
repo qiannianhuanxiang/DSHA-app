@@ -1,0 +1,156 @@
+{
+  "schema": 1,
+  "scope": "License text provenance only; not complete linked-component provenance, source correspondence, relinking fulfillment or legal acceptance.",
+  "limitations": [
+    "The installed glibc copyright document retains a historical 2.23 heading; it is copied verbatim and does not identify the candidate linked glibc version.",
+    "No historical linker map or complete archive-member inventory is available.",
+    "GCC runtime exception applicability is conditional on its terms; including this text does not prove every linked component is covered."
+  ],
+  "licenses": [
+    {
+      "target": "app/src/main/assets/licenses/bxroot-MIT.txt",
+      "sourcePath": "/tmp/bxroot/LICENSE",
+      "resolvedSourcePath": "/tmp/bxroot/LICENSE",
+      "sourceSha256": "390d111ba18aadbe5cd5001f717d911f5c52edeb8a974ff02030f4a512d50eb4",
+      "sourceBytes": 1076,
+      "copyMethod": "verbatim-whole-file",
+      "upstream": "https://github.com/qiannianhuanxiang/bxroot",
+      "recordedUpstreamCommit": "ae26994c1dda3323379150290d1507d2c5b1ab18",
+      "originScope": "Current modified bxroot source tree; not asserted pristine upstream.",
+      "sha256": "390d111ba18aadbe5cd5001f717d911f5c52edeb8a974ff02030f4a512d50eb4",
+      "bytes": 1076
+    },
+    {
+      "target": "app/src/main/assets/licenses/bxroot-glibc-COPYRIGHT.txt",
+      "sourcePath": "/usr/share/doc/libc6-dev/copyright",
+      "resolvedSourcePath": "/usr/share/doc/libc6-dev/copyright",
+      "sourceSha256": "d3c95b56fa33e28b57860580f0baf4e4f4de2a268a2b80f1d031a5191bade265",
+      "sourceBytes": 26462,
+      "copyMethod": "verbatim-whole-file",
+      "installedPackage": {
+        "argv": [
+          "dpkg-query",
+          "-W",
+          "-f=${binary:Package}\t${Version}\n",
+          "libc6-dev:arm64"
+        ],
+        "exitCode": 0,
+        "stdout": "libc6-dev:arm64\t2.39-0ubuntu8.9\n",
+        "stderr": ""
+      },
+      "fileOwnership": {
+        "argv": [
+          "dpkg-query",
+          "-S",
+          "/usr/share/doc/libc6-dev/copyright"
+        ],
+        "exitCode": 0,
+        "stdout": "libc6-dev:arm64: /usr/share/doc/libc6-dev/copyright\n",
+        "stderr": ""
+      },
+      "originScope": "Installed Ubuntu package documentation; current package metadata, not a historical link receipt or remote package-signature verification.",
+      "sha256": "d3c95b56fa33e28b57860580f0baf4e4f4de2a268a2b80f1d031a5191bade265",
+      "bytes": 26462
+    },
+    {
+      "target": "app/src/main/assets/licenses/LGPL-2.1.txt",
+      "sourcePath": "/usr/share/common-licenses/LGPL-2.1",
+      "resolvedSourcePath": "/usr/share/common-licenses/LGPL-2.1",
+      "sourceSha256": "dc626520dcd53a22f727af3ee42c770e56c97a64fe3adb063799d8ab032fe551",
+      "sourceBytes": 26530,
+      "copyMethod": "verbatim-whole-file",
+      "installedPackage": {
+        "argv": [
+          "dpkg-query",
+          "-W",
+          "-f=${binary:Package}\t${Version}\n",
+          "base-files"
+        ],
+        "exitCode": 0,
+        "stdout": "base-files\t13ubuntu10.3\n",
+        "stderr": ""
+      },
+      "fileOwnership": {
+        "argv": [
+          "dpkg-query",
+          "-S",
+          "/usr/share/common-licenses/LGPL-2.1"
+        ],
+        "exitCode": 0,
+        "stdout": "base-files: /usr/share/common-licenses/LGPL-2.1\n",
+        "stderr": ""
+      },
+      "originScope": "Installed Ubuntu package documentation; current package metadata, not a historical link receipt or remote package-signature verification.",
+      "sha256": "dc626520dcd53a22f727af3ee42c770e56c97a64fe3adb063799d8ab032fe551",
+      "bytes": 26530
+    },
+    {
+      "target": "app/src/main/assets/licenses/bxroot-GCC-COPYRIGHT.txt",
+      "sourcePath": "/usr/share/doc/libgcc-13-dev/copyright",
+      "resolvedSourcePath": "/usr/share/doc/gcc-13-base/copyright",
+      "sourceSha256": "08c6f3dee4c19aa1e57eb7d4ad45829b2e99656313bd07fa0922e2553f500be5",
+      "sourceBytes": 69100,
+      "copyMethod": "verbatim-whole-file",
+      "installedPackage": {
+        "argv": [
+          "dpkg-query",
+          "-W",
+          "-f=${binary:Package}\t${Version}\n",
+          "gcc-13-base:arm64"
+        ],
+        "exitCode": 0,
+        "stdout": "gcc-13-base:arm64\t13.3.0-6ubuntu2~24.04.1\n",
+        "stderr": ""
+      },
+      "fileOwnership": {
+        "argv": [
+          "dpkg-query",
+          "-S",
+          "/usr/share/doc/gcc-13-base/copyright"
+        ],
+        "exitCode": 0,
+        "stdout": "gcc-13-base:arm64: /usr/share/doc/gcc-13-base/copyright\n",
+        "stderr": ""
+      },
+      "originScope": "Installed Ubuntu package documentation; current package metadata, not a historical link receipt or remote package-signature verification.",
+      "sha256": "08c6f3dee4c19aa1e57eb7d4ad45829b2e99656313bd07fa0922e2553f500be5",
+      "bytes": 69100
+    },
+    {
+      "target": "app/src/main/assets/licenses/GCC-RUNTIME-LIBRARY-EXCEPTION-3.1.txt",
+      "sourcePath": "/usr/share/doc/libgcc-13-dev/copyright",
+      "resolvedSourcePath": "/usr/share/doc/gcc-13-base/copyright",
+      "sourceSha256": "08c6f3dee4c19aa1e57eb7d4ad45829b2e99656313bd07fa0922e2553f500be5",
+      "sourceBytes": 69100,
+      "copyMethod": "verbatim-lines",
+      "sourceLinesInclusive": [
+        241,
+        312
+      ],
+      "installedPackage": {
+        "argv": [
+          "dpkg-query",
+          "-W",
+          "-f=${binary:Package}\t${Version}\n",
+          "gcc-13-base:arm64"
+        ],
+        "exitCode": 0,
+        "stdout": "gcc-13-base:arm64\t13.3.0-6ubuntu2~24.04.1\n",
+        "stderr": ""
+      },
+      "fileOwnership": {
+        "argv": [
+          "dpkg-query",
+          "-S",
+          "/usr/share/doc/gcc-13-base/copyright"
+        ],
+        "exitCode": 0,
+        "stdout": "gcc-13-base:arm64: /usr/share/doc/gcc-13-base/copyright\n",
+        "stderr": ""
+      },
+      "originScope": "Installed Ubuntu package documentation; current package metadata, not a historical link receipt or remote package-signature verification.",
+      "sha256": "28e85c5aa4af9b4f1dfe6b4817aa3eefb3eaaee7fd735045016f29ccf50276a1",
+      "bytes": 3323
+    }
+  ]
+}

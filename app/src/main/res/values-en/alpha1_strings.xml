@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+
+
+
+    <string name="alpha_static_loader">Use the proroot static loader</string>
+    <string name="alpha_no_seccomp">Disable proot seccomp acceleration</string>
+
+</resources>

@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "upstream": "https://github.com/qiannianhuanxiang/bxroot",
+  "upstreamCommit": "a2794b35ca4d1a9f01c97c4a79183a9bc30c9f33",
+  "version": "0.2.4-dsha-termux-compat-20261103",
+  "profile": {
+    "maxBinds": 64,
+    "bindEnvironmentBytesIncludingNul": 16384,
+    "shmCopyoutVerified": false,
+    "shmClaimVerified": false,
+    "launcherOptimization": "O2",
+    "runtimeAndUlxOptimization": "O2",
+    "androidStandaloneAccepted": false
+  },
+  "libraries": {
+    "libbxroot.so": {
+      "bytes": 731608,
+      "sha256": "30062fa24be88e49b21596d64c964533ba7018433d959672bd20d30e197f8499",
+      "elfType": 2
+    },
+    "libbxroot-runtime.so": {
+      "bytes": 397536,
+      "sha256": "77629f3cecbdaa5f5b1aae1e83a9e35d3eb174d9095866b4dde2d638a1995148",
+      "elfType": 3
+    },
+    "libbxroot-ulx.so": {
+      "bytes": 691440,
+      "sha256": "c3dd3ed119ee33ff15d6fdb8dab57f3b220bf2a672269f4f35ef7ca89fefd91a",
+      "elfType": 3
+    },
+    "libbxroot-host.so": {
+      "bytes": 8240,
+      "sha256": "55bcf27ed51a6a50f302ada289b3871456146e0f87a968f38c25007129595879",
+      "elfType": 2
+    },
+    "libbxroot-enter.so": {
+      "bytes": 37760,
+      "sha256": "1ddb30a1c59c8c494f5669ec1f78ac5d99fda1ebed117bd1d9d4e9e2e9ca0ca0",
+      "elfType": 3
+    }
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "dshVersion": "0.2.1-rc.3",
+  "module": "@deepseek-ai/dsh-web-frontend/dist/index.html",
+  "sourceSha256": "3ddfb0ce0bc60975c3dba70c8b960768f2f83d7293b562d82cb97e7d365a54c9",
+  "patches": [
+    {
+      "before": "src=\"./assets/index-BXV-oxvX.js\"",
+      "after": "src=\"./assets/index-BXV-oxvX.js?dsha-tooltip=0.2.1-rc3-1\""
+    }
+  ],
+  "packageIntegrity": "sha512-F2lGJudVqmJJ4GySnLYdvw1796YzIyEK+drY+jW7er+TVZMwKmwFWIrdkJXfniSP3I1+A2eVOgiTGVZ9PTi6vw=="
+}

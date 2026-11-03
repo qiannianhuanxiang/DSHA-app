@@ -1,0 +1,12 @@
+{
+  "dshVersion": "0.2.1-rc.3",
+  "module": "@deepseek-ai/dsh-client-ui-tool/lib/client.js",
+  "packageVersion": "0.2.1-rc.3",
+  "canonicalSourceSha256": "a0012c1f4bdc34d68ba6b267294884ffeec6b6c467540ceabe0ff5d6135f9e05",
+  "patches": [
+    {
+      "before": "\t\t\treturn call.phase === \"result\" ? call.block.call?.name ?? \"\" : call.block.name;",
+      "after": "\t\t\t// DSHA_TOOL_HISTORY_DISPLAY_RC2_V1: no named tool view/action for malformed retained rows.\n\t\t\tconst name = call.phase === \"result\" ? call.block.call?.name ?? \"\" : call.block.name;\n\t\t\tconst id = call.block.callId;\n\t\t\treturn typeof name === \"string\" && name.trim() && typeof id === \"string\" && id.trim() ? name : \"DSHA_INVALID_TOOL_CALL (read only)\";"
+    }
+  ]
+}

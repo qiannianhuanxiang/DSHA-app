@@ -1,0 +1,270 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="about_close_button" formatted="false">"Fermer"</string>
+    <string name="about_community" formatted="false">"Communauté QQ"</string>
+    <string name="about_tagline" formatted="false">"DeepSeek Harness pour Android"</string>
+    <string name="accessibility_desc" formatted="false">"Deux usages : (1) Lire le code d’association dans la boîte de dialogue Débogage sans fil d’Android pour éviter de copier un code qui expire après deux minutes. (2) Permettre à l’assistant IA de lire l’écran, appuyer, saisir du texte, appuyer sur des touches et prendre des captures d’écran (Android 11+), afin de contrôler l’appareil sans ADB ni Shizuku.\n\nDSHA n’enregistre pas votre écran en arrière-plan. Le contenu de l’écran est lu uniquement à la demande explicite de l’assistant et renvoyé à la conversation actuelle. Les captures ordinaires demandées sont enregistrées dans le dossier de captures de l’application ; les captures MCP sont encodées en mémoire. DSHA n’envoie pas les captures de façon indépendante ; les modèles et plugins configurés peuvent traiter les résultats renvoyés. Les codes d’association sont lus uniquement pendant les deux minutes suivant votre appui sur Lire automatiquement le code d’association."</string>
+    <string name="accessibility_service_label" formatted="false">"Assistant d'association DSHA"</string>
+    <string name="adb_pairing_service_label" formatted="false">"Association ADB sans fil"</string>
+    <string name="alpha_no_seccomp" formatted="false">"Désactiver l'accélération seccomp de proot"</string>
+    <string name="alpha_static_loader" formatted="false">"Utiliser le chargeur statique proroot"</string>
+    <string name="build190_auto_port" formatted="false">"Attribuer le port Web automatiquement (recommandé)"</string>
+    <string name="build190_restore_port_drafts" formatted="false">"Restaurer les brouillons d'un port précédent"</string>
+    <string name="computer_use_title" formatted="false">"Contrôle de l’écran"</string>
+    <string name="copy_text" formatted="false">"Copier"</string>
+    <string name="device_checking" formatted="false">"Vérification de l’autorisation…"</string>
+    <string name="device_open_access" formatted="false">"Gérer l’accès aux fichiers"</string>
+    <string name="dns_auto" formatted="false">"Compatibilité automatique (recommandé)"</string>
+    <string name="dns_ipv4" formatted="false">"Compatibilité DNS IPv4"</string>
+    <string name="dns_native" formatted="false">"Résolution native double pile"</string>
+    <string name="paste_text" formatted="false">"Coller"</string>
+    <string name="phone_assistant" formatted="false">"Assistant flottant"</string>
+    <string name="phone_assistant_detail" formatted="false">"Choisissez une vraie session DSH sur ce téléphone pour la conversation flottante et les commandes de pause."</string>
+    <string name="picture_in_picture_allowed" formatted="false">"Autorisé par le système ; la conversation reste dans une petite fenêtre lorsque vous revenez à l’accueil ou changez d’application."</string>
+    <string name="picture_in_picture_disabled" formatted="false">"Désactivé par le système ; aucune petite fenêtre n’apparaît en arrière-plan. Appuyez pour modifier."</string>
+    <string name="picture_in_picture_enable" formatted="false">"Activer la conversation en incrustation"</string>
+    <string name="picture_in_picture_landscape" formatted="false">"Passer en paysage"</string>
+    <string name="picture_in_picture_opted_out" formatted="false">"Désactivé par défaut. Activez l’option ci-dessus pour conserver la conversation dans une petite fenêtre en revenant à l’accueil."</string>
+    <string name="picture_in_picture_portrait" formatted="false">"Passer en portrait"</string>
+    <string name="picture_in_picture_settings_unavailable" formatted="false">"Impossible d’ouvrir les paramètres système d’incrustation."</string>
+    <string name="picture_in_picture_title" formatted="false">"Incrustation système"</string>
+    <string name="picture_in_picture_unsupported" formatted="false">"L’incrustation nécessite Android 8.0 ou version ultérieure et un appareil compatible."</string>
+    <string name="plugin_sort_az" formatted="false">"Nom de A à Z"</string>
+    <string name="plugin_sort_enabled" formatted="false">"Activés en premier"</string>
+    <string name="plugin_sort_title" formatted="false">"Trier les plugins"</string>
+    <string name="plugin_sort_updates" formatted="false">"Mises à jour en premier"</string>
+    <string name="plugin_sort_za" formatted="false">"Nom de Z à A"</string>
+    <string name="text_selection_more" formatted="false">"Plus…"</string>
+    <string name="ui134_adb_hint" formatted="false">"Android 11+ : associez le débogage sans fil sur le même Wi-Fi. Root non requis. Vérifiez ou recommencez l’association après un changement de réseau."</string>
+    <string name="ui134_candidate" formatted="false">"Voir la version candidate"</string>
+    <string name="ui134_candidate_sub" formatted="false">"Notes de version, taille et installation"</string>
+    <string name="ui134_changelog" formatted="false">"Cette version"</string>
+    <string name="ui134_check_ready" formatted="false">"Préparer les vérifications"</string>
+    <string name="ui134_code" formatted="false">"Code de version"</string>
+    <string name="ui134_current" formatted="false">"Application actuelle"</string>
+    <string name="ui134_disconnect" formatted="false">"Déconnecter ADB"</string>
+    <string name="ui134_edition" formatted="false">"Édition"</string>
+    <string name="ui134_recent_startups" formatted="false">"Cinq démarrages récents"</string>
+    <string name="ui134_recent_startups_sub" formatted="false">"Étapes, erreurs réelles et codes de sortie"</string>
+    <string name="ui134_results" formatted="false">"Résultats des vérifications"</string>
+    <string name="ui134_root_hint" formatted="false">"Appareil rooté : activez, autorisez DSHA dans Magisk / KernelSU, puis vérifiez. Les autres appareils peuvent utiliser les canaux ci-dessous."</string>
+    <string name="ui134_screen_setup" formatted="false">"Configurer le contrôle de l’écran · Deux étapes"</string>
+    <string name="ui134_shizuku_hint" formatted="false">"Démarrez Shizuku dans son gestionnaire, puis autorisez DSHA ici. Il faut généralement redémarrer le service après un redémarrage de l’appareil."</string>
+    <string name="ui134_start_records" formatted="false">"Historique des démarrages"</string>
+    <string name="ui134_startup_recovery" formatted="false">"Récupération du démarrage"</string>
+    <string name="ui134_startup_recovery_sub" formatted="false">"Examiner les problèmes et options de récupération"</string>
+    <string name="ui2_about" formatted="false">"À propos de DSHA"</string>
+    <string name="ui2_about_sub" formatted="false">"Version, licences et commentaires"</string>
+    <string name="ui2_adb" formatted="false">"Association ADB sans fil"</string>
+    <string name="ui2_adb_intro" formatted="false">"Récupérez le code d’association dans Débogage sans fil pour connecter cet appareil."</string>
+    <string name="ui2_address" formatted="false">"Adresses d’accès"</string>
+    <string name="ui2_address_sub" formatted="false">"Adresses locales et du réseau local"</string>
+    <string name="ui2_app_version" formatted="false">"Version de l’application"</string>
+    <string name="ui2_backup_restore" formatted="false">"Sauvegarde et restauration"</string>
+    <string name="ui2_backup_restore_sub" formatted="false">"Export, import et sauvegardes automatiques"</string>
+    <string name="ui2_base" formatted="false">"Base Ubuntu"</string>
+    <string name="ui2_check_all" formatted="false">"Vérifier tous les composants"</string>
+    <string name="ui2_community" formatted="false">"Plugins communautaires"</string>
+    <string name="ui2_community_sub" formatted="false">"Explorer les plugins et sources d’installation"</string>
+    <string name="ui2_component1" formatted="false">"Environnement Ubuntu"</string>
+    <string name="ui2_component2" formatted="false">"Outils hors ligne"</string>
+    <string name="ui2_component3" formatted="false">"Node.js 24"</string>
+    <string name="ui2_component4" formatted="false">"pnpm"</string>
+    <string name="ui2_component5" formatted="false">"DeepSeek Harness"</string>
+    <string name="ui2_component6" formatted="false">"Vérifications de démarrage et d’exécution"</string>
+    <string name="ui2_component_hint" formatted="false">"Examiner les résultats et les options de réparation"</string>
+    <string name="ui2_config_sub" formatted="false">"Configurez les modèles et clés API dans l’interface Web. Les changements de port et d’environnement s’appliquent au prochain démarrage."</string>
+    <string name="ui2_connection" formatted="false">"État de la connexion"</string>
+    <string name="ui2_data_ops" formatted="false">"Sauvegarde et restauration"</string>
+    <string name="ui2_data_sub" formatted="false">"Exports, récupération et partage de fichiers."</string>
+    <string name="ui2_data_title" formatted="false">"Sauvegarde et données"</string>
+    <string name="ui2_device_channels" formatted="false">"Canaux de commande de l’appareil"</string>
+    <string name="ui2_device_grants" formatted="false">"Autorisations de l'appareil"</string>
+    <string name="ui2_diagnostics" formatted="false">"Diagnostic"</string>
+    <string name="ui2_diagnostics_intro" formatted="false">"Examiner les composants, le stockage et les services, et générer un rapport expurgé."</string>
+    <string name="ui2_diagnostics_sub" formatted="false">"Vérifications de l’environnement et journaux de diagnostic"</string>
+    <string name="ui2_display" formatted="false">"Affichage et démarrage"</string>
+    <string name="ui2_dns" formatted="false">"Politique DNS"</string>
+    <string name="ui2_environment" formatted="false">"Environnement d’exécution"</string>
+    <string name="ui2_environment_page" formatted="false">"Installation et exécution"</string>
+    <string name="ui2_environment_recovery" formatted="false">"Récupération de l’environnement"</string>
+    <string name="ui2_environment_recovery_sub" formatted="false">"Examiner les dépendances de démarrage et la maintenance interrompue"</string>
+    <string name="ui2_environment_state" formatted="false">"État de l’environnement"</string>
+    <string name="ui2_environment_sub" formatted="false">"Examiner chaque composant et réparer uniquement ce qui le nécessite."</string>
+    <string name="ui2_error_logs" formatted="false">"Journaux d'erreurs"</string>
+    <string name="ui2_experience" formatted="false">"Expérience"</string>
+    <string name="ui2_export" formatted="false">"Exporter les plugins"</string>
+    <string name="ui2_export_sub" formatted="false">"Enregistrer une copie des plugins installés"</string>
+    <string name="ui2_floating" formatted="false">"État flottant"</string>
+    <string name="ui2_floating_settings" formatted="false">"Apparence et comportement de la superposition"</string>
+    <string name="ui2_floating_settings_sub" formatted="false">"Modifier le style, le contenu et l’aperçu"</string>
+    <string name="ui2_from_link" formatted="false">"Installer depuis un lien"</string>
+    <string name="ui2_grants_sub" formatted="false">"Fonctions facultatives. Les conversations et terminaux ne nécessitent pas d’autorisation de contrôle de l’appareil."</string>
+    <string name="ui2_import" formatted="false">"Importer des plugins"</string>
+    <string name="ui2_import_sub" formatted="false">"Sélectionner un ZIP de plugin sur votre appareil"</string>
+    <string name="ui2_install_environment" formatted="false">"Installation et exécution"</string>
+    <string name="ui2_installation_log" formatted="false">"Journal de vérification et d’installation"</string>
+    <string name="ui2_installed" formatted="false">"Plugins installés"</string>
+    <string name="ui2_launch_hint" formatted="false">"Prêt pour votre prochaine tâche."</string>
+    <string name="ui2_local_plugins" formatted="false">"Plugins locaux"</string>
+    <string name="ui2_logs" formatted="false">"Journal de démarrage"</string>
+    <string name="ui2_maintenance" formatted="false">"Maintenance et récupération"</string>
+    <string name="ui2_managed" formatted="false">"Environnement d’exécution géré"</string>
+    <string name="ui2_managed_sub" formatted="false">"Mettre à jour les composants intégrés et conserver les données personnelles"</string>
+    <string name="ui2_managed_update" formatted="false">"Mettre à jour l’environnement géré"</string>
+    <string name="ui2_management" formatted="false">"Gestion"</string>
+    <string name="ui2_meet" formatted="false">"Découvrir DSHA"</string>
+    <string name="ui2_network_runtime" formatted="false">"Environnement d’exécution et réseau"</string>
+    <string name="ui2_offline_badge" formatted="false">"Installation hors ligne  ·  Sans root  ·  %1$s"</string>
+    <string name="ui2_online_notice" formatted="false">"Les modèles en ligne reçoivent les messages et pièces jointes que vous choisissez d’envoyer."</string>
+    <string name="ui2_overlay" formatted="false">"État flottant"</string>
+    <string name="ui2_overlay_sub" formatted="false">"Contenu, opacité et durée d’affichage"</string>
+    <string name="ui2_plugin_link" formatted="false">"URL du dépôt ou du téléchargement"</string>
+    <string name="ui2_port" formatted="false">"Port Web actif"</string>
+    <string name="ui2_port_hint" formatted="false">"S’il est occupé, conserver le port préféré et en utiliser un disponible."</string>
+    <string name="ui2_port_preferred" formatted="false">"Port Web préféré"</string>
+    <string name="ui2_recovery_tools" formatted="false">"Récupération de l’environnement et des données"</string>
+    <string name="ui2_repair_parts" formatted="false">"Réparer les composants"</string>
+    <string name="ui2_repair_parts_sub" formatted="false">"Examiner les éléments manquants et conserver les composants fonctionnels"</string>
+    <string name="ui2_reproduction" formatted="false">"Notes de reproduction"</string>
+    <string name="ui2_resolve" formatted="false">"Résoudre et installer"</string>
+    <string name="ui2_restart" formatted="false">"↻  Redémarrer"</string>
+    <string name="ui2_rollback" formatted="false">"Retour à un environnement compatible précédent"</string>
+    <string name="ui2_rollback_sub" formatted="false">"Basculer uniquement après une vérification isolée"</string>
+    <string name="ui2_runtime_compat" formatted="false">"Compatibilité de l’environnement d’exécution"</string>
+    <string name="ui2_runtime_config" formatted="false">"Paramètres d’exécution"</string>
+    <string name="ui2_sensitive" formatted="false">"Fonctions sensibles"</string>
+    <string name="ui2_settings" formatted="false">"Paramètres"</string>
+    <string name="ui2_settings_hint" formatted="false">"Un espace de travail à votre image."</string>
+    <string name="ui2_shortcuts" formatted="false">"Accès rapide"</string>
+    <string name="ui2_six_steps" formatted="false">"Six étapes d’installation"</string>
+    <string name="ui2_skip" formatted="false">"Passer la présentation"</string>
+    <string name="ui2_start" formatted="false">"▶  Démarrer DSHA"</string>
+    <string name="ui2_stop" formatted="false">"□  Arrêter"</string>
+    <string name="ui2_stopped" formatted="false">"DSH n'est pas en cours d'exécution"</string>
+    <string name="ui2_storage_files" formatted="false">"Stockage et fichiers"</string>
+    <string name="ui2_storage_files_sub" formatted="false">"Utilisation du stockage, nettoyage du cache et partage de fichiers"</string>
+    <string name="ui2_support" formatted="false">"Assistance"</string>
+    <string name="ui2_system_permissions" formatted="false">"Autorisations système"</string>
+    <string name="ui2_troubleshooting" formatted="false">"Dépannage"</string>
+    <string name="ui2_update_channel" formatted="false">"Canal de mise à jour"</string>
+    <string name="ui2_updates" formatted="false">"Mises à jour de l’application"</string>
+    <string name="ui2_updates_intro" formatted="false">"Afficher les versions de l’application et des composants d’exécution."</string>
+    <string name="ui2_updates_sub" formatted="false">"Mises à jour Stable et Aperçu"</string>
+    <string name="ui2_w1_0" formatted="false">"Conversations et tâches"</string>
+    <string name="ui2_w1_1" formatted="false">"Un terminal complet"</string>
+    <string name="ui2_w1_2" formatted="false">"Plugins et outils de l’appareil"</string>
+    <string name="ui2_w2_0" formatted="false">"Conversations et fichiers"</string>
+    <string name="ui2_w2_1" formatted="false">"Modèles et identifiants"</string>
+    <string name="ui2_w2_2" formatted="false">"Actions sur l’appareil"</string>
+    <string name="ui2_welcome_lead0" formatted="false">"Écrivez du code, manipulez des fichiers et utilisez des outils.\nEmportez votre espace de travail partout."</string>
+    <string name="ui2_welcome_lead1" formatted="false">"Conversations, fichiers et outils réunis."</string>
+    <string name="ui2_welcome_lead2" formatted="false">"L’autorisation de contrôler l’appareil est facultative."</string>
+    <string name="ui2_welcome_title0" formatted="false">"Votre espace de travail IA,\nsur votre téléphone."</string>
+    <string name="ui2_welcome_title1" formatted="false">"D’une idée\nà sa réalisation."</string>
+    <string name="ui2_welcome_title2" formatted="false">"Vos autorisations.\nVos données."</string>
+    <string name="ui2_workspace" formatted="false">"Espace de travail"</string>
+    <string name="ui2_ws1_0" formatted="false">"Travaillez avec les modèles pour accomplir vos tâches."</string>
+    <string name="ui2_ws1_1" formatted="false">"Commandes Ubuntu et sessions indépendantes."</string>
+    <string name="ui2_ws1_2" formatted="false">"Ajoutez des plugins et activez les fonctions de l’appareil."</string>
+    <string name="ui2_ws2_0" formatted="false">"Stockés localement, avec exports manuels."</string>
+    <string name="ui2_ws2_1" formatted="false">"Configurez les modèles et clés API dans l’interface Web. Les identifiants natifs existants sont conservés."</string>
+    <string name="ui2_ws2_2" formatted="false">"Root, Shizuku, ADB et SMS ont des autorisations distinctes."</string>
+    <string name="ui_adb_code_label" formatted="false">"Code d'association (6 chiffres)"</string>
+    <string name="ui_adb_host_label" formatted="false">"Adresse de l'appareil (laisser vide pour la détection)"</string>
+    <string name="ui_adb_port_label" formatted="false">"Port d'association (laisser vide pour la détection)"</string>
+    <string name="ui_lan_unencrypted" formatted="false">"L'accès au réseau local utilise HTTP sans chiffrement du trafic. Utilisez des réseaux de confiance et partagez les liens de connexion uniquement avec des appareils de confiance."</string>
+    <string name="ui_language_title" formatted="false">"Langue"</string>
+    <string name="ui_m0001" formatted="false">"Télécharger la mise à jour"</string>
+    <string name="ui_m0002" formatted="false">"Enregistrer les paramètres"</string>
+    <string name="ui_m0003" formatted="false">"Annuler la vérification"</string>
+    <string name="ui_m0005" formatted="false">"Démarrer"</string>
+    <string name="ui_m0006" formatted="false">"Sauvegarder et reconstruire"</string>
+    <string name="ui_m0007" formatted="false">"Démarrage sécurisé"</string>
+    <string name="ui_m0010" formatted="false">"Lancer l'association"</string>
+    <string name="ui_m0011" formatted="false">"Options de récupération"</string>
+    <string name="ui_m0012" formatted="false">"Adresse et port manuels"</string>
+    <string name="ui_m0013" formatted="false">"Gérer les plugins"</string>
+    <string name="ui_m0015" formatted="false">"Autoriser Shizuku"</string>
+    <string name="ui_m0016" formatted="false">"Plugins"</string>
+    <string name="ui_m0017" formatted="false">"Non vérifié"</string>
+    <string name="ui_m0018" formatted="false">"Rechercher des mises à jour"</string>
+    <string name="ui_m0020" formatted="false">"Clair"</string>
+    <string name="ui_m0021" formatted="false">"Terminal"</string>
+    <string name="ui_m0023" formatted="false">"Paramètres"</string>
+    <string name="ui_m0024" formatted="false">"Saisissez une commande et appuyez sur Entrée"</string>
+    <string name="ui_m0025" formatted="false">"Aucun journal pour le moment."</string>
+    <string name="ui_m0026" formatted="false">"Association et ports"</string>
+    <string name="ui_m0030" formatted="false">"ADB est désactivé. Laissez-le désactivé si vous n'utilisez pas le débogage sans fil."</string>
+    <string name="ui_m0031" formatted="false">"Association ADB sans fil"</string>
+    <string name="ui_m0039" formatted="false">"Shizuku n'est pas autorisé"</string>
+    <string name="ui_m0046" formatted="false">"Télécharger les journaux"</string>
+    <string name="ui_m0047" formatted="false">"Télécharger les journaux d'erreurs"</string>
+    <string name="ui_m0050" formatted="false">"Arrêter"</string>
+    <string name="ui_m0053" formatted="false">"Capteurs et lampe torche"</string>
+    <string name="ui_m0054" formatted="false">"Utiliser l'environnement proroot"</string>
+    <string name="ui_m0055" formatted="false">"Utiliser le navigateur de compatibilité"</string>
+    <string name="ui_m0057" formatted="false">"Utiliser la présentation Web pour ordinateur"</string>
+    <string name="ui_m0060" formatted="false">"Outils de réparation"</string>
+    <string name="ui_m0062" formatted="false">"Autoriser le shell root"</string>
+    <string name="ui_m0063" formatted="false">"Autoriser l'accès au réseau local"</string>
+    <string name="ui_m0066" formatted="false">"Autoriser l'accès à la position"</string>
+    <string name="ui_m0067" formatted="false">"À propos"</string>
+    <string name="ui_m0078" formatted="false">"Annuler la tâche"</string>
+    <string name="ui_m0079" formatted="false">"Annuler l'opération"</string>
+    <string name="ui_m0080" formatted="false">"Enregistrer sous"</string>
+    <string name="ui_m0081" formatted="false">"Uniquement mes plugins"</string>
+    <string name="ui_m0084" formatted="false">"Si la connexion est interrompue en arrière-plan, autorisez DSHA à fonctionner en arrière-plan et réduisez les restrictions de batterie. Votre appareil peut néanmoins le suspendre. Avant de vous reconnecter, activez le débogage sans fil, puis appuyez sur Vérifier la connexion."</string>
+    <string name="ui_m0089" formatted="false">"Rechercher des mises à jour au démarrage"</string>
+    <string name="ui_m0090" formatted="false">"Activer l'accès ADB à l'appareil (désactivé par défaut)"</string>
+    <string name="ui_m0094" formatted="false">"Voir les versions dans le navigateur"</string>
+    <string name="ui_m0095" formatted="false">"Ouvrir dans le navigateur"</string>
+    <string name="ui_m0102" formatted="false">"Copier"</string>
+    <string name="ui_m0103" formatted="false">"Copier le rapport"</string>
+    <string name="ui_m0104" formatted="false">"Mode sécurisé : restaurer les plugins tiers précédemment activés"</string>
+    <string name="ui_m0106" formatted="false">"Installer un plugin"</string>
+    <string name="ui_m0107" formatted="false">"Installer la mise à jour"</string>
+    <string name="ui_m0109" formatted="false">"Exporter le rapport"</string>
+    <string name="ui_m0118" formatted="false">"Forcez l'utilisation du navigateur Gecko intégré si le navigateur système affiche une page vide ou est incompatible. Sinon, l'application choisit automatiquement un moteur compatible. Enregistrez et rouvrez la conversation pour appliquer la modification."</string>
+    <string name="ui_m0121" formatted="false">"Afficher les réponses de l'IA en superposition"</string>
+    <string name="ui_m0125" formatted="false">"Ouvrir le gestionnaire Shizuku"</string>
+    <string name="ui_m0126" formatted="false">"Ouvrir Sauvegarde et données"</string>
+    <string name="ui_m0128" formatted="false">"Paramètres du débogage sans fil"</string>
+    <string name="ui_m0133" formatted="false">"Catalogue de plugins"</string>
+    <string name="ui_m0134" formatted="false">"État des opérations des plugins. Appuyez pour voir les détails."</string>
+    <string name="ui_m0135" formatted="false">"Gestionnaire de plugins"</string>
+    <string name="ui_m0137" formatted="false">"URL du plugin ou nom du paquet npm"</string>
+    <string name="ui_m0138" formatted="false">"Rechercher dans les noms ou descriptions des plugins"</string>
+    <string name="ui_m0142" formatted="false">"Nouveau terminal"</string>
+    <string name="ui_m0145" formatted="false">"Aucun terminal\nAppuyez sur Nouveau pour ouvrir un terminal"</string>
+    <string name="ui_m0146" formatted="false">"Plus"</string>
+    <string name="ui_m0158" formatted="false">"Détecter les plugins installés"</string>
+    <string name="ui_m0159" formatted="false">"Détecter les plugins"</string>
+    <string name="ui_m0164" formatted="false">"Effacer"</string>
+    <string name="ui_m0170" formatted="false">"Autoriser et vérifier l'accès root"</string>
+    <string name="ui_m0171" formatted="false">"Lire les SMS"</string>
+    <string name="ui_m0173" formatted="false">"Stable"</string>
+    <string name="ui_m0177" formatted="false">"Simple"</string>
+    <string name="ui_m0178" formatted="false">"Terminal simple"</string>
+    <string name="ui_m0179" formatted="false">"Coller l'URL"</string>
+    <string name="ui_m0181" formatted="false">"Lire automatiquement le code d'association"</string>
+    <string name="ui_m0182" formatted="false">"Ajoutez les étapes permettant de reproduire le problème. N'incluez ni clés ni conversations privées."</string>
+    <string name="ui_m0185" formatted="false">"Inspecter l'URL"</string>
+    <string name="ui_m0191" formatted="false">"Paramètres de batterie"</string>
+    <string name="ui_m0201" formatted="false">"Revenir en arrière"</string>
+    <string name="ui_m0202" formatted="false">"Retour à Démarrer : plugins / démarrage sécurisé"</string>
+    <string name="ui_m0209" formatted="false">"Relancer les vérifications"</string>
+    <string name="ui_m0211" formatted="false">"Réinitialiser les paramètres, conserver les conversations"</string>
+    <string name="ui_m0212" formatted="false">"Réessayer"</string>
+    <string name="ui_m0215" formatted="false">"Aperçu"</string>
+    <string name="ui_m0217" formatted="false">"Vérifier la connexion"</string>
+    <string name="ui_m0218" formatted="false">"＋ Nouveau"</string>
+    <string name="welcome_eyebrow0" formatted="false">"DEEPSEEK HARNESS · ANDROID"</string>
+    <string name="welcome_eyebrow1" formatted="false">"01 / CONÇU POUR VOTRE FAÇON DE TRAVAILLER"</string>
+    <string name="welcome_eyebrow2" formatted="false">"02 / VOS DONNÉES, VOTRE CHOIX"</string>
+    <plurals name="plugin_count">
+        <item quantity="one">"%d plugin"</item>
+        <item quantity="many">"%d plugins"</item>
+        <item quantity="other">"%d plugins"</item>
+    </plurals>
+</resources>
