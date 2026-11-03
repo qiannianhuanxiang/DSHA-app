@@ -1,0 +1,921 @@
+package com.deepseekharness.app.runtime;
+
+import android.os.ParcelFileDescriptor;
+import android.system.ErrnoException;
+import android.system.Os;
+import android.system.OsConstants;
+import android.system.StructStat;
+import com.deepseekharness.app.backup.BackupControl;
+import com.deepseekharness.app.backup.BackupFileSystem;
+import com.deepseekharness.app.backup.BackupLimits;
+import java.io.Closeable;
+import java.io.File;
+import java.io.FileDescriptor;
+import java.io.FilterInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+/** 签名资产的短期解压会话：固定根描述符、有界父目录缓存、成功返回前批量同步目录。 */
+final class AndroidTrustedAssetFileSystem
+    implements BackupFileSystem, TrustedAssetFileSystem, Closeable {
+  private static final int O_PATH = 0x200000, O_CLOEXEC = 0x80000, CACHED_DIRECTORIES = 64;
+  // arm64 asm-generic 值；OsConstants 不提供 O_DIRECTORY。
+  private static final int O_DIRECTORY = 0x4000;
+  private static final OutputStream PREPARED_OUTPUT =
+      new OutputStream() {
+        @Override
+        public void write(int value) throws IOException {
+          throw new IOException("TAR_SMALL_FILE_ALREADY_WRITTEN");
+        }
+
+        @Override
+        public void write(byte[] bytes, int offset, int count) throws IOException {
+          throw new IOException("TAR_SMALL_FILE_ALREADY_WRITTEN");
+        }
+      };
+  private final File root, granted;
+  private final boolean exactMembers;
+  private final Set<String> signedMembers = new LinkedHashSet<>();
+  private final String rootPrefix;
+  private final ParcelFileDescriptor rootHandle;
+  private final Node rootIdentity;
+  private final Directory rootDirectory;
+  private final NativeStorage.DirectoryIdentities rootIdentities;
+  private final Map<File, StructStat> anchors = new LinkedHashMap<>();
+  private final Map<String, StructStat> directories = new LinkedHashMap<>();
+  private final Map<String, Node> written = new LinkedHashMap<>();
+  private final Map<String, String> writtenLinks = new LinkedHashMap<>();
+  private final Set<String> dirtyDirectories = new LinkedHashSet<>();
+  private final LinkedHashMap<String, Directory> cache = new LinkedHashMap<>(64, .75f, true);
+  private final DirectoryRoutes routes = new DirectoryRoutes();
+  private final BackupControl control = new BackupControl(null);
+  private final List<ParcelFileDescriptor> pendingSync = new ArrayList<>(128);
+
+  /**
+   * 延迟同步（只用于全新封存候选根）：不逐文件 fsync、不每 128 个 syncfs，
+   * 收尾时对同一文件系统做一次 syncfs + 根目录 fsync。
+   *
+   * <p>前提：候选在隔离的操作目录里，只有 finishFiles 成功后才会进入 prepared/publish；
+   * 中途崩溃时整个候选作废重解，所以不需要逐文件的中间持久性。错误检测依赖 Linux 5.8+
+   * 的 syncfs 写回错误上报（per-superblock errseq，以 syncRoot 打开时为采样点，
+   * 在任何写入之前打开）。更早内核保持原逐文件路径。
+   */
+  private final ParcelFileDescriptor syncRoot;
+  private Directory activeParent;
+  private String activeName, activePath;
+  private File activeTarget, activeParentFile;
+
+  @Override
+  public Closeable fileEntry(String name) throws IOException {
+    BackupLimits.path(name);
+    if (activeParent != null) throw new IOException("TAR_ENTRY_REENTRY");
+    String parentName = parent(name);
+    Directory checked = directoryHandle(parentName, true, false);
+    activeParent =
+        new Directory(
+            ParcelFileDescriptor.dup(checked.handle.getFileDescriptor()),
+            checked.identity,
+            checked.stat);
+    activeName = parentName;
+    activePath = name;
+    activeTarget = new File(root, name);
+    activeParentFile = activeTarget.getParentFile();
+    return () -> {
+      Directory held = activeParent;
+      activeParent = null;
+      activeName = null;
+      activePath = null;
+      activeTarget = null;
+      activeParentFile = null;
+      try {
+        Directory current = directoryHandle(parentName, false, false);
+        if (!identity(held.identity, current.identity))
+          throw new IOException("TAR_PARENT_CHANGED:" + parentName);
+      } finally {
+        held.handle.close();
+      }
+    };
+  }
+
+  /** 仅由签名 tar 的成员回调登记；读取链接目标时观察到的额外目录不能获得成员身份。 */
+  void signedMember(String name) {
+    if (!exactMembers) throw new IllegalStateException("TAR_MEMBERS_NOT_SEALED");
+    signedMembers.add(name);
+  }
+
+  private void queueSync(FileDescriptor descriptor) throws IOException {
+    if (syncRoot != null) return;
+    pendingSync.add(ParcelFileDescriptor.dup(descriptor));
+    if (pendingSync.size() == 128) flushPending();
+  }
+
+  private void flushPending() throws IOException {
+    if (syncRoot != null) {
+      control.check();
+      NativeStorage.flush(new int[] {syncRoot.getFd()});
+      return;
+    }
+    if (pendingSync.isEmpty()) return;
+    IOException failure = null;
+    try {
+      control.check();
+      int[] descriptors = new int[pendingSync.size()];
+      for (int i = 0; i < descriptors.length; i++) descriptors[i] = pendingSync.get(i).getFd();
+      NativeStorage.flush(descriptors);
+    } catch (IOException error) {
+      failure = error;
+    } finally {
+      for (ParcelFileDescriptor handle : pendingSync)
+        try {
+          handle.close();
+        } catch (IOException error) {
+          if (failure == null) failure = error;
+          else failure.addSuppressed(error);
+        }
+      pendingSync.clear();
+    }
+    if (failure != null) throw failure;
+  }
+
+  private static final class Directory {
+    final ParcelFileDescriptor handle;
+    final Node identity;
+    final StructStat stat;
+    final String fixedPath;
+
+    Directory(ParcelFileDescriptor handle, Node identity, StructStat stat) {
+      this.handle = handle;
+      this.identity = identity;
+      this.stat = stat;
+      fixedPath = "/proc/self/fd/" + handle.getFd();
+    }
+
+    String path(String leaf) {
+      return leaf.isEmpty() ? fixedPath : fixedPath + "/" + leaf;
+    }
+  }
+
+  /** 每个解压会话独占；只缓存字符串解析，不缓存目录存在性、权限、身份或描述符。 */
+  static final class DirectoryRoutes {
+    private final LinkedHashMap<String, DirectoryRoute> entries =
+        new LinkedHashMap<>(64, .75f, true);
+
+    DirectoryRoute get(String relative) {
+      DirectoryRoute route = entries.get(relative);
+      if (route != null) return route;
+      route = new DirectoryRoute(relative);
+      entries.put(relative, route);
+      if (entries.size() > CACHED_DIRECTORIES) {
+        var oldest = entries.entrySet().iterator();
+        oldest.next();
+        oldest.remove();
+      }
+      return route;
+    }
+  }
+
+  static final class DirectoryRoute {
+    private final String[] parts, prefixes;
+
+    private DirectoryRoute(String relative) {
+      parts = relative.split("/");
+      prefixes = new String[parts.length];
+      String prefix = "";
+      for (int index = 0; index < parts.length; index++) {
+        prefix = prefix.isEmpty() ? parts[index] : prefix + "/" + parts[index];
+        prefixes[index] = prefix;
+      }
+    }
+
+    int size() {
+      return parts.length;
+    }
+
+    String part(int index) {
+      return parts[index];
+    }
+
+    String before(int index) {
+      return index == 0 ? "" : prefixes[index - 1];
+    }
+
+    String prefix(int index) {
+      return prefixes[index];
+    }
+  }
+
+  AndroidTrustedAssetFileSystem(File destination) throws IOException {
+    this(destination, false);
+  }
+
+  AndroidTrustedAssetFileSystem(File destination, boolean exactMembers) throws IOException {
+    this(destination, exactMembers, false);
+  }
+
+  /** deferredSync 只在 exactMembers（全新空根）且内核 >= 5.8 时生效。 */
+  AndroidTrustedAssetFileSystem(File destination, boolean exactMembers, boolean deferredSync)
+      throws IOException {
+    this.exactMembers = exactMembers;
+    granted = destination.getAbsoluteFile();
+    if (!granted.isDirectory() && !granted.mkdirs())
+      throw new IOException("TAR_ROOT_CREATE:" + granted);
+    try {
+      if (!OsConstants.S_ISDIR(Os.lstat(granted.getPath()).st_mode))
+        throw new IOException("TAR_ROOT_LINK:" + granted);
+      if (exactMembers) {
+        String[] names = granted.list();
+        if (names == null || names.length != 0) throw new IOException("TAR_SEALED_ROOT_NOT_EMPTY");
+      }
+      // 仅规范化调用者授予的应用目录别名；归档子路径绝不 canonicalize。
+      root = granted.getCanonicalFile();
+      rootPrefix = root.getPath() + "/";
+      FileDescriptor fd = Os.open("/", O_PATH | O_CLOEXEC, 0);
+      try {
+        File at = new File("/");
+        anchors.put(at, Os.fstat(fd));
+        for (String part : root.getPath().substring(1).split("/")) {
+          if (part.isEmpty() || part.equals(".") || part.equals(".."))
+            throw new IOException("UNSAFE_HOST_PATH");
+          FileDescriptor next = null;
+          try {
+            try (ParcelFileDescriptor handle = ParcelFileDescriptor.dup(fd)) {
+              next =
+                  Os.open(
+                      "/proc/self/fd/" + handle.getFd() + "/" + part,
+                      O_PATH | O_CLOEXEC | OsConstants.O_NOFOLLOW,
+                      0);
+            }
+            StructStat n = Os.fstat(next);
+            if (!OsConstants.S_ISDIR(n.st_mode)) throw new IOException("PARENT_LINK");
+            Os.close(fd);
+            fd = next;
+            next = null;
+            at = new File(at, part);
+            anchors.put(at, n);
+          } finally {
+            if (next != null) Os.close(next);
+          }
+        }
+        StructStat rootStat = Os.fstat(fd);
+        rootIdentity = node(rootStat);
+        rootHandle = ParcelFileDescriptor.dup(fd);
+        rootDirectory = new Directory(rootHandle, rootIdentity, rootStat);
+        String[] paths = new String[anchors.size()];
+        long[] devices = new long[anchors.size()], inodes = new long[anchors.size()];
+        int index = 0;
+        for (var anchor : anchors.entrySet()) {
+          paths[index] = anchor.getKey().getPath();
+          devices[index] = anchor.getValue().st_dev;
+          inodes[index++] = anchor.getValue().st_ino;
+        }
+        try {
+          rootIdentities = new NativeStorage.DirectoryIdentities(paths, devices, inodes);
+        } catch (IOException error) {
+          rootHandle.close();
+          throw error;
+        }
+      } finally {
+        Os.close(fd);
+      }
+    } catch (ErrnoException error) {
+      throw failure(error);
+    }
+    syncRoot =
+        deferredSync && exactMembers && syncfsReportsErrors(kernelRelease())
+            ? openSyncRoot()
+            : null;
+  }
+
+  /** 在任何成员写入之前打开（errseq 采样点）；O_PATH 句柄不能用于 syncfs。 */
+  private ParcelFileDescriptor openSyncRoot() throws IOException {
+    try {
+      FileDescriptor fd =
+          Os.open(
+              rootDirectory.path(""),
+              OsConstants.O_RDONLY | O_DIRECTORY | O_CLOEXEC,
+              0);
+      try {
+        if (!identity(rootIdentity, node(Os.fstat(fd))))
+          throw new IOException("TAR_PARENT_CHANGED:");
+        return ParcelFileDescriptor.dup(fd);
+      } finally {
+        Os.close(fd);
+      }
+    } catch (ErrnoException error) {
+      rootHandle.close();
+      throw failure(error);
+    } catch (IOException error) {
+      rootHandle.close();
+      throw error;
+    }
+  }
+
+  private static String kernelRelease() {
+    try {
+      return Os.uname().release;
+    } catch (RuntimeException | LinkageError error) {
+      return "";
+    }
+  }
+
+  /** syncfs 自 Linux 5.8 起上报文件系统写回错误；解析失败按不支持处理。 */
+  static boolean syncfsReportsErrors(String release) {
+    if (release == null) return false;
+    java.util.regex.Matcher m =
+        java.util.regex.Pattern.compile("^(\\d+)\\.(\\d+)").matcher(release);
+    if (!m.find()) return false;
+    try {
+      int major = Integer.parseInt(m.group(1)), minor = Integer.parseInt(m.group(2));
+      return major > 5 || (major == 5 && minor >= 8);
+    } catch (NumberFormatException error) {
+      return false;
+    }
+  }
+
+  /** 诊断/测试：本实例是否走延迟同步。 */
+  boolean deferredSync() {
+    return syncRoot != null;
+  }
+
+  private static Node node(StructStat stat) {
+    String type =
+        OsConstants.S_ISREG(stat.st_mode)
+            ? "FILE"
+            : OsConstants.S_ISDIR(stat.st_mode)
+                ? "DIRECTORY"
+                : OsConstants.S_ISLNK(stat.st_mode) ? "LINK" : "SPECIAL";
+    return new Node(
+        type,
+        stat.st_dev + ":" + stat.st_ino,
+        stat.st_size,
+        stat.st_mtime,
+        stat.st_dev,
+        stat.st_mode & 0777);
+  }
+
+  private static boolean identity(Node a, Node b) {
+    return a.type.equals(b.type) && a.device == b.device && a.key.equals(b.key);
+  }
+
+  private static boolean identity(StructStat expected, StructStat actual) {
+    return actual != null
+        && OsConstants.S_ISDIR(expected.st_mode)
+        && OsConstants.S_ISDIR(actual.st_mode)
+        && expected.st_dev == actual.st_dev
+        && expected.st_ino == actual.st_ino;
+  }
+
+  private static IOException failure(ErrnoException error) {
+    return new IOException(
+        error.errno == OsConstants.EACCES || error.errno == OsConstants.EPERM
+            ? "PERMISSION_DENIED"
+            : error.errno == OsConstants.ENOSPC ? "NO_SPACE" : "FILESYSTEM_" + error.errno,
+        error);
+  }
+
+  private static StructStat rawStat(String path) throws IOException {
+    try {
+      return Os.lstat(path);
+    } catch (ErrnoException error) {
+      if (error.errno == OsConstants.ENOENT) return null;
+      throw failure(error);
+    }
+  }
+
+  private static Node lstat(String path) throws IOException {
+    StructStat stat = rawStat(path);
+    return stat == null ? new Node("MISSING", "", 0, 0, 0, 0) : node(stat);
+  }
+
+  private Node verifyRoot() throws IOException {
+    if (rootIdentities.verify() >= 0) throw new IOException("TAR_ROOT_CHANGED:" + root);
+    return new Node(
+        "DIRECTORY",
+        rootIdentity.key,
+        rootIdentities.rootSize(),
+        rootIdentities.rootModified(),
+        rootIdentity.device,
+        rootIdentities.rootPermissions());
+  }
+
+  private String relative(File file) throws IOException {
+    // 只复用当前成员已完整校验的精确名称；其他调用仍逐项执行原路径检查。
+    if (activeParent != null) {
+      if (file.equals(activeTarget)) return activePath;
+      if (file.equals(activeParentFile)) return activeName;
+    }
+    String path = file.getAbsolutePath();
+    if (path.equals(root.getPath()) || path.equals(granted.getPath())) return "";
+    if (!path.startsWith(rootPrefix)) throw new IOException("TAR_HOST_PATH_OUTSIDE_ROOT");
+    return BackupLimits.path(path.substring(rootPrefix.length()));
+  }
+
+  private static String parent(String path) {
+    int slash = path.lastIndexOf('/');
+    return slash < 0 ? "" : path.substring(0, slash);
+  }
+
+  private Directory directoryHandle(String relative, boolean create, boolean allowMissing)
+      throws IOException {
+    if (activeParent != null && relative.equals(activeName)) return activeParent;
+    verifyRoot();
+    Directory at = rootDirectory;
+    if (relative.isEmpty()) return at;
+    DirectoryRoute route = routes.get(relative);
+    for (int index = 0; index < route.size(); index++) {
+      String part = route.part(index);
+      String before = route.before(index), prefix = route.prefix(index);
+      StructStat n = rawStat(at.path(part));
+      if (n == null && create) {
+        try {
+          Os.mkdir(at.path(part), 0700);
+        } catch (ErrnoException error) {
+          throw failure(error);
+        }
+        dirtyDirectories.add(before);
+        n = rawStat(at.path(part));
+      }
+      if (n == null && allowMissing) return null;
+      if (n == null || !OsConstants.S_ISDIR(n.st_mode))
+        throw new IOException("TAR_PARENT_LINK_OR_TYPE:" + prefix);
+      StructStat known = directories.putIfAbsent(prefix, n);
+      if (directories.size() > BackupLimits.ENTRIES) throw new IOException("TAR_DIRECTORY_LIMIT");
+      if (known != null && !identity(known, n))
+        throw new IOException("TAR_PARENT_CHANGED:" + prefix);
+      Directory held = cache.get(prefix);
+      if (held == null) {
+        try {
+          FileDescriptor fd =
+              Os.open(at.path(part), O_PATH | O_CLOEXEC | OsConstants.O_NOFOLLOW, 0);
+          try {
+            StructStat opened = Os.fstat(fd);
+            if (!identity(n, opened)) throw new IOException("TAR_PARENT_CHANGED:" + prefix);
+            held = new Directory(ParcelFileDescriptor.dup(fd), node(opened), opened);
+          } finally {
+            Os.close(fd);
+          }
+        } catch (ErrnoException error) {
+          throw failure(error);
+        }
+        cache.put(prefix, held);
+        if (cache.size() > CACHED_DIRECTORIES) {
+          var oldest = cache.entrySet().iterator();
+          Directory evicted = oldest.next().getValue();
+          oldest.remove();
+          evicted.handle.close();
+        }
+      } else if (!identity(n, held.stat)) throw new IOException("TAR_PARENT_CHANGED:" + prefix);
+      at = held;
+    }
+    return at;
+  }
+
+  private String path(File file) throws IOException {
+    String name = relative(file);
+    if (name.isEmpty()) throw new IOException("TAR_REFUSE_ROOT_WRITE");
+    return directoryHandle(parent(name), false, false).path(file.getName());
+  }
+
+  private ParcelFileDescriptor open(File file, int flags, int mode) throws IOException {
+    try {
+      FileDescriptor raw = Os.open(path(file), flags | O_CLOEXEC | OsConstants.O_NOFOLLOW, mode);
+      try {
+        return ParcelFileDescriptor.dup(raw);
+      } finally {
+        Os.close(raw);
+      }
+    } catch (ErrnoException error) {
+      throw failure(error);
+    }
+  }
+
+  @Override
+  public File target(String name, boolean createParents) throws IOException {
+    if (activeParent != null && name.equals(activePath)) return activeTarget;
+    BackupLimits.path(name);
+    directoryHandle(parent(name), createParents, false);
+    return new File(root, name);
+  }
+
+  @Override
+  public Node stat(File file) throws IOException {
+    String name = relative(file);
+    if (name.isEmpty()) {
+      if (activeParent == null) return verifyRoot();
+      Node observed = lstat(root.getPath());
+      if (!identity(rootIdentity, observed)) throw new IOException("TAR_ROOT_CHANGED:" + root);
+      return observed;
+    }
+    Directory directory = directoryHandle(parent(name), false, true);
+    return directory == null
+        ? new Node("MISSING", "", 0, 0, 0, 0)
+        : lstat(directory.path(file.getName()));
+  }
+
+  @Override
+  public String readLink(File file) throws IOException {
+    try {
+      return Os.readlink(path(file));
+    } catch (ErrnoException error) {
+      throw failure(error);
+    }
+  }
+
+  @Override
+  public List<String> list(File file) throws IOException {
+    Node expected = stat(file);
+    if (!expected.type.equals("DIRECTORY")) throw new IOException("DIRECTORY_TYPE");
+    Directory held = directoryHandle(relative(file), false, false);
+    String[] names = new File(held.path("")).list();
+    if (names == null) throw new IOException("DIRECTORY_UNREADABLE");
+    if (names.length > BackupLimits.ENTRIES) throw new IOException("ENTRY_LIMIT");
+    List<String> result = Arrays.asList(names);
+    Collections.sort(result);
+    if (!expected.same(stat(file))) throw new IOException("SOURCE_CHANGED");
+    return result;
+  }
+
+  @Override
+  public InputStream read(File file, Node expected) throws IOException {
+    if (!expected.type.equals("FILE")) throw new IOException("FILE_TYPE");
+    ParcelFileDescriptor handle = open(file, OsConstants.O_RDONLY, 0);
+    FileDescriptor fd = handle.getFileDescriptor();
+    InputStream input = new ParcelFileDescriptor.AutoCloseInputStream(handle);
+    try {
+      if (!expected.same(node(Os.fstat(fd)))) throw new IOException("SOURCE_CHANGED");
+    } catch (IOException | ErrnoException error) {
+      try {
+        input.close();
+      } catch (IOException closing) {
+        error.addSuppressed(closing);
+      }
+      throw error instanceof ErrnoException errno ? failure(errno) : (IOException) error;
+    }
+    return new FilterInputStream(input) {
+      boolean closed;
+
+      @Override
+      public void close() throws IOException {
+        if (closed) return;
+        closed = true;
+        try {
+          if (!expected.same(node(Os.fstat(fd))) || !expected.same(stat(file)))
+            throw new IOException("SOURCE_CHANGED");
+        } catch (ErrnoException error) {
+          throw failure(error);
+        } finally {
+          super.close();
+        }
+      }
+    };
+  }
+
+  @Override
+  public OutputStream create(File file) throws IOException {
+    return createWithMode(file, 0600);
+  }
+
+  @Override
+  public boolean supportsSmallFiles() {
+    return true;
+  }
+
+  @Override
+  public CreatedFile prepareSmallFile(File file, byte[] bytes, int count, int mode)
+      throws IOException {
+    if (activeParent == null
+        || !file.equals(activeTarget)
+        || bytes == null
+        || count < 0
+        || count > SMALL_FILE_BYTES
+        || count > bytes.length) throw new IOException("TAR_SMALL_FILE_SCOPE");
+    String name = activePath, parentName = activeName;
+    NativeStorage.SmallFile prepared =
+        NativeStorage.prepareSmallFile(
+            activeParent.handle.getFd(),
+            activeParent.stat.st_dev,
+            activeParent.stat.st_ino,
+            file.getName(),
+            bytes,
+            count,
+            mode);
+    if (!prepared.identified) {
+      try (prepared) {
+        prepared.check();
+        throw new IOException("TAR_CREATED_FILE_TYPE:" + name);
+      }
+    }
+    Node owned =
+        new Node(
+            "FILE",
+            prepared.device + ":" + prepared.inode,
+            prepared.size,
+            prepared.modified,
+            prepared.device,
+            prepared.permissions);
+    // 已创建的短成员即使写入失败也先把真实出生身份交回边界，close 再抛出失败。
+    return new CreatedFile(PREPARED_OUTPUT, owned) {
+      boolean closed;
+
+      @Override
+      public void close() throws IOException {
+        if (closed) return;
+        closed = true;
+        try (prepared) {
+          control.check();
+          prepared.check();
+          queueSync(prepared.handle.getFileDescriptor());
+          // 必须在原有 128 FD 组的同步入队之后，才作完整 fd/名称末次核验。
+          long[] finished = prepared.finish();
+          Node complete =
+              new Node(
+                  "FILE",
+                  finished[0] + ":" + finished[1],
+                  finished[2],
+                  finished[3],
+                  finished[0],
+                  (int) finished[4]);
+          written.put(name, complete);
+          dirtyDirectories.add(parentName);
+        }
+      }
+    };
+  }
+
+  @Override
+  public CreatedFile createWithMode(File file, int mode) throws IOException {
+    ParcelFileDescriptor handle =
+        open(file, OsConstants.O_WRONLY | OsConstants.O_CREAT | OsConstants.O_EXCL, 0600);
+    FileDescriptor fd = handle.getFileDescriptor();
+    OutputStream output = new ParcelFileDescriptor.AutoCloseOutputStream(handle);
+    final Node opened;
+    try {
+      opened = node(Os.fstat(fd));
+      if (!opened.type.equals("FILE")) throw new IOException("FILE_TYPE");
+    } catch (IOException | ErrnoException error) {
+      try {
+        output.close();
+      } catch (IOException closing) {
+        error.addSuppressed(closing);
+      }
+      throw error instanceof ErrnoException errno ? failure(errno) : (IOException) error;
+    }
+    return new CreatedFile(output, opened) {
+      boolean closed;
+
+      @Override
+      public void close() throws IOException {
+        if (closed) return;
+        closed = true;
+        try {
+          flush();
+          if (!identity(opened, node(Os.fstat(fd)))) throw new IOException("SOURCE_CHANGED");
+          Os.fchmod(fd, mode & 0777);
+          queueSync(fd);
+          Node finished = node(Os.fstat(fd));
+          if (!finished.same(stat(file))) throw new IOException("TAR_TARGET_CHANGED:" + file);
+          written.put(relative(file), finished);
+          dirtyDirectories.add(parent(relative(file)));
+        } catch (ErrnoException error) {
+          throw failure(error);
+        } finally {
+          super.close();
+        }
+      }
+    };
+  }
+
+  @Override
+  public void directory(File file) throws IOException {
+    try {
+      Os.mkdir(path(file), 0700);
+      String name = relative(file);
+      directoryHandle(name, false, false);
+      dirtyDirectories.add(parent(name));
+    } catch (ErrnoException error) {
+      throw failure(error);
+    }
+  }
+
+  @Override
+  public void move(File from, File to) throws IOException {
+    String source = relative(from), target = relative(to);
+    Directory a = directoryHandle(parent(source), false, false);
+    // 临时 dup 固定两侧父目录，LRU 淘汰不能关闭正在执行的 rename 身份。
+    try (ParcelFileDescriptor held = ParcelFileDescriptor.dup(a.handle.getFileDescriptor())) {
+      String sourcePath = "/proc/self/fd/" + held.getFd() + "/" + from.getName();
+      Directory b = directoryHandle(parent(target), false, false);
+      String targetPath = b.path(to.getName());
+      Node sourceNode = lstat(sourcePath);
+      if (sourceNode.type.equals("MISSING")
+          || sourceNode.device != b.identity.device
+          || !lstat(targetPath).type.equals("MISSING")) throw new IOException("UNSAFE_MOVE");
+      Os.rename(sourcePath, targetPath);
+      Node expected = written.remove(source);
+      if (expected != null) written.put(target, expected);
+      dirtyDirectories.add(parent(source));
+      dirtyDirectories.add(parent(target));
+    } catch (ErrnoException error) {
+      throw failure(error);
+    }
+  }
+
+  @Override
+  public void delete(File file) throws IOException {
+    try {
+      Os.remove(path(file));
+      written.remove(relative(file));
+      writtenLinks.remove(relative(file));
+      dirtyDirectories.add(parent(relative(file)));
+    } catch (ErrnoException error) {
+      throw failure(error);
+    }
+  }
+
+  @Override
+  public void mode(File file, int mode) throws IOException {
+    Node expected = stat(file);
+    if (!expected.type.equals("FILE") && !expected.type.equals("DIRECTORY"))
+      throw new IOException("MODE_TYPE");
+    try (ParcelFileDescriptor handle =
+        open(file, OsConstants.O_RDONLY | OsConstants.O_NONBLOCK, 0)) {
+      FileDescriptor fd = handle.getFileDescriptor();
+      if (!expected.same(node(Os.fstat(fd)))) throw new IOException("SOURCE_CHANGED");
+      Os.fchmod(fd, mode & 0777);
+      queueSync(fd);
+      if (!node(Os.fstat(fd)).same(stat(file))) throw new IOException("SOURCE_CHANGED");
+    } catch (ErrnoException error) {
+      throw failure(error);
+    }
+  }
+
+  @Override
+  public void symlink(String target, File file) throws IOException {
+    try {
+      String path = path(file), name = relative(file);
+      Os.symlink(target, path);
+      Node created = lstat(path);
+      if (!created.type.equals("LINK") || !target.equals(Os.readlink(path)))
+        throw new IOException("TAR_LINK_CHANGED:" + name);
+      written.put(name, created);
+      writtenLinks.put(name, target);
+      dirtyDirectories.add(parent(relative(file)));
+    } catch (ErrnoException error) {
+      throw failure(error);
+    }
+  }
+
+  @Override
+  public void syncDirectory(File file) throws IOException {
+    String name = relative(file);
+    directoryHandle(name, false, false);
+    dirtyDirectories.add(name);
+  }
+
+  @Override
+  public void finishFiles() throws IOException {
+    // 不能仅以缓存命中宣称完整。检查每个实际父目录与已写文件，之后才收敛目录同步。
+    SignedAssetMembers members = null;
+    if (exactMembers) {
+      members = new SignedAssetMembers(signedMembers);
+      verifyMembers(rootDirectory, "", members);
+    }
+    for (var entry : directories.entrySet()) {
+      control.check();
+      if (members == null) {
+        if (!identity(node(entry.getValue()), stat(new File(root, entry.getKey()))))
+          throw new IOException("TAR_PARENT_CHANGED:" + entry.getKey());
+      } else {
+        Directory held = directoryHandle(entry.getKey(), false, false);
+        if (!identity(entry.getValue(), held.stat))
+          throw new IOException("TAR_PARENT_CHANGED:" + entry.getKey());
+        verifyMembers(held, entry.getKey(), members);
+      }
+    }
+    Map<String, List<String>> byParent = new LinkedHashMap<>();
+    for (String name : written.keySet())
+      byParent.computeIfAbsent(parent(name), ignored -> new ArrayList<>()).add(name);
+    for (var group : byParent.entrySet()) {
+      control.check();
+      Directory held = directoryHandle(group.getKey(), false, false);
+      try (ParcelFileDescriptor fixed = ParcelFileDescriptor.dup(held.handle.getFileDescriptor())) {
+        for (String name : group.getValue()) {
+          control.check();
+          String path = "/proc/self/fd/" + fixed.getFd() + "/" + new File(name).getName();
+          if (!written.get(name).same(lstat(path)))
+            throw new IOException("TAR_TARGET_CHANGED:" + name);
+          String link = writtenLinks.get(name);
+          if (link != null)
+            try {
+              if (!link.equals(Os.readlink(path)))
+                throw new IOException("TAR_LINK_CHANGED:" + name);
+            } catch (ErrnoException error) {
+              throw failure(error);
+            }
+        }
+        if (!identity(held.identity, directoryHandle(group.getKey(), false, false).identity))
+          throw new IOException("TAR_PARENT_CHANGED:" + group.getKey());
+      }
+    }
+    for (String name : new ArrayList<>(dirtyDirectories)) {
+      control.check();
+      Directory held = directoryHandle(name, false, false);
+      try {
+        FileDescriptor fd = Os.open(held.path(""), OsConstants.O_RDONLY | O_CLOEXEC, 0);
+        try {
+          if (!identity(held.identity, node(Os.fstat(fd))))
+            throw new IOException("TAR_PARENT_CHANGED:" + name);
+          queueSync(fd);
+        } finally {
+          Os.close(fd);
+        }
+      } catch (ErrnoException error) {
+        throw failure(error);
+      }
+    }
+    dirtyDirectories.clear();
+    flushPending();
+    verifyRoot();
+  }
+
+  private void verifyMembers(Directory held, String name, SignedAssetMembers members)
+      throws IOException {
+    control.check();
+    try {
+      Node before = node(Os.fstat(held.handle.getFileDescriptor()));
+      if (!identity(held.identity, before)) throw new IOException("TAR_PARENT_CHANGED:" + name);
+      String[] actual = new File(held.path("")).list();
+      if (actual == null) throw new IOException("DIRECTORY_UNREADABLE");
+      if (actual.length > BackupLimits.ENTRIES) throw new IOException("ENTRY_LIMIT");
+      members.verify(name, Arrays.asList(actual));
+      if (!before.same(node(Os.fstat(held.handle.getFileDescriptor()))))
+        throw new IOException("TAR_PARENT_CHANGED:" + name);
+    } catch (ErrnoException error) {
+      throw failure(error);
+    }
+  }
+
+  @Override
+  public void finishDirectoryModes() throws IOException {
+    flushPending();
+    verifyRoot();
+  }
+
+  @Override
+  public void close() throws IOException {
+    IOException failure = null;
+    // 失败/取消不补发同步成功；只关闭尚未提交的短期描述符。
+    for (ParcelFileDescriptor handle : pendingSync)
+      try {
+        handle.close();
+      } catch (IOException error) {
+        if (failure == null) failure = error;
+        else failure.addSuppressed(error);
+      }
+    pendingSync.clear();
+    if (activeParent != null) {
+      try {
+        activeParent.handle.close();
+      } catch (IOException error) {
+        if (failure == null) failure = error;
+        else failure.addSuppressed(error);
+      }
+      activeParent = null;
+      activeName = null;
+      activePath = null;
+      activeTarget = null;
+      activeParentFile = null;
+    }
+    for (Directory directory : cache.values())
+      try {
+        directory.handle.close();
+      } catch (IOException error) {
+        if (failure == null) failure = error;
+        else failure.addSuppressed(error);
+      }
+    cache.clear();
+    if (syncRoot != null)
+      try {
+        syncRoot.close();
+      } catch (IOException error) {
+        if (failure == null) failure = error;
+        else failure.addSuppressed(error);
+      }
+    try {
+      rootHandle.close();
+    } catch (IOException error) {
+      if (failure == null) failure = error;
+      else failure.addSuppressed(error);
+    }
+    if (failure != null) throw failure;
+  }
+}

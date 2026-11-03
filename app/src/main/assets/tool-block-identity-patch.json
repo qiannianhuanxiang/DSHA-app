@@ -1,0 +1,24 @@
+{
+  "dshVersion": "0.2.1-rc.3",
+  "module": "@deepseek-ai/dsh-llm/lib/types/assembler.js",
+  "packageVersion": "0.2.1-rc.3",
+  "canonicalSourceSha256": "35a4754ab854055942b9142934c595c3e6358a717947daa2d8d89847aef988f7",
+  "patches": [
+    {
+      "before": "                partial.toolCallId = chunk.id;",
+      "after": "                // DSHA_TOOL_ASSEMBLER_IDENTITY_RC2_V1: empty deltas must not erase a late valid identity.\n                if (typeof chunk.id === 'string' && chunk.id.trim()) partial.toolCallId = chunk.id;"
+    },
+    {
+      "before": "                if (chunk.name)",
+      "after": "                if (typeof chunk.name === 'string' && chunk.name.trim())"
+    },
+    {
+      "before": "                partial.block = chunk.block;",
+      "after": "                partial.block = chunk.block.type === 'tool-call' ? {\n                    ...chunk.block,\n                    id: typeof chunk.block.id === 'string' && chunk.block.id.trim() ? chunk.block.id : partial.toolCallId ?? '',\n                    name: typeof chunk.block.name === 'string' && chunk.block.name.trim() ? chunk.block.name : partial.toolCallName ?? '',\n                } : chunk.block;"
+    },
+    {
+      "before": "id: partial.toolCallId ?? brandString(`call-${index}`),",
+      "after": "id: partial.toolCallId ?? '',"
+    }
+  ]
+}

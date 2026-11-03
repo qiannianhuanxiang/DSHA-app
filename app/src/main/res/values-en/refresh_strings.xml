@@ -21,6 +21,7 @@
 
 
     <string name="device_checking">Checking authorization…</string>
+    <string name="device_unrestricted_shell">Unrestricted device shell</string>
 
 
 

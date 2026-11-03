@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "dshVersion": "0.2.1-rc.3",
+  "module": "@deepseek-ai/dsh-client-ui-deliverables/lib/client.js",
+  "sourceSha256": "0b786f9c89e728ac33926b452536daaea678d9e7741a579126e406a232cb03ed",
+  "packageIntegrity": "sha512-G3+zIoPwQ0tLf4Gb65rBnYHQirRnsOIVUYccN/5PNMLpkBmZKBwKm6nhUkBzkJ6XfhkzqOlRrBTc68NGrWTLlQ==",
+  "patches": [
+    {
+      "before": "renderSlot(\"deliverables.file.actions\", {\n",
+      "after": "renderSlot(\"deliverables.file.actions\", {\n\t\t\t\t\t\t\t\t/* DSHA_FILE_DELIVERABLES_RC2_V1: exact owner coordinates. */\n\t\t\t\t\t\t\t\tsessionId,\n\t\t\t\t\t\t\t\tabsolutePath: file.path,\n"
+    },
+    {
+      "before": "renderSlot(\"deliverables.review.file.actions\", {\n",
+      "after": "renderSlot(\"deliverables.review.file.actions\", {\n\t\t\t\t\t\t\t\t/* DSHA_FILE_DELIVERABLES_RC2_V1: exact owner coordinates. */\n\t\t\t\t\t\t\t\tsessionId,\n\t\t\t\t\t\t\t\tabsolutePath: file.path,\n"
+    },
+    {
+      "before": "host !== null && host !== \"error\" && !host.available && (0, react_jsx_runtime.jsx)(\"span\", {",
+      "after": "host !== null && host !== \"error\" && !host.available && typeof window.DSHA?.downloadArtifact !== \"function\" && (0, react_jsx_runtime.jsx)(\"span\", {"
+    },
+    {
+      "before": "host === \"error\" && (0, react_jsx_runtime.jsxs)(\"div\", {",
+      "after": "host === \"error\" && typeof window.DSHA?.downloadArtifact !== \"function\" && (0, react_jsx_runtime.jsxs)(\"div\", {"
+    }
+  ]
+}

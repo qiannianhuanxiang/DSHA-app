@@ -24,6 +24,10 @@ final class LanAuth {
   /** Return the credential source for one complete request header. */
   static int tokenOk(String head, String token) {
     if (head == null || token == null || token.isEmpty()) return AUTH_DENY;
+    // A freshly copied link also cleans its query credential when this browser
+    // already has the current cookie. Otherwise the sensitive URL stays visible.
+    String query = queryToken(head);
+    if (query != null && constantTimeEquals(token, query)) return AUTH_OK_SET_COOKIE;
     String cookie = null;
     for (String line : head.split("\\r?\\n")) {
       int colon = line.indexOf(':');
@@ -41,8 +45,94 @@ final class LanAuth {
       }
     }
     if (cookie != null && constantTimeEquals(token, cookie)) return AUTH_OK;
-    String query = queryToken(head);
-    return query != null && constantTimeEquals(token, query) ? AUTH_OK_SET_COOKIE : AUTH_DENY;
+    return AUTH_DENY;
+  }
+
+  /** Session cookies, never query parameters, authorize ordinary proxy requests. */
+  static boolean sessionOk(String head, String session) {
+    if (head == null || session == null || session.isEmpty()) return false;
+    for (String line : head.split("\\r?\\n")) {
+      int colon = line.indexOf(':');
+      if (colon <= 0 || !line.substring(0, colon).trim().equalsIgnoreCase("Cookie")) continue;
+      for (String part : line.substring(colon + 1).split(";")) {
+        String cookie = part.trim();
+        String prefix = COOKIE_NAME + "=";
+        if (cookie.startsWith(prefix)
+            && constantTimeEquals(session, cookie.substring(prefix.length()).trim())) return true;
+      }
+    }
+    return false;
+  }
+
+  /** Basic is only a bootstrap on a safe navigation, never a write authorization. */
+  static boolean passwordOk(String head, String verifier) {
+    if (head == null || !head.startsWith("GET ")) return false;
+    String authorization = null;
+    for (String line : head.split("\\r?\\n")) {
+      int colon = line.indexOf(':');
+      if (colon <= 0) continue;
+      String name = line.substring(0, colon).trim();
+      String value = line.substring(colon + 1).trim();
+      if (name.equalsIgnoreCase("Sec-Fetch-Site") && value.equalsIgnoreCase("cross-site"))
+        return false;
+      if (name.equalsIgnoreCase("Authorization")) {
+        if (authorization != null) return false;
+        authorization = value;
+      }
+    }
+    if (authorization == null
+        || !authorization.regionMatches(true, 0, "Basic ", 0, 6)
+        || authorization.length() > 1024) return false;
+    try {
+      String decoded =
+          new String(
+              java.util.Base64.getDecoder().decode(authorization.substring(6).trim()),
+              java.nio.charset.StandardCharsets.UTF_8);
+      if (!decoded.startsWith("dsha:")) return false;
+      return com.deepseekharness.app.util.LanPassword.verify(decoded.substring(5), verifier);
+    } catch (IllegalArgumentException invalid) {
+      return false;
+    }
+  }
+
+  /** Keep callback paths and state while removing the proxy credential only. */
+  static String cleanRedirectTarget(String target) {
+    // A Location beginning // or /\\ is interpreted as a different authority by
+    // browsers. Bootstrap may redirect only to a single-slash local target.
+    if (target == null
+        || !target.startsWith("/")
+        || target.startsWith("//")
+        || target.indexOf('\\') >= 0
+        || target.indexOf('#') >= 0
+        || containsControlOrSpace(target)) return "/";
+    return stripTokenFromUrl(target);
+  }
+
+  private static boolean containsControlOrSpace(String target) {
+    // 逐字符检查保留相同规则，也支持 API 23。
+    for (int i = 0; i < target.length(); i++) {
+      char value = target.charAt(i);
+      if (value <= 32 || value == 127) return true;
+    }
+    return false;
+  }
+
+  static com.deepseekharness.app.util.LanFailureResponse.Reason denialReason(
+      String head, String token) {
+    var missing = com.deepseekharness.app.util.LanFailureResponse.Reason.TOKEN_MISSING;
+    if (token == null || token.isEmpty())
+      return com.deepseekharness.app.util.LanFailureResponse.Reason.TOKEN_UNAVAILABLE;
+    if (queryToken(head) != null)
+      return com.deepseekharness.app.util.LanFailureResponse.Reason.TOKEN_INVALID;
+    if (head != null)
+      for (String line : head.split("\\r?\\n")) {
+        int colon = line.indexOf(':');
+        if (colon <= 0 || !line.substring(0, colon).trim().equalsIgnoreCase("Cookie")) continue;
+        for (String part : line.substring(colon + 1).split(";"))
+          if (part.trim().startsWith(COOKIE_NAME + "="))
+            return com.deepseekharness.app.util.LanFailureResponse.Reason.TOKEN_INVALID;
+      }
+    return missing;
   }
 
   /** Read only the request target, never Referer or another header. */

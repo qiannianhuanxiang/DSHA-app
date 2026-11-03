@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "dshVersion": "0.2.1-rc.3",
+  "module": "@deepseek-ai/dsh-tool-fs/lib/index.js",
+  "patches": [
+    {
+      "before": "import z from \"@deepseek-ai/schemastery\";",
+      "after": "import { guardIntent } from \"dsha-destructive-policy\"; // DSHA_REQUIRED_POLICY_V1\nimport z from \"@deepseek-ai/schemastery\";"
+    },
+    {
+      "before": "\t\t\tconst intent = await ctx.waterfall(\"fs/write-intent\", target, exec, () => void 0);",
+      "after": "\t\t\tconst intent = await guardIntent(ctx, exec, target, await ctx.waterfall(\"fs/write-intent\", target, exec, () => void 0), \"write\");"
+    },
+    {
+      "before": "\t\t\t\tconst intent = await ctx.waterfall(\"fs/edit-intent\", target, exec, () => void 0);",
+      "after": "\t\t\t\tconst intent = await guardIntent(ctx, exec, target, await ctx.waterfall(\"fs/edit-intent\", target, exec, () => void 0), \"edit\");"
+    }
+  ]
+}

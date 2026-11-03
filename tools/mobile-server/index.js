@@ -1,5 +1,6 @@
 import { installResponseCompression } from './compress.js';
 import { deleteSession, installSessionDeletionLifecycle } from './delete-session.js';
+import { installFileTransfers } from './file-transfer.js';
 /** Maximum accepted request body size (1 MiB — the delete body is one id). */
 const MAX_BODY_BYTES = 1_048_576;
 /** Sentinel: the request body grew past MAX_BODY_BYTES. */
@@ -68,6 +69,7 @@ function respond(res, status, body) {
  */
 export const name = 'dsh-web-mobile';
 export function apply(ctx) {
+    installFileTransfers(ctx);
     // Only this public WebServer carrier's actual listening port is eligible;
     // other HTTP servers in the process retain their response behavior.
     ctx.inject(['webServer'], (webCtx) => {
@@ -127,12 +129,19 @@ export function apply(ctx) {
                     });
                     return;
                 }
-                const result = await deleteSession({
-                    persistence: persistence,
-                    sessions: ctx.get('sessions'),
-                    agents: ctx.get('agents'),
-                    workspaceRegistry: ctx.get('workspaceRegistry'),
-                }, sessionId);
+                let result;
+                try {
+                    result = await deleteSession({
+                        persistence: persistence,
+                        sessions: ctx.get('sessions'),
+                        agents: ctx.get('agents'),
+                        workspaceRegistry: ctx.get('workspaceRegistry'),
+                    }, sessionId);
+                } catch {
+                    ctx.logger.warn('dsh-web-mobile: session-delete failed unexpectedly');
+                    respond(res, 500, {error: {code: 'delete-failed', message: 'session delete failed unexpectedly'}});
+                    return;
+                }
                 if (result.ok) {
                     respond(res, 200, { ok: true, deleted: result.deleted, ...(result.warnings ? { warnings: result.warnings } : {}) });
                     return;

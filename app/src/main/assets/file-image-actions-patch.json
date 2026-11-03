@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "dshVersion": "0.2.1-rc.3",
+  "module": "@deepseek-ai/dsh-client-ui-attachment/lib/client.js",
+  "sourceSha256": "cdb497656ed0e66f011125df22791f6f579c85710d2d915020ddcfe6c0f58072",
+  "packageIntegrity": "sha512-i7s+0B8bTkOnysFz2ggKujfXrFFoqJLJqHekDYd/FahGkD/UvC8yKChTXxLPvpX1PJV0GEeotRz4EtFBplCWUQ==",
+  "patches": [
+    {
+      "before": "\t\t\t\t\"aria-busy\": loadingThumbnail || void 0,\n\t\t\t\tonClick: () => {\n\t\t\t\t\tif (src !== null) setOpen(true);\n\t\t\t\t},",
+      "after": "\t\t\t\t\"aria-busy\": loadingThumbnail || void 0,\n\t\t\t\t// DSHA_IMAGE_ACTIONS_RC2_V1: this owned image's original authorized Blob URL.\n\t\t\t\tonContextMenu: event => {\n\t\t\t\t\tif (window.DSHAFileTransfer?.imageMenu(src, label)) { event.preventDefault(); event.stopPropagation(); }\n\t\t\t\t},\n\t\t\t\tonPointerDown: event => window.DSHAFileTransfer?.imageDown(event, src, label),\n\t\t\t\tonPointerMove: event => window.DSHAFileTransfer?.imageMove(event),\n\t\t\t\tonPointerUp: () => window.DSHAFileTransfer?.imageEnd(),\n\t\t\t\tonPointerCancel: () => window.DSHAFileTransfer?.imageEnd(),\n\t\t\t\tonClick: event => {\n\t\t\t\t\tif (window.DSHAFileTransfer?.imageClick(event)) return;\n\t\t\t\t\tif (src !== null) setOpen(true);\n\t\t\t\t},"
+    },
+    {
+      "before": "\t\t\t\tonClose: close\n\t\t\t})] });",
+      "after": "\t\t\t\tonClose: close\n\t\t\t}), open && src !== null && typeof window.DSHA?.saveImage === \"function\" && (0, react_dom.createPortal)((0, react_jsx_runtime.jsx)(\"button\", {\n\t\t\t\ttype: \"button\", \"data-dsha-image-save\": true,\n\t\t\t\tonClick: () => window.DSHAFileTransfer?.imageMenu(src, label),\n\t\t\t\tchildren: document.documentElement.lang?.startsWith(\"zh\") ? \"保存到相册\" : \"Save to gallery\"\n\t\t\t}), document.body)] });"
+    }
+  ]
+}

@@ -21,6 +21,28 @@ public class UpdatePolicyTest {
   }
 
   @Test
+  public void feedIdentityRequiresTheInstalledPackageAndCompleteSigner() {
+    String hash = "a".repeat(64);
+    assertTrue(
+        UpdatePolicy.feedIdentityMatches(
+            "dsh.android.client", Arrays.asList(hash), "dsh.android.client", hash.toUpperCase()));
+    assertFalse(
+        UpdatePolicy.feedIdentityMatches(
+            "dsh.android.client", Arrays.asList(hash), "com.dsh.client", hash));
+    assertFalse(
+        UpdatePolicy.feedIdentityMatches(
+            "dsh.android.client", Arrays.asList(hash), "dsh.android.client", "b".repeat(64)));
+    assertFalse(
+        UpdatePolicy.feedIdentityMatches("dsh.android.client", Arrays.asList(hash), null, hash));
+    assertFalse(
+        UpdatePolicy.feedIdentityMatches(
+            "dsh.android.client", Arrays.asList(hash), "dsh.android.client", null));
+    assertFalse(
+        UpdatePolicy.feedIdentityMatches(
+            "dsh.android.client", Arrays.asList(hash, "b".repeat(64)), "dsh.android.client", hash));
+  }
+
+  @Test
   public void separatesChannelsAndEditionsAndNeverDowngrades() {
     UpdatePolicy.Release stable = release(113, "stable", "low", 23);
     UpdatePolicy.Release preview = release(114, "preview", "low", 23);

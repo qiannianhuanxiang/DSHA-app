@@ -196,7 +196,7 @@ public final class StartupRecoveryAudit extends Instrumentation {
       check(c.getWebGeneration() == generation, "切语言重启了 Web");
       String log = c.startupDiagnostics().snapshot().log;
       String han =
-          log.lines()
+          java.util.Arrays.stream(log.split("\\r\\n|\\r|\\n"))
               .filter(line -> line.matches(".*[\\p{IsHan}].*"))
               .collect(java.util.stream.Collectors.joining("\n"));
       note("EN_REMAINING_HAN\n" + han);

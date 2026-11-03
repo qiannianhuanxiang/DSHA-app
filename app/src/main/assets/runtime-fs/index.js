@@ -73,8 +73,14 @@ export function createPublisher(renameNoReplace = kernelPublish) {
     try {
       await copyFile(source, temporary, constants.COPYFILE_EXCL);
       created = true;
-      const file = await open(temporary, 'r+');
-      try { await file.sync(); } finally { await file.close(); }
+      // copyFile preserves immutable attachment mode 0400. fsync only needs a
+      // readable fd; NOFOLLOW and NONBLOCK reject links without blocking on a
+      // substituted FIFO, then fstat excludes directories and special files.
+      const file = await open(temporary, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+      try {
+        if (!(await file.stat()).isFile()) throw Object.assign(new Error('发布临时文件不是普通文件'), { code: 'EINVAL' });
+        await file.sync();
+      } finally { await file.close(); }
       signal?.throwIfAborted();
       try { await renameNoReplace(temporary, target); }
       catch (error) {

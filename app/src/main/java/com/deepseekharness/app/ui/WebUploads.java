@@ -7,7 +7,12 @@ import android.os.ParcelFileDescriptor;
 import android.system.ErrnoException;
 import android.system.Os;
 import android.system.OsConstants;
+import com.deepseekharness.app.backup.BackupControl;
+import com.deepseekharness.app.backup.DocumentStreams;
 import com.deepseekharness.app.util.WebTransferPolicy;
+import com.deepseekharness.app.util.WebUploadDiskBudget;
+import com.deepseekharness.app.util.WebUploadSourceRetry;
+import com.deepseekharness.app.util.WebUploadStream;
 import java.io.*;
 import java.util.*;
 import java.util.concurrent.Executors;
@@ -27,14 +32,19 @@ public final class WebUploads {
           });
   private static final Set<String> ACTIVE_SESSION_ROOTS =
       Collections.synchronizedSet(new HashSet<>());
+  // 同进程的所有缓存写入共用门禁；源 Provider 的读取不占这把锁。
+  private static final WebUploadDiskBudget UPLOAD_VOLUME_WRITES = new WebUploadDiskBudget();
 
-  /** One bounded cache owned by a retained page. The directory is removed only after that page closes. */
+  /**
+   * One bounded cache owned by a retained page. The directory is removed only after that page
+   * closes.
+   */
   public static final class Session implements AutoCloseable {
     private final File cacheRoot;
     private final File root;
     private final com.deepseekharness.app.util.WebUploadSessionBudget budget =
         new com.deepseekharness.app.util.WebUploadSessionBudget();
-    private final Set<InputStream> activeInputs =
+    private final Set<BackupControl> activeCopies =
         Collections.newSetFromMap(new IdentityHashMap<>());
     private boolean closed;
     private boolean cleanupQueued;
@@ -47,6 +57,10 @@ public final class WebUploads {
     }
 
     public Batch copy(Context context, List<Uri> uris) throws IOException {
+      return copy(context, uris, new BackupControl(null));
+    }
+
+    public Batch copy(Context context, List<Uri> uris, BackupControl control) throws IOException {
       if (uris == null || uris.isEmpty())
         throw new IOException(com.deepseekharness.app.util.UiText.text("未选择文件"));
       if (uris.size() > WebTransferPolicy.UPLOAD_COUNT)
@@ -56,6 +70,8 @@ public final class WebUploads {
       boolean ready = false;
       try (com.deepseekharness.app.core.RuntimeTasks ignored =
           com.deepseekharness.app.core.RuntimeTasks.begin()) {
+        register(control);
+        checkCancelled(control);
         reservation = budget.beginBatch(uris.size());
         ensureOpen();
         ensureOwnedDirectory(cacheRoot, null);
@@ -63,22 +79,23 @@ public final class WebUploads {
         ensureOwnedDirectory(root, root.getParentFile());
         batchDirectory = new File(root, UUID.randomUUID().toString());
         ensureOwnedDirectory(batchDirectory, root);
+        writeWithSpace(context, batchDirectory, 0, () -> {});
+        final File spaceDirectory = batchDirectory;
+        final com.deepseekharness.app.util.WebUploadSessionBudget.Reservation copyReservation =
+            reservation;
         ArrayList<File> files = new ArrayList<>();
         long total = 0;
         for (Uri uri : uris) {
-          ensureNotInterrupted();
+          checkCancelled(control);
           if (uri == null || !"content".equals(uri.getScheme()))
             throw new IOException(com.deepseekharness.app.util.UiText.text("不支持的文件来源，请通过系统文件应用选择"));
           String name = "upload.bin";
           try (android.database.Cursor cursor =
-              context
-                  .getContentResolver()
-                  .query(
-                      uri,
-                      new String[] {android.provider.OpenableColumns.DISPLAY_NAME},
-                      null,
-                      null,
-                      null)) {
+              DocumentStreams.optionalQuery(
+                  context.getContentResolver(),
+                  uri,
+                  new String[] {android.provider.OpenableColumns.DISPLAY_NAME},
+                  control)) {
             if (cursor != null && cursor.moveToFirst())
               name = WebTransferPolicy.fileName(cursor.getString(0));
           }
@@ -86,44 +103,47 @@ public final class WebUploads {
           ensureOwnedDirectory(directory, batchDirectory);
           File file = new File(directory, name);
           files.add(file);
-          InputStream opened = context.getContentResolver().openInputStream(uri);
-          if (opened == null)
-            throw new IOException(com.deepseekharness.app.util.UiText.text("没有文件读取权限，请重新选择"));
-          InputStream in = register(opened);
-          try {
-            ParcelFileDescriptor descriptor = openNoFollow(file);
-            try (InputStream source = in;
-                ParcelFileDescriptor owned = descriptor;
-                OutputStream out = new FileOutputStream(owned.getFileDescriptor())) {
-              byte[] buffer = new byte[65536];
-              int n;
-              while ((n = source.read(buffer)) != -1) {
-                ensureNotInterrupted();
-                total += n;
-                if (total > WebTransferPolicy.UPLOAD_LIMIT)
-                  throw new IOException(com.deepseekharness.app.util.UiText.text("本次上传超过 256 MiB"));
-                try {
-                  budget.addBytes(reservation, n);
-                } catch (
-                    com.deepseekharness.app.util.WebUploadSessionBudget.LimitExceededException
-                        limit) {
-                  throw new IOException(sessionLimitMessage(limit.limit()), limit);
-                } catch (
-                    com.deepseekharness.app.util.WebUploadSessionBudget.SessionClosedException
-                        cancelled) {
-                  throw new InterruptedIOException("UPLOAD_SESSION_CLOSED");
-                }
-                out.write(buffer, 0, n);
-              }
-            }
-          } finally {
-            unregister(in);
+          // 源先进入资源作用域；输出打开失败也会关闭源。AutoCloseOutputStream 明确接管 PFD。
+          try (InputStream source = openSource(context, uri, control);
+              OutputStream out =
+                  new ParcelFileDescriptor.AutoCloseOutputStream(openNoFollow(file))) {
+            total =
+                WebUploadStream.copy(
+                    source,
+                    total,
+                    WebTransferPolicy.UPLOAD_LIMIT,
+                    WebTransferPolicy.UPLOAD_FILE_LIMIT,
+                    (buffer, count) -> {
+                      writeWithSpace(
+                          context,
+                          spaceDirectory,
+                          count,
+                          () -> {
+                            checkCancelled(control);
+                            budget.addBytes(copyReservation, count);
+                            out.write(buffer, 0, count);
+                          });
+                    },
+                    () -> checkCancelled(control));
           }
         }
+        checkCancelled(control);
         budget.finishCopy(reservation);
         ready = true;
         return new Batch(this, reservation, batchDirectory, files);
       } catch (Exception error) {
+        if (error instanceof WebUploadStream.LimitExceededException) {
+          boolean fileLimit = ((WebUploadStream.LimitExceededException) error).fileLimit();
+          throw new IOException(
+              com.deepseekharness.app.util.UiText.format(
+                  fileLimit ? "单个文件超过 %s" : "本次上传超过 %s",
+                  fileSize(
+                      context,
+                      fileLimit
+                          ? WebTransferPolicy.UPLOAD_FILE_LIMIT
+                          : WebTransferPolicy.UPLOAD_LIMIT)),
+              error);
+        }
         if (error instanceof IOException) throw (IOException) error;
         if (error
             instanceof com.deepseekharness.app.util.WebUploadSessionBudget.LimitExceededException)
@@ -131,13 +151,15 @@ public final class WebUploads {
               sessionLimitMessage(
                   ((com.deepseekharness.app.util.WebUploadSessionBudget.LimitExceededException)
                           error)
-                      .limit()),
+                      .limit(),
+                  context),
               error);
         if (error
             instanceof com.deepseekharness.app.util.WebUploadSessionBudget.SessionClosedException)
           throw new InterruptedIOException("UPLOAD_SESSION_CLOSED");
         throw new IOException(com.deepseekharness.app.util.UiText.text("无法读取文件，请检查授权后重新选择"), error);
       } finally {
+        unregister(control);
         if (!ready && reservation != null) {
           boolean removed = batchDirectory == null || deleteOwnedTree(root, batchDirectory);
           if (removed) budget.rollback(reservation);
@@ -151,8 +173,61 @@ public final class WebUploads {
       return budget.isClosed();
     }
 
-    private String sessionLimitMessage(String limit) {
-      return com.deepseekharness.app.util.UiText.text("浏览器会话上传缓存已达 512 MiB 或 40 个文件，请重新打开对话后再试");
+    private String sessionLimitMessage(String limit, Context context) {
+      if ("FILES".equals(limit))
+        return com.deepseekharness.app.util.UiText.format(
+            "浏览器会话上传的文件数已达 %s 个，请重新打开对话后再试",
+            com.deepseekharness.app.util.WebUploadSessionBudget.MAX_SESSION_FILES);
+      return com.deepseekharness.app.util.UiText.format(
+          "浏览器会话上传缓存已达 %s，请重新打开对话后再试",
+          fileSize(context, com.deepseekharness.app.util.WebUploadSessionBudget.MAX_SESSION_BYTES));
+    }
+
+    private static String fileSize(Context context, long bytes) {
+      return android.text.format.Formatter.formatFileSize(context, bytes);
+    }
+
+    private static void writeWithSpace(
+        Context context, File directory, long count, WebUploadDiskBudget.Write write)
+        throws IOException {
+      try {
+        UPLOAD_VOLUME_WRITES.write(count, directory::getUsableSpace, write);
+      } catch (IllegalArgumentException insufficient) {
+        throw new IOException(
+            com.deepseekharness.app.util.UiText.format(
+                "存储空间不足，上传缓存需保留 %s 可用空间", fileSize(context, WebTransferPolicy.UPLOAD_RESERVE)));
+      }
+    }
+
+    private InputStream openSource(Context context, Uri uri, BackupControl control)
+        throws IOException {
+      try {
+        return WebUploadSourceRetry.open(
+            () -> DocumentStreams.input(context.getContentResolver(), uri, control),
+            () -> checkCancelled(control),
+            millis -> awaitSourceRetry(control, millis));
+      } catch (FileNotFoundException missing) {
+        // Provider 异常可能含 URI、文件名或路径；诊断只保存固定事件。
+        android.util.Log.w("DSHA", "WEB_UPLOAD_SOURCE_UNAVAILABLE attempts=2");
+        throw new IOException(
+            com.deepseekharness.app.util.UiText.text("所选文件暂不可读取，可能已移动、删除或尚未就绪，请重新选择"));
+      }
+    }
+
+    private void awaitSourceRetry(BackupControl control, long millis) throws IOException {
+      long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(millis);
+      while (System.nanoTime() < deadline) {
+        checkCancelled(control);
+        try {
+          Thread.sleep(
+              Math.min(
+                  25L, Math.max(1L, TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime()))));
+        } catch (InterruptedException interrupted) {
+          Thread.currentThread().interrupt();
+          throw new InterruptedIOException("UPLOAD_CANCELLED");
+        }
+      }
+      checkCancelled(control);
     }
 
     private void ensureOwnedDirectory(File directory, File parent) throws IOException {
@@ -210,28 +285,23 @@ public final class WebUploads {
       if (closed || budget.isClosed()) throw new InterruptedIOException("UPLOAD_SESSION_CLOSED");
     }
 
-    private void ensureNotInterrupted() throws InterruptedIOException {
-      if (Thread.currentThread().isInterrupted())
-        throw new InterruptedIOException("UPLOAD_CANCELLED");
+    private void checkCancelled(BackupControl control) throws InterruptedIOException {
+      control.check();
       ensureOpen();
     }
 
-    private InputStream register(InputStream input) throws IOException {
+    private void register(BackupControl control) throws IOException {
       synchronized (this) {
         if (closed || budget.isClosed()) {
-          try {
-            input.close();
-          } catch (IOException ignored) {
-          }
+          control.cancel();
           throw new InterruptedIOException("UPLOAD_SESSION_CLOSED");
         }
-        activeInputs.add(input);
+        activeCopies.add(control);
       }
-      return input;
     }
 
-    private synchronized void unregister(InputStream input) {
-      activeInputs.remove(input);
+    private synchronized void unregister(BackupControl control) {
+      activeCopies.remove(control);
     }
 
     private boolean commit(
@@ -249,11 +319,7 @@ public final class WebUploads {
 
     private void retainReservation(
         com.deepseekharness.app.util.WebUploadSessionBudget.Reservation reservation) {
-      try {
-        budget.finishCopy(reservation);
-      } catch (IllegalStateException alreadyFinished) {
-      }
-      if (!budget.commit(reservation)) budget.rollback(reservation);
+      budget.retainFailedCopy(reservation);
       android.util.Log.w("DSHA", "WEB_UPLOAD_BATCH_CLEANUP_RETAINED");
     }
 
@@ -285,19 +351,16 @@ public final class WebUploads {
 
     @Override
     public void close() {
-      List<InputStream> streams;
+      List<BackupControl> copies;
       synchronized (this) {
         if (!closed) {
           closed = true;
           budget.close();
         }
-        streams = new ArrayList<>(activeInputs);
+        copies = new ArrayList<>(activeCopies);
       }
-      for (InputStream stream : streams)
-        try {
-          stream.close();
-        } catch (IOException ignored) {
-        }
+      // DocumentStreams 的回调异步取消 Provider 和关闭流，界面线程不等待远端关闭。
+      for (BackupControl control : copies) control.cancel();
       cleanupIfClosed();
     }
   }
@@ -390,7 +453,10 @@ public final class WebUploads {
     }
   }
 
-  /** A process death can skip ViewModel cleanup; only UUID roots from this private cache are eligible. */
+  /**
+   * A process death can skip ViewModel cleanup; only UUID roots from this private cache are
+   * eligible.
+   */
   private static void cleanOrphanedSessions(File cacheRoot) {
     File sessions = new File(cacheRoot, "web-uploads");
     try {
@@ -406,7 +472,7 @@ public final class WebUploads {
           android.util.Log.w("DSHA", "WEB_UPLOAD_ORPHAN_CLEANUP_RETAINED");
       }
     } catch (IOException | SecurityException error) {
-      android.util.Log.w("DSHA", "WEB_UPLOAD_ORPHAN_SCAN_FAILED", error);
+      android.util.Log.w("DSHA", "WEB_UPLOAD_ORPHAN_SCAN_FAILED");
     }
   }
 

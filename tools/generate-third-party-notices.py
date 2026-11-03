@@ -10,8 +10,15 @@ ASSETS = ROOT / 'app/src/main/assets'
 PERMISSIVE = {'MIT', 'ISC', 'BSD-2-Clause', 'BSD-3-Clause', 'Apache-2.0',
               '(MIT OR CC0-1.0)', '(MIT OR Apache-2.0)', '0BSD', 'Unlicense'}
 NATIVE_NOTICES = {
+    'libbxroot.so': ('bxroot MIT; statically linked glibc (LGPL-2.1-or-later with component notices); GCC runtime terms as applicable', 'https://github.com/qiannianhuanxiang/bxroot; modified source; tools/bxroot-native.lock.json; ET_EXEC launcher, O2; see bxroot section'),
+    'libbxroot-runtime.so': ('bxroot MIT; glibc dependency and nonshared helper linkage; GCC runtime terms as applicable', 'same modified bxroot source and native lock; glibc ET_DYN preload runtime, O2; see bxroot section'),
+    'libbxroot-ulx.so': ('bxroot MIT; statically linked glibc (LGPL-2.1-or-later with component notices); GCC runtime terms as applicable', 'same modified bxroot source and native lock; ET_DYN static-PIE loader, O2; see bxroot section'),
+    'libbxroot-host.so': ('bxroot MIT', 'same modified bxroot source and native lock; src/host/bx-host.c, freestanding static ET_EXEC without libc; Android native-call entry'),
+    'libbxroot-enter.so': ('bxroot MIT', 'same modified bxroot source and native lock; src/host/bx-enter.c + session.c + enter-libc.c, freestanding Android PIE (PT_INTERP /system/bin/linker64, no NEEDED); native re-entry'),
     'libtermux.so': ('Apache-2.0 exception', 'tools/termux-jni, v0.118.0 source plus local handshake changes'),
     'libdsha-session.so': ('MIT', 'tools/native-session/session-launcher.c; locked API 23 build'),
+    'libdsha-proroot-compat.so': ('MIT', 'tools/proroot-compat/stack-sysconf.c; independent GNU AArch64 sysconf proxy, locked NDK build; original proroot binaries unchanged'),
+    'libdsha-proroot-linker.so': ('MIT', 'tools/proroot-compat/linker-entry.c; freestanding GNU AArch64 direct-preload adapter; original proroot binaries unchanged'),
     'libproot.so': ('GPL-2.0', 'Termux proot; original Standard binary exact revision remains unverified'),
     'libprootloader.so': ('GPL-2.0', 'Termux proot; original Standard binary exact revision remains unverified'),
     'libprootloader32.so': ('GPL-2.0', 'Termux proot; original Standard binary exact revision remains unverified'),
@@ -41,6 +48,7 @@ def render():
     lock = json.loads((ROOT / 'tools/dsh-runtime/package-lock.json').read_text(encoding='utf-8'))
     mobile = json.loads((ASSETS / 'builtin-plugins/dsh-web-mobile/package.json').read_text(encoding='utf-8'))
     tools = json.loads((ROOT / 'tools/runtime-tools.lock.json').read_text(encoding='utf-8'))
+    bxroot = json.loads((ROOT / 'tools/bxroot-native.lock.json').read_text(encoding='utf-8'))
     packages = lock['packages']
     dsh = packages['node_modules/@deepseek-ai/dsh']['version']
     office = packages['node_modules/@deepseek-ai/libreoffice-kit']['version']
@@ -93,6 +101,7 @@ def render():
 
 - Shizuku API/provider：Standard 13.1.5、Low 12.2.0（MIT），公开来源 RikkaApps/Shizuku-API；许可全文随 `assets/licenses/Shizuku-MIT.txt` 保存，原始 Git blob 及 SHA 记录在 build154 审计。
 - Termux terminal-view / terminal-emulator 0.118.0 的 Apache-2.0 例外及全文随 `assets/licenses/Termux-terminal-Apache-2.0.txt` 保存；不将其声明扩展到整个上游工程。
+- terminal-emulator Java 源码固定于 Termux v0.118.0 提交 `6e2689f55295fa444be8ac8592c527c2c5ef3253` 并内置；DSHA 对 `TerminalSession.java`、`TerminalEmulator.java`、`TerminalSessionClient.java` 的修改及自有队列说明见 `app/src/main/java/com/termux/terminal/NOTICE.dsha.md`。terminal-view 保持 0.118.0 上游依赖，JNI 使用项目内已有构建。
 - Gson 2.13.1：Apache-2.0；Bouncy Castle bcprov-jdk15to18 1.85.2：上游许可全文随 `assets/licenses` 保存。版本与 JAR 摘要见 `tools/backup-dependencies.lock.json`，构建执行 `verifyBackupDependencies`。
 - SnakeYAML 2.4（Apache-2.0）：固定官方 Maven Central JAR/POM 与 `snakeyaml-2.4` 源码标签，使用宿主 data-only SafeConstructor 投影凭据中的本机连接字段。许可原文为 `assets/licenses/snakeyaml-LICENSE.txt`，Java 8 类文件及 Android FIELD 路径见 `docs/audits/build156/snakeyaml-official-artifacts.json`；不由静态兼容声明推导旧设备验收完成。
 - Low 的 GeckoView 143.0.20251003115653 为 MPL-2.0，来自 Mozilla Maven；保留相应声明。兼容版最低 API 23，不表示所有旧设备已经验收。
@@ -102,6 +111,14 @@ def render():
 当前 Gradle 直接运行依赖坐标（不包含测试依赖；完整传递依赖许可审查仍需实际解析结果）：
 
 {android}
+
+## bxroot 与链接运行库
+
+- bxroot 源码许可为 MIT，版权为 2026 bxroot contributors；上游为 {bxroot['upstream']}，记录的基线提交为 `{bxroot['upstreamCommit']}`。本包使用带本地修改的源码，版本标记为 `{bxroot['version']}`；不能将它表述为未修改的上游提交。三库实际字节、类型与构建优化记录在 `tools/bxroot-native.lock.json`。
+- `libbxroot.so` 是静态 ET_EXEC launcher；`libbxroot-ulx.so` 是 static-PIE ET_DYN loader。两者静态链接 glibc，bxroot 的 MIT 不能覆盖整个二进制的运行库许可。`libbxroot-runtime.so` 是 glibc ET_DYN，依赖 `libc.so.6` 与 `ld-linux-aarch64.so.1`；其配方同时注明 `libc_nonshared.a` 辅助链接。缺少历史 link map，尚未完整枚举 archive 成员。
+- glibc 主体许可为 LGPL-2.1-or-later，部分代码另有版权/许可，随包保留 `assets/licenses/bxroot-glibc-COPYRIGHT.txt` 及 `LGPL-2.1.txt`。
+- GCC 运行库中适用组件采用 GPL-3.0-or-later WITH GCC-exception-3.1；例外须满足原文条件，不能外推到未核实的全部嵌入代码。保留 `assets/licenses/bxroot-GCC-COPYRIGHT.txt`、`GCC-RUNTIME-LIBRARY-EXCEPTION-3.1.txt` 和既有 `GPL-3.0.txt`。
+- bxroot MIT 原文为 `assets/licenses/bxroot-MIT.txt`。以上新增文本的实际本机来源、原文截取边界与 SHA-256 在 `tools/bxroot-license-sources.json`；原文/摘要校验不等于对应源码、静态再链接义务或完整分发合规已验。
 
 ## 实际入库 JNI 成员与来源边界
 

@@ -96,6 +96,27 @@ public class DeviceAppPolicyTest {
     }
   }
 
+  /** #210 附带诊断：清单解析失败时，错误要带上首条意外行（脱敏），区分用户/系统清单。 */
+  @Test
+  public void malformedInventoryNamesTheSideAndTheFirstUnexpectedLine() {
+    try {
+      DeviceAppPolicy.snapshot("garbage-line", SYSTEMS, "com.dsh.client");
+      fail();
+    } catch (IllegalArgumentException expected) {
+      String message = String.valueOf(expected.getMessage());
+      assertTrue("错误应标注用户清单一侧：" + message, message.contains("[用户应用]"));
+      assertTrue("错误应带首条意外行：" + message, message.contains("garbage-line"));
+    }
+    try {
+      DeviceAppPolicy.snapshot(USERS, "package:bad name uid:x", "com.dsh.client");
+      fail();
+    } catch (IllegalArgumentException expected) {
+      String message = String.valueOf(expected.getMessage());
+      assertTrue("错误应标注系统清单一侧：" + message, message.contains("[系统应用]"));
+      assertTrue("错误应带首条意外行：" + message, message.contains("package:bad name uid:x"));
+    }
+  }
+
   @Test
   public void ambiguousSharedUidNeedsPackageName() {
     DeviceAppPolicy.Snapshot apps =

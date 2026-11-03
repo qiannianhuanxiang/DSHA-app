@@ -17,6 +17,16 @@ ROOT = Path(__file__).resolve().parents[1]
 # a future runtime must add a reviewed entry here after comparing its readers.
 READ_COMPATIBILITY = {
     '0.2.0-rc.2': ['dsh-0.1.7-rc.1', 'dsh-0.1.7-rc.2'],
+    # build190: verified old storage and V4 none/zstd logs with the real new readers.
+    # This is forward reading only; it does not authorize an old runtime rollback.
+    '0.2.1-rc.2': ['dsh-0.1.7-rc.1', 'dsh-0.1.7-rc.2', 'dsh-0.2.0-rc.2'],
+    # build193: the 75 actual data/config modules and four persistence helpers
+    # match shipped build192 after the real rc3 builder/registry projection;
+    # real API cross-write/reopen checks cover the direct rc2 -> rc3 transition.
+    # This only declares forward reading. Complete-format status stays unknown,
+    # and rollback still requires the archive/config fingerprint and RuntimeTrial.
+    # See docs/runtime-data-compatibility-rc3-20261024.md. Do not infer older edges.
+    '0.2.1-rc.3': ['dsh-0.2.1-rc.2'],
 }
 
 def digest(path):

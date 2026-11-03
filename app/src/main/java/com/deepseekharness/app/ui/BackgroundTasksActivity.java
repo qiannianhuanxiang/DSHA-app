@@ -54,6 +54,11 @@ public final class BackgroundTasksActivity extends AppCompatActivity {
     status.setTextIsSelectable(true);
     page.card().addView(status);
     var links = page.card();
+    page.button(
+        links,
+        t("Agent 任务", "Agent tasks"),
+        false,
+        () -> startActivity(new Intent(this, AgentTasksActivity.class)));
     page.button(links, t("插件管理", "Plugin management"), false, () -> main("open_plugins"));
     page.button(links, t("终端", "Terminals"), false, () -> main("open_terminal"));
     page.button(
@@ -73,10 +78,7 @@ public final class BackgroundTasksActivity extends AppCompatActivity {
   }
 
   private void main(String extra) {
-    startActivity(
-        new Intent(this, MainActivity.class)
-            .addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
-            .putExtra(extra, true));
+    startActivity(MainActivity.navigationIntent(this).putExtra(extra, true));
     finish();
   }
 

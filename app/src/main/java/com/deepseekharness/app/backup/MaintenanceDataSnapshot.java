@@ -268,6 +268,22 @@ public final class MaintenanceDataSnapshot {
 
   public Map<String, Object> capture(String workdir, String appVersion, BackupControl control)
       throws IOException {
+    try {
+      return captureChecked(workdir, appVersion, control);
+    } catch (IOException error) {
+      throw parentLinkAtStage(error, "REBUILD_CAPTURE_PARENT_LINK");
+    }
+  }
+
+  private static IOException parentLinkAtStage(IOException error, String stage) {
+    String code = BackupErrorCode.from(error);
+    if (code.equals("PARENT_LINK") || code.equals("PARENT_LINK_OR_MISSING"))
+      return new IOException(stage, error);
+    return error;
+  }
+
+  private Map<String, Object> captureChecked(
+      String workdir, String appVersion, BackupControl control) throws IOException {
     select(workdir, control);
     // 本机凭据与设备授权原位保留，不受手动导出 API Key 选项影响。
     sources.add(
@@ -320,8 +336,16 @@ public final class MaintenanceDataSnapshot {
     return summary;
   }
 
-  @SuppressWarnings("unchecked")
   public void restore(File newRoot, BackupControl control) throws IOException {
+    try {
+      restoreChecked(newRoot, control);
+    } catch (IOException error) {
+      throw parentLinkAtStage(error, "REBUILD_RESTORE_PARENT_LINK");
+    }
+  }
+
+  @SuppressWarnings("unchecked")
+  private void restoreChecked(File newRoot, BackupControl control) throws IOException {
     Map<String, Object> map =
         BackupJson.read(fs.small(mapping(), BackupLimits.MANIFEST), BackupLimits.MANIFEST);
     if (BackupJson.number(map, "version") != 1 || !(map.get("roots") instanceof Map))

@@ -12,6 +12,11 @@ public final class BridgeRoutes {
     DEVICE_PLAN(true),
     DEVICE_EXECUTE(true),
     NOTIFY(false),
+    TASK_CONTEXT(false),
+    TASK_EVENT(false),
+    TASK_CLAIM(false),
+    TASK_ACK(false),
+    CONSENT_POLICY(false),
     TOAST(false),
     READ_FILE(false),
     HEALTH(false),
@@ -20,6 +25,7 @@ public final class BridgeRoutes {
     DEVICE(false),
     APPS(false),
     LAUNCH(false),
+    INTENT(true),
     CLIP(false),
     SHARE(false),
     OPEN(false),
@@ -60,12 +66,19 @@ public final class BridgeRoutes {
     add(routes, "/device/plan", Route.DEVICE_PLAN);
     add(routes, "/device/execute", Route.DEVICE_EXECUTE);
     add(routes, "/app/notify", Route.NOTIFY);
+    add(routes, "/app/tasks/context", Route.TASK_CONTEXT);
+    add(routes, "/app/tasks/event", Route.TASK_EVENT);
+    add(routes, "/app/tasks/claim", Route.TASK_CLAIM);
+    add(routes, "/app/tasks/ack", Route.TASK_ACK);
+    add(routes, "/app/native-policy", Route.CONSENT_POLICY);
+    add(routes, "/device/consent", Route.CONSENT_POLICY);
     add(routes, "/app/toast", Route.TOAST);
     add(routes, "/app/readfile", Route.READ_FILE);
     add(routes, "/health", Route.HEALTH);
     add(routes, "/app/device", Route.DEVICE);
     add(routes, "/app/apps", Route.APPS);
     add(routes, "/app/launch", Route.LAUNCH);
+    add(routes, "/app/intent", Route.INTENT);
     add(routes, "/app/clip", Route.CLIP);
     add(routes, "/app/share", Route.SHARE);
     add(routes, "/app/open", Route.OPEN);

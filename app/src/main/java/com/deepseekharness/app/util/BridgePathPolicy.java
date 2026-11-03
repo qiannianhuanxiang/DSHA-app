@@ -1,5 +1,6 @@
 package com.deepseekharness.app.util;
 
+import java.io.File;
 import java.util.Locale;
 
 /**
@@ -130,6 +131,75 @@ public final class BridgePathPolicy {
     if (path.equals(root)) return true;
     String guest = "/" + path.substring(root.length() + 1);
     return denied(guest);
+  }
+
+  /** Only explicit Android shared-storage names address the host filesystem. */
+  public static boolean readSharedDomain(String raw) {
+    String path = normalize(raw);
+    return startsWithPath(path, "/sdcard")
+        || startsWithPath(path, "/storage/emulated")
+        || startsWithPath(path, "/storage/self/primary")
+        || startsWithPath(path, "/data/media");
+  }
+
+  /** Host private-data names must not be interpreted as guest paths. */
+  public static boolean deniedReadRaw(String raw) {
+    String path = normalize(raw);
+    return denied(raw)
+        || deniedReadSecrets(path)
+        || startsWithPath(path, "/data/data")
+        || startsWithPath(path, "/data/user")
+        || startsWithPath(path, "/data/user_de");
+  }
+
+  /** Apply the known sensitive-directory rules at any user-home depth. */
+  private static boolean deniedReadSecrets(String path) {
+    String previous = "";
+    for (String segment : path.split("/")) {
+      if (segment.equals(".dsh")
+          || segment.equals(".ssh")
+          || segment.equals(".android")
+          || segment.equals(".aws")
+          || segment.equals(".kube")
+          || (previous.equals(".config") && segment.equals("gcloud"))) return true;
+      previous = segment;
+    }
+    return false;
+  }
+
+  /** All non-shared paths are guest paths, even if a same-named host path exists. */
+  public static File resolveReadFile(String raw, File rootfs) {
+    String path = normalize(raw);
+    if (readSharedDomain(path)) return new File(path);
+    if (rootfs == null || !isAbsolute(path)) return null;
+    return new File(rootfs, path.substring(1));
+  }
+
+  /** A resolved target must remain inside its original domain, including after symlink resolution. */
+  public static boolean deniedReadCanonical(
+      String canonical,
+      String rootfsCanonical,
+      String sharedCanonical,
+      String mediaCanonical,
+      boolean sharedDomain) {
+    if (canonical == null || canonical.isEmpty()) return true;
+    String path = normalize(canonical);
+    if (deniedReadSecrets(path)) return true;
+    if (sharedDomain) {
+      boolean inShared =
+          sharedCanonical != null
+              && !sharedCanonical.isEmpty()
+              && startsWithPath(path, normalize(sharedCanonical));
+      boolean inMedia =
+          mediaCanonical != null
+              && !mediaCanonical.isEmpty()
+              && startsWithPath(path, normalize(mediaCanonical));
+      return !(inShared || inMedia) || deniedReadRaw(path);
+    }
+    if (rootfsCanonical == null
+        || rootfsCanonical.isEmpty()
+        || !startsWithPath(path, normalize(rootfsCanonical))) return true;
+    return deniedGuestView(path, rootfsCanonical);
   }
 
   /** 拒绝时的用户可见原因。 */

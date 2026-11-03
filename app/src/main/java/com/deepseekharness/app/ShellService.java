@@ -31,6 +31,16 @@ extends IShellService.Stub {
         try{return DeviceShellExecutor.execute(cmd,this::executeArgv,plan.kind==com.deepseekharness.app.util.DeviceShellPolicy.Kind.STOP?identity():null);}
         catch(java.io.IOException error){return "[POLICY_BLOCKED] "+SensitiveData.redact(error.getMessage())+"\n[EXIT=126]";}
     }
+    /**
+     * 不受白名单限制：由 /system/bin/sh -c 执行，支持管道、重定向与脚本。
+     * 授权开关只在 App 侧（Binder 调用方无法伪造 DSHA 的原生偏好）；这里仍复核
+     * 分区/SELinux/挂载/刷机等硬禁止项，App 侧检查被绕开时也不放行。
+     */
+    @Override public String execUnrestricted(String command) {
+        var plan = com.deepseekharness.app.util.DeviceShellPolicy.inspectUnrestricted(command);
+        if (!plan.allowed()) return plan.reason + "\n[EXIT=126]";
+        return executeArgv(java.util.Arrays.asList("sh", "-c", command));
+    }
     @Override public String execVirtualScreen(String command) {
         try{return DeviceShellExecutor.executeVirtualScreen(command,this::executeArgv,identity());}
         catch(java.io.IOException error){return "[POLICY_BLOCKED] "+SensitiveData.redact(error.getMessage())+"\n[EXIT=126]";}

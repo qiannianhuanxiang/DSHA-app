@@ -21,6 +21,7 @@
 
 
     <string name="device_checking">正在读取授权状态…</string>
+    <string name="device_unrestricted_shell">不受限制的设备 shell</string>
 
 
 

@@ -15,7 +15,8 @@ import xml.etree.ElementTree as ET
 import zipfile
 from test_runtime_fixture import runtime as verified_runtime
 from release_acceptance import requirements as acceptance_requirements, validate as validate_acceptance, baseline_from_receipt
-from release_names import apk_filename
+from release_names import apk_delivery_path, delivery_receipt_path, source_directory, release_staging_directory
+from release_layout import checked_path, source_snapshot_path
 
 ROOT=Path(__file__).resolve().parents[1]
 CERT=json.loads((ROOT/'ci/release-identity.json').read_text(encoding='utf-8'))['certificateSha256']
@@ -46,15 +47,15 @@ def public_source_path(name):
 
 
 def validate_device_evidence(proof, apks):
-    """Bind a separately reviewed, non-destructive device run to both built APKs."""
+    """Bind a separately reviewed, non-destructive device run to the selected APKs."""
     if not isinstance(proof, dict) or not isinstance(apks, list):
         raise ValueError('DEVICE_EVIDENCE_FORMAT')
     variants={item['flavor']:item for item in apks}
-    if set(variants)!={'standard','low'}:
+    if set(variants) not in ({'standard'}, {'standard','low'}):
         raise ValueError('DEVICE_EVIDENCE_FLAVORS')
-    if proof.get('schema')!=1 or proof.get('package')!='com.dsh.client' or proof.get('certificateSha256')!=CERT \
+    if proof.get('schema')!=1 or proof.get('package')!='dsh.android.client' or proof.get('certificateSha256')!=CERT \
             or proof.get('versionCode')!=variants['standard']['versionCode'] \
-            or proof.get('versionCode')!=variants['low']['versionCode'] \
+            or any(proof.get('versionCode')!=item['versionCode'] for item in variants.values()) \
             or not isinstance(proof.get('serial'),str) or not proof['serial'].strip() \
             or proof.get('firstInstallTimePreserved') is not True or proof.get('nonDestructive') is not True:
         raise ValueError('DEVICE_EVIDENCE_IDENTITY')
@@ -77,15 +78,41 @@ def publish_apks(apks):
         source=Path(item['path'])
         if not source.is_file() or digest(source)!=item['sha256']:
             raise ValueError('DELIVERY_APK_CHANGED')
-        target=ROOT/'release'/apk_filename(item['flavor'], ROOT)
+        target=apk_delivery_path(item['flavor'], ROOT)
         target.parent.mkdir(parents=True,exist_ok=True)
         if not target.exists() or digest(target)!=item['sha256']:
-            temporary=target.with_name(target.name+'.part-'+str(uuid.uuid4()))
-            shutil.copyfile(source,temporary)
-            if digest(temporary)!=item['sha256']:raise RuntimeError('Delivery copy mismatch')
-            temporary.replace(target)
-        target.with_suffix('.apk.sha256').write_text(item['sha256']+'  '+target.name+'\n',encoding='ascii',newline='\n')
+            temporary=release_staging_directory(ROOT)/(target.name+'.part-'+str(uuid.uuid4()))
+            temporary.parent.mkdir(parents=True,exist_ok=True)
+            try:
+                shutil.copyfile(source,temporary)
+                if digest(temporary)!=item['sha256']:raise RuntimeError('Delivery copy mismatch')
+                temporary.replace(target)
+            finally:
+                if temporary.exists():temporary.unlink()
+        checksum=checked_path(target.with_suffix('.apk.sha256'),ROOT)
+        checksum.write_text(item['sha256']+'  '+target.name+'\n',encoding='ascii',newline='\n')
         item['deliveredPath']=str(target)
+
+
+def store_delivery_receipt(report):
+    """Keep durable source evidence and delivery JSON outside the APK directory."""
+    codes={item['versionCode'] for item in report['apks']}
+    if len(codes)!=1:raise ValueError('DELIVERY_VERSION_CODE')
+    code=codes.pop()
+    snapshot=report['sourceSnapshot'];source=source_snapshot_path(snapshot['path'],snapshot['sha256'],ROOT)
+    target=checked_path(source_directory(code,ROOT)/'source-sha256.json',ROOT)
+    target.parent.mkdir(parents=True,exist_ok=True)
+    if target.exists():
+        if digest(target)!=snapshot['sha256']:raise ValueError('DELIVERY_SOURCE_DESTINATION_CONFLICT')
+    else:
+        with source.open('rb') as incoming,target.open('xb') as outgoing:
+            shutil.copyfileobj(incoming,outgoing)
+        if digest(target)!=snapshot['sha256']:raise ValueError('DELIVERY_SOURCE_COPY_CHANGED')
+    report['sourceSnapshot']={**snapshot,'path':str(target),'verificationPath':str(source.resolve())}
+    destination=delivery_receipt_path(code,ROOT)
+    destination.parent.mkdir(parents=True,exist_ok=True)
+    destination.write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n',encoding='utf8')
+    return destination
 
 
 def validate_software_receipt(report,current):
@@ -101,13 +128,18 @@ def validate_software_receipt(report,current):
               'plugin-upgrade-gate','recovery-apk','recovery-browser-overlay','recovery-profile-boot','mobile-modal',
               'adb-flow','adb-vscreen-bridge','web-ui-host-fixtures','plugin-downloads',
               'third-party-notices','third-party-apk'}
+    flavors=report.get('flavors',['standard','low'])
+    if flavors not in (['standard'],['standard','low']):
+        raise ValueError('DELIVERY_FLAVORS')
+    if flavors==['standard']:
+        required -= {'low-elf','low-signature'}
     commands={row.get('name'):row for row in report.get('commands',[])}
     if not required.issubset(commands):raise ValueError('DELIVERY_CHECK_MISSING')
     for command in commands.values():
         log=Path(command.get('log',''))
         if command.get('exitCode')!=0 or not log.is_file() or digest(log)!=command.get('sha256'):
             raise ValueError('DELIVERY_CHECK_CHANGED')
-    for flavor in ('Standard','Low'):
+    for flavor in (value.title() for value in flavors):
         counts=report.get('junit',{}).get(flavor,{})
         if counts.get('tests',0)<=0 or counts.get('failures')!=0 or counts.get('errors')!=0:
             raise ValueError('DELIVERY_JUNIT_INCOMPLETE')
@@ -127,16 +159,16 @@ def deliver_from_receipt(path,evidence,baseline):
     publish_apks(report['apks'])
     report['status']='PASS_FOR_EXECUTED_SCOPE'
     report['softwareReceipt']={'path':str(path.resolve()),'sha256':digest(path)}
-    report['device']={'status':'MATCHED_EXTERNAL_EVIDENCE','package':'com.dsh.client',
+    report['device']={'status':'MATCHED_EXTERNAL_EVIDENCE','package':'dsh.android.client',
                       'evidence':str(evidence.resolve()),'sha256':digest(evidence)}
     report['deliveredAt']=datetime.datetime.now(datetime.timezone.utc).isoformat()
-    destination=path.parent/('delivery-'+str(uuid.uuid4())+'.json')
-    destination.write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n',encoding='utf8')
+    destination=store_delivery_receipt(report)
     print(json.dumps({'status':report['status'],'report':str(destination)},ensure_ascii=False))
     return 0
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--flavors', choices=('standard',), default='standard', help='Sunset-3090-Q 仅运行 Standard 验收；Low 测试已取消')
     parser.add_argument('--stage', choices=('software','package','all'), default='all', help='software不需要发布密钥；package生成未签名完整包；all核验正式签名包')
     parser.add_argument('--java-home',type=Path,default=Path(os.environ.get('JAVA_HOME','F:/DSHA/_toolchains/jdk-17')))
     parser.add_argument('--sdk',type=Path,default=Path(os.environ.get('ANDROID_HOME','F:/DSHA/_toolchains/android-sdk')))
@@ -148,6 +180,7 @@ def main():
     parser.add_argument('--baseline-receipt',type=Path,help='上一轮正式交付通过回执；核对其中源码摘要后按实际改动选择设备必验行为')
     parser.add_argument('--deliver-from',type=Path,help='在源码、检查日志和 APK 字节均未变化时复用本轮软件通过回执，补真机证据后交付')
     args=parser.parse_args()
+    flavors=('standard',)
     if args.stage!='all' and (args.deliver or args.deliver_from):
         parser.error('只有正式签名和设备证据完整的all阶段可以交付')
     if args.device:
@@ -159,7 +192,7 @@ def main():
         except (OSError,ValueError,KeyError,TypeError) as error:
             print(json.dumps({'status':'INCOMPLETE_OR_FAILED','failure':str(error)},ensure_ascii=False));return 1
     if args.deliver and args.device_evidence is None:
-        parser.error('--deliver 需要 --device-evidence，且证据必须绑定本轮两版正式 APK')
+        parser.error('--deliver 需要 --device-evidence，且证据必须绑定本轮所选正式 APK')
     if args.deliver and not args.device_evidence.is_file():
         parser.error('--device-evidence 文件不存在；请先完成正式 APK 非破坏性覆盖验收')
     if args.deliver and args.baseline_receipt is None:
@@ -168,9 +201,9 @@ def main():
     report={'schema':1,'verificationSchema':2,'startedAt':datetime.datetime.now(datetime.timezone.utc).isoformat(),'status':'RUNNING','commands':[],
         'commit':subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip(),
         'dirty':bool(subprocess.check_output(['git','status','--porcelain'],cwd=ROOT)),
-        'device':{'status':'EXTERNAL_EVIDENCE_REQUIRED','package':'com.dsh.client'},
+        'device':{'status':'EXTERNAL_EVIDENCE_REQUIRED','package':'dsh.android.client'},
         'notVerified':['Android 6/7 physical devices','minimum standard API 30 physical device','reported Android 16 tablet','physical 16 KiB kernel','power loss durability'],
-        'githubUploaded':False,'productionInstallationModified':False,'junitForksPerFlavor':args.test_forks}
+        'githubUploaded':False,'productionInstallationModified':False,'junitForksPerFlavor':args.test_forks,'flavors':list(flavors)}
     initial_source=source_snapshot()
     baseline_sources,provenance=baseline_from_receipt(args.baseline_receipt) if args.baseline_receipt else (None,None)
     acceptance=acceptance_requirements(baseline_sources,initial_source,provenance=provenance) if baseline_sources else None
@@ -203,12 +236,12 @@ def main():
                         f"t.maxParallelForks = {args.test_forks}\n"
                         f"t.reports.junitXml.outputLocation.set(new File('{escaped}/junit',t.name))\n"
                         "} } }\n",encoding='utf8')
-        tasks=[':app:testStandardDebugUnitTest',':app:testLowDebugUnitTest',':app:lintStandardRelease',':app:lintLowRelease']
-        if signed or args.stage=='package':tasks+=[':app:assembleStandardRelease',':app:assembleLowRelease']
+        tasks=[task for flavor in flavors for task in (f':app:test{flavor.title()}DebugUnitTest', f':app:lint{flavor.title()}Release')]
+        if signed or args.stage=='package':tasks += [f':app:assemble{flavor.title()}Release' for flavor in flavors]
         if args.stage=='package':wrapper+=['-Pdsha.unsignedPackage=true']
         run('gradle-verification',wrapper+['--init-script',init,*tasks])
         report['junit']={}
-        for variant in ('Standard','Low'):
+        for variant in (flavor.title() for flavor in flavors):
             counts=dict(tests=0,failures=0,errors=0,skipped=0);xmls=list((report_dir/'junit'/('test'+variant+'DebugUnitTest')).glob('*.xml'))
             if not xmls:raise RuntimeError('Missing fresh JUnit reports for '+variant)
             for xml in xmls:
@@ -261,7 +294,7 @@ def main():
             target=report_dir/'manifest.json';target.write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n',encoding='utf8')
             print(json.dumps({'status':report['status'],'report':str(target)},ensure_ascii=False));return 0
         if not signed and args.stage!='package':raise RuntimeError('Software checks completed, but historical DSHA_KEYSTORE is unavailable. No substitute key or signed APK was generated')
-        apks=[ROOT/f'app/build/outputs/apk/{v}/release/app-{v}-release{"" if signed else "-unsigned"}.apk' for v in ('standard','low')]
+        apks=[ROOT/f'app/build/outputs/apk/{v}/release/app-{v}-release{"" if signed else "-unsigned"}.apk' for v in flavors]
         # Always compare the APK against the currently locked raw runtime fixture.
         try:
             locked_runtime=verified_runtime('raw',full=True,require_current_archive=True)
@@ -271,7 +304,8 @@ def main():
         run('third-party-apk',[sys.executable,'-B','tools/verify-third-party-apk.py',*apks,
                               '--output',report_dir/'third-party-apk.json'])
         build_tools=args.sdk/'build-tools/36.0.0';report['apks']=[]
-        for flavor,apk,minimum in zip(('standard','low'),apks,(30,23)):
+        for flavor,apk in zip(flavors,apks):
+            minimum=30 if flavor=='standard' else 23
             run(flavor+'-elf',[sys.executable,'-B','tools/audit-standard-apk.py',apk,'--report',report_dir/(flavor+'-elf.json')])
             if signed:
                 signature=run(flavor+'-signature',[java,'-jar',build_tools/'lib/apksigner.jar','verify','--min-sdk-version','23','--verbose','--print-certs',apk])
@@ -280,7 +314,7 @@ def main():
                     if f'Verified using {scheme} scheme' not in signature or not re.search(r'Verified using '+scheme+r' scheme[^\n]+true',signature):raise RuntimeError('APK lacks verified '+scheme+' signing')
             badging=run(flavor+'-manifest',[build_tools/('aapt.exe' if os.name=='nt' else 'aapt'),'dump','badging',apk])
             package=re.search(r"package: name='([^']+)' versionCode='([^']+)' versionName='([^']+)'",badging)
-            if not package or package[1]!='com.dsh.client' or 'application-debuggable' in badging or f"sdkVersion:'{minimum}'" not in badging or "native-code: 'arm64-v8a'" not in badging:raise RuntimeError('Unexpected release manifest')
+            if not package or package[1]!='dsh.android.client' or 'application-debuggable' in badging or f"sdkVersion:'{minimum}'" not in badging or "native-code: 'arm64-v8a'" not in badging:raise RuntimeError('Unexpected release manifest')
             report['apks'].append({'flavor':flavor,'path':str(apk),'package':package[1],'versionCode':int(package[2]),'versionName':package[3],
                                   'minSdk':minimum,'abi':['arm64-v8a'],'size':apk.stat().st_size,'sha256':digest(apk),'certificateSha256':CERT if signed else None})
         try:
@@ -316,7 +350,7 @@ def main():
             proof=json.loads(args.device_evidence.read_text(encoding='utf8'))
             validate_device_evidence(proof,report['apks'])
             validate_acceptance(proof,acceptance)
-            report['device']={'status':'MATCHED_EXTERNAL_EVIDENCE','package':'com.dsh.client',
+            report['device']={'status':'MATCHED_EXTERNAL_EVIDENCE','package':'dsh.android.client',
                               'evidence':str(args.device_evidence.resolve()),'sha256':digest(args.device_evidence)}
             publish_apks(report['apks'])
         report['status']='PASS_UNSIGNED_PACKAGE' if args.stage=='package' else 'PASS_FOR_EXECUTED_SCOPE' if args.deliver else 'PASS_WITH_EXPLICIT_DEVICE_GAPS'
@@ -324,6 +358,8 @@ def main():
         report['status']='INCOMPLETE_OR_FAILED';report['failure']=str(error)
     report['finishedAt']=datetime.datetime.now(datetime.timezone.utc).isoformat()
     target=report_dir/'manifest.json';target.write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n',encoding='utf8')
+    if args.deliver and report['status']=='PASS_FOR_EXECUTED_SCOPE':
+        target=store_delivery_receipt(report)
     print(json.dumps({'status':report['status'],'report':str(target)},ensure_ascii=False))
     return 1 if report['status']=='INCOMPLETE_OR_FAILED' else 0
 

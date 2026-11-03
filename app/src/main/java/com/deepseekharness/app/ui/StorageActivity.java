@@ -55,7 +55,7 @@ public final class StorageActivity extends AppCompatActivity {
             t("清理可再生缓存与多余运行时副本", "Clean reproducible caches and excess runtime copies"),
             true,
             () ->
-                new DshaDialogBuilder(this)
+                new DshaDialogBuilder(this, true)
                     .setTitle(t("清理存储空间", "Clean storage"))
                     .setMessage(
                         t(
@@ -88,7 +88,7 @@ public final class StorageActivity extends AppCompatActivity {
                         page.kv(
                             rows,
                             com.deepseekharness.app.util.StorageCategoryLabels.label(
-                                entry.getKey(), "en".equals(UiText.language())),
+                                entry.getKey()),
                             com.deepseekharness.app.util.Fmt.bytes(entry.getValue().bytes)
                                 + (entry.getValue().unreadable > 0
                                     ? t(" + 部分不可读", " + unreadable entries")

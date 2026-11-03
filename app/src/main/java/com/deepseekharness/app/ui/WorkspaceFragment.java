@@ -16,7 +16,7 @@ import androidx.fragment.app.Fragment;
 
 import com.deepseekharness.app.R;
 import com.deepseekharness.app.core.HarnessController;
-import com.deepseekharness.app.util.BackupScope;
+import com.deepseekharness.app.backup.OneClickBackup;
 
 /**
  * 数据与备份子页：备份（按范围 + 验证）/ 恢复（合并 + 验证）。
@@ -27,6 +27,13 @@ public class WorkspaceFragment extends Fragment {
   private HarnessController controller;
   private com.deepseekharness.app.core.BackupTask task;
   private AlertDialog previewDialog;
+  private OneClickBackup oneClick;
+  private final androidx.activity.result.ActivityResultLauncher<android.net.Uri> backupDirectory =
+      registerForActivityResult(
+          new androidx.activity.result.contract.ActivityResultContracts.OpenDocumentTree(),
+          uri -> {
+            if (oneClick != null) oneClick.directoryResult(uri);
+          });
 
   @Nullable
   @Override
@@ -37,12 +44,60 @@ public class WorkspaceFragment extends Fragment {
     View v = inflater.inflate(R.layout.fragment_workspace, container, false);
     controller = HarnessController.get(requireContext());
     task = com.deepseekharness.app.core.BackupTask.get(requireContext());
-    v.findViewById(R.id.workspace_backup)
+    oneClick = new androidx.lifecycle.ViewModelProvider(this).get(OneClickBackup.class);
+    View backup = v.findViewById(R.id.workspace_backup);
+    ((TextView) backup.findViewById(android.R.id.title))
+        .setText(com.deepseekharness.app.util.UiText.choose("一键备份", "One-click backup"));
+    ((TextView) backup.findViewById(android.R.id.summary))
+        .setText(
+            android.os.Build.VERSION.SDK_INT < 29
+                ? com.deepseekharness.app.util.UiText.choose(
+                    "首次选择保存目录，之后复用，无需密码；备份时会安全停止 DSH 和运行任务。\n包含对话、配置、插件和当前应用内工作区；外置工作区请另备。",
+                    "Choose a folder once, then reuse it. No password; backup safely stops DSH and running tasks.\nIncludes conversations, settings, plugins and the current app workspace. Back up external workspaces separately.")
+                : com.deepseekharness.app.util.UiText.choose(
+                    "直接保存到 下载/DSHA，无需密码；备份时会安全停止 DSH 和运行任务。\n包含对话、配置、插件和当前应用内工作区；外置工作区请另备。",
+                    "Saves directly to Download/DSHA without a password; backup safely stops DSH and running tasks.\nIncludes conversations, settings, plugins and the current app workspace. Back up external workspaces separately."));
+    ((TextView) v.findViewById(R.id.workspace_location))
+        .setText(
+            com.deepseekharness.app.util.UiText.choose(
+                "恢复与更多备份选项", "Restore and more backup options"));
+    ((android.widget.Button) v.findViewById(android.R.id.button2))
+        .setText(com.deepseekharness.app.util.UiText.choose("取消备份", "Cancel backup"));
+    v.findViewById(android.R.id.button2).setOnClickListener(x -> oneClick.cancel());
+    ((TextView) v.findViewById(R.id.workspace_files_title))
+        .setText(com.deepseekharness.app.util.UiText.text("作品与文件导出"));
+    ((TextView) v.findViewById(R.id.workspace_files_hint))
+        .setText(com.deepseekharness.app.util.UiText.text("浏览工作区 · 保存到手机 · 分享"));
+    ((TextView) v.findViewById(R.id.workspace_guide_title))
+        .setText(com.deepseekharness.app.util.UiText.text("储存指南"));
+    ((TextView) v.findViewById(R.id.workspace_guide_hint))
+        .setText(com.deepseekharness.app.util.UiText.text("数据位置 · 导出备份 · 恢复与清理"));
+    ((TextView) v.findViewById(R.id.workspace_skills_title))
+        .setText(com.deepseekharness.app.util.UiText.text("技能（Skills）"));
+    ((TextView) v.findViewById(R.id.workspace_skills_hint))
+        .setText(com.deepseekharness.app.util.UiText.text("查看技能 · 导入 SKILL.md"));
+    v.findViewById(R.id.workspace_files)
         .setOnClickListener(
             x ->
                 startActivity(
-                    new android.content.Intent(requireContext(), NativeDataActivity.class)
-                        .putExtra("data_mode", "backup")));
+                    new android.content.Intent(requireContext(), WorkspaceFilesActivity.class)));
+    v.findViewById(R.id.workspace_guide)
+        .setOnClickListener(
+            x ->
+                startActivity(
+                    new android.content.Intent(requireContext(), StorageHelpActivity.class)));
+    v.findViewById(R.id.workspace_skills)
+        .setOnClickListener(
+            x -> startActivity(new android.content.Intent(requireContext(), SkillsActivity.class)));
+    v.findViewById(R.id.workspace_backup)
+        .setOnClickListener(
+            x -> {
+              if (!oneClick.start())
+                toast(
+                    com.deepseekharness.app.util.UiText.choose(
+                        "已有备份或保存位置选择正在进行。",
+                        "A backup or destination selection is already in progress."));
+            });
     v.findViewById(R.id.workspace_location)
         .setOnClickListener(
             x ->
@@ -71,7 +126,7 @@ public class WorkspaceFragment extends Fragment {
                 taskRejected();
                 return;
               }
-              new com.deepseekharness.app.ui.DshaDialogBuilder(requireContext())
+              new com.deepseekharness.app.ui.DshaDialogBuilder(requireContext(), true)
                   .setTitle(com.deepseekharness.app.util.UiText.text("重置配置？"))
                   .setMessage(
                       com.deepseekharness.app.util.UiText.choose(
@@ -87,6 +142,23 @@ public class WorkspaceFragment extends Fragment {
                   .show();
             });
     return v;
+  }
+
+  @Override
+  public void onViewCreated(@NonNull View view, @Nullable Bundle state) {
+    super.onViewCreated(view, state);
+    oneClick.status.observe(getViewLifecycleOwner(), value -> refreshBackupStatus(view));
+    oneClick.busy.observe(getViewLifecycleOwner(), value -> refreshBackupStatus(view));
+    oneClick.chooseDirectory.observe(
+        getViewLifecycleOwner(),
+        needed -> {
+          if (Boolean.TRUE.equals(needed)) pickBackupDirectory();
+        });
+  }
+
+  private void pickBackupDirectory() {
+    if (isResumed() && oneClick != null && oneClick.claimDirectoryPicker())
+      backupDirectory.launch(null);
   }
 
   private void taskRejected() {
@@ -127,7 +199,8 @@ public class WorkspaceFragment extends Fragment {
     String failure = controller.config().getLastBackupError();
     com.deepseekharness.app.util.BackupTaskState.Snapshot s = task.snapshot();
     EnvironmentUiStatus.Snapshot environment = EnvironmentUiStatus.get(requireContext());
-    boolean busy = task.busy(), pending = environment.recovery;
+    boolean nativeBusy = oneClick != null && Boolean.TRUE.equals(oneClick.busy.getValue());
+    boolean busy = task.busy() || nativeBusy, pending = environment.recovery;
     if (!failure.isEmpty())
       summary.append(com.deepseekharness.app.util.UiText.format("\n上次未完成：%s", failure));
     if (s.id != 0)
@@ -138,6 +211,10 @@ public class WorkspaceFragment extends Fragment {
           .append(com.deepseekharness.app.util.MaintenanceErrorText.render(s.detail));
     if (pending)
       summary.append(com.deepseekharness.app.util.UiText.text("\n\n有未完成的环境维护，请恢复原环境后再继续。"));
+    String nativeStatus = oneClick == null ? null : oneClick.status.getValue();
+    if (nativeStatus != null && !nativeStatus.isEmpty())
+      summary.append("\n\n").append(nativeStatus);
+    view.findViewById(android.R.id.button2).setVisibility(nativeBusy ? View.VISIBLE : View.GONE);
     ((TextView) view.findViewById(R.id.workspace_backup_status)).setText(summary.toString());
     for (int id : new int[] {R.id.workspace_backup, R.id.workspace_location, R.id.workspace_reset})
       view.findViewById(id).setEnabled(!busy && !pending);
@@ -166,6 +243,7 @@ public class WorkspaceFragment extends Fragment {
     super.onResume();
     main.removeCallbacks(refreshTask);
     main.post(refreshTask);
+    pickBackupDirectory();
   }
 
   @Override

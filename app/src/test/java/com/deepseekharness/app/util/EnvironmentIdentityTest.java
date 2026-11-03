@@ -1,7 +1,8 @@
 package com.deepseekharness.app.util;
 
-import org.junit.Test;
 import static org.junit.Assert.*;
+
+import org.junit.Test;
 
 public class EnvironmentIdentityTest {
   @Test
@@ -41,6 +42,79 @@ public class EnvironmentIdentityTest {
     assertFalse(EnvironmentIdentity.shouldAutoStart(false, false, false, patched, patched));
     assertFalse(EnvironmentIdentity.shouldAutoStart(true, false, false, patched, previous));
     assertEquals("", EnvironmentIdentity.attemptKey("", 200));
+  }
+
+  @Test
+  public void newApkCannotAutomaticallyReplayInterruptedOrCancelledTask() {
+    String oldAttempt = EnvironmentIdentity.attemptKey("runtime:abc", 100);
+    String newAttempt = EnvironmentIdentity.attemptKey("runtime:abc", 200);
+    for (var status :
+        new BackupTaskState.Status[] {
+          BackupTaskState.Status.INTERRUPTED, BackupTaskState.Status.CANCELLED
+        })
+      assertFalse(
+          EnvironmentIdentity.shouldAutoStart(
+              false, false, false, newAttempt, oldAttempt, status, true, false));
+    assertTrue(
+        EnvironmentIdentity.shouldAutoStart(
+            false,
+            false,
+            false,
+            newAttempt,
+            oldAttempt,
+            BackupTaskState.Status.FAILED,
+            true,
+            false));
+    assertFalse(
+        EnvironmentIdentity.shouldAutoStart(
+            false,
+            false,
+            false,
+            newAttempt,
+            oldAttempt,
+            BackupTaskState.Status.FAILED,
+            false,
+            false));
+    assertFalse(
+        EnvironmentIdentity.shouldAutoStart(
+            false,
+            false,
+            false,
+            newAttempt,
+            oldAttempt,
+            BackupTaskState.Status.FAILED,
+            true,
+            true));
+    assertFalse(
+        EnvironmentIdentity.shouldAutoStart(
+            false,
+            false,
+            true,
+            newAttempt,
+            oldAttempt,
+            BackupTaskState.Status.FAILED,
+            true,
+            false));
+    assertFalse(
+        EnvironmentIdentity.shouldAutoStart(
+            false,
+            false,
+            false,
+            newAttempt,
+            newAttempt,
+            BackupTaskState.Status.FAILED,
+            true,
+            false));
+    assertFalse(
+        EnvironmentIdentity.shouldAutoStart(
+            true,
+            false,
+            false,
+            newAttempt,
+            oldAttempt,
+            BackupTaskState.Status.FAILED,
+            true,
+            false));
   }
 
   @Test

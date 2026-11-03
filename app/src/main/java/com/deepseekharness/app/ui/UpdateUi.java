@@ -12,6 +12,17 @@ import com.deepseekharness.app.core.UpdateRepository;
 final class UpdateUi {
   private UpdateUi() {}
 
+  /** Last display boundary for old persisted failures; technical details stay in diagnostics. */
+  static String status(String message) {
+    String rendered = com.deepseekharness.app.util.UiStateText.render(message);
+    if (rendered.matches(
+        "(?s).*(?:java[x]?\\.[\\w.$]*(?:Exception|Error)|\\n\\s*at \\S+\\([^\\n]*\\)).*"))
+      return com.deepseekharness.app.util.UiText.choose(
+          "更新操作未完成，请重试或在浏览器查看版本。",
+          "The update could not be completed. Retry or view releases in the browser.");
+    return rendered;
+  }
+
   static void render(View root, UpdateRepository.State state, boolean installing) {
     render(root, state, installing, installing);
   }
@@ -27,8 +38,7 @@ final class UpdateUi {
     boolean indeterminate =
         verifyingInstall || state.stage != UpdateRepository.Stage.DOWNLOADING || state.total <= 0;
     RadioGroup channels = root.findViewById(R.id.update_channels);
-    ((TextView) root.findViewById(R.id.update_status))
-        .setText(com.deepseekharness.app.util.UiStateText.render(state.message));
+    ((TextView) root.findViewById(R.id.update_status)).setText(status(state.message));
     ((TextView) root.findViewById(R.id.update_notes))
         .setText(
             state.release == null

@@ -5,6 +5,31 @@ import static org.junit.Assert.*;
 
 public class ResolverConfigTest {
   @Test
+  public void pristineBundledDnsMigratesOnlyWhenDeviceDnsIsAvailable() {
+    String legacy = "nameserver 8.8.8.8\nnameserver 223.5.5.5\n";
+    assertEquals(legacy, ResolverConfig.reconcile(legacy, "auto", java.util.List.of()));
+    assertEquals(legacy, ResolverConfig.reconcile(legacy, "auto", java.util.List.of("bad")));
+    String migrated = ResolverConfig.reconcile(legacy, "auto", java.util.List.of("192.0.2.53"));
+    assertFalse(migrated.contains("8.8.8.8"));
+    assertTrue(migrated.contains("nameserver 192.0.2.53\n"));
+    assertEquals(migrated, ResolverConfig.reconcile(migrated, "auto", java.util.List.of()));
+    assertEquals(
+        migrated, ResolverConfig.reconcile(migrated, "auto", java.util.List.of("192.0.2.53")));
+    assertEquals(migrated, ResolverConfig.reconcile(legacy, "native", java.util.List.of("192.0.2.53")));
+    String changed = legacy + "# retain my DNS\n";
+    assertEquals(
+        changed, ResolverConfig.reconcile(changed, "auto", java.util.List.of("192.0.2.53")));
+    String crlf = legacy.replace("\n", "\r\n");
+    assertEquals(crlf, ResolverConfig.reconcile(crlf, "auto", java.util.List.of("192.0.2.53")));
+    String reordered = "nameserver 223.5.5.5\nnameserver 8.8.8.8\n";
+    assertEquals(
+        reordered, ResolverConfig.reconcile(reordered, "auto", java.util.List.of("192.0.2.53")));
+    String ipv4 = ResolverConfig.reconcile(legacy, "ipv4", java.util.List.of("192.0.2.53"));
+    assertTrue(ipv4.contains("nameserver 192.0.2.53\n"));
+    assertTrue(ipv4.contains("options no-aaaa\n"));
+  }
+
+  @Test
   public void upgradePreservesCustomDnsAndSearchAndIsIdempotent() {
     String old = "nameserver 192.0.2.53\nsearch private.example\noptions timeout:2 attempts:2\n";
     String patched = ResolverConfig.reconcile(old, "ipv4");

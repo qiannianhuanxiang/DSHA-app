@@ -11,16 +11,18 @@ public final class StartupTrace {
   private final ArrayDeque<Line> lines = new ArrayDeque<>();
   private final LinkedHashMap<String, String> issues = new LinkedHashMap<>();
   private long generation, began, stageBegan, revision;
+  private long backendReadyAt = -1, browserReadyAt = -1, endedAt = -1;
   private String stage = com.deepseekharness.app.util.UiText.text("尚未启动");
   private int length;
 
   private static final class Line {
-    final long at;
+    final long at, runtimeAt;
     final String text, previous;
     final int kind;
 
-    Line(long at, String text, String previous, int kind) {
+    Line(long at, long runtimeAt, String text, String previous, int kind) {
       this.at = at;
+      this.runtimeAt = runtimeAt;
       this.text = text;
       this.previous = previous;
       this.kind = kind;
@@ -35,7 +37,21 @@ public final class StartupTrace {
                 + value
                 + StartupText.choose(language, "」，耗时 ", "” in ")
                 + previous;
-      return "[" + format(at) + "] " + value;
+      if (kind == 4)
+        value =
+            StartupText.choose(language, "切换离开「", "Left stage “")
+                + value
+                + StartupText.choose(language, "」，停留 ", "” after ")
+                + previous;
+      return runtimeAt < 0
+          ? "[" + format(at) + "] " + value
+          : "["
+              + StartupText.choose(language, "运行 +", "Runtime +")
+              + format(runtimeAt)
+              + StartupText.choose(language, " / 自启动记录 ", " / since startup record ")
+              + format(at)
+              + "] "
+              + value;
     }
   }
 
@@ -46,9 +62,13 @@ public final class StartupTrace {
   private String renderedLog = "";
 
   public static final class Snapshot {
-    public final long generation, revision, elapsedMs, stageElapsedMs;
+    public final long generation, revision, elapsedMs, stageElapsedMs, runElapsedMs;
+
+    /** -1 means the corresponding milestone has not been observed in this generation. */
+    public final long backendReadyMs, browserReadyMs;
+
     public final String stage, log;
-    public final boolean safe, browserReady;
+    public final boolean safe, browserReady, backendReady;
     public final Map<String, String> issues;
 
     Snapshot(
@@ -56,6 +76,9 @@ public final class StartupTrace {
         long revision,
         long elapsed,
         long stageElapsed,
+        long runElapsed,
+        long backendElapsed,
+        long browserElapsed,
         String stage,
         String log,
         boolean safe,
@@ -65,6 +88,10 @@ public final class StartupTrace {
       this.revision = revision;
       elapsedMs = elapsed;
       stageElapsedMs = stageElapsed;
+      runElapsedMs = runElapsed;
+      backendReadyMs = backendElapsed;
+      browserReadyMs = browserElapsed;
+      backendReady = backendElapsed >= 0;
       this.stage = stage;
       this.log = log;
       this.safe = safe;
@@ -79,6 +106,7 @@ public final class StartupTrace {
     stage = com.deepseekharness.app.util.UiText.text("排队启动");
     safe = safeMode;
     browserReady = false;
+    backendReadyAt = browserReadyAt = endedAt = -1;
     lines.clear();
     issues.clear();
     length = 0;
@@ -96,7 +124,15 @@ public final class StartupTrace {
 
   public synchronized void stage(long expected, long now, String next) {
     if (expected != generation || next == null || next.equals(stage)) return;
-    append(now, stage, format(now - stageBegan), 3);
+    if (browserReady) {
+      add(expected, now, "RUNTIME_STAGE: " + next);
+      return;
+    }
+    // Observer phases can replace this display stage before the official auth line arrives.
+    // A display-stage transition is not evidence that authentication completed.
+    boolean awaitingAuthentication =
+        "等待鉴权链接".equals(StartupText.render(stage, "zh")) && backendReadyAt < 0;
+    append(now, stage, format(now - stageBegan), awaitingAuthentication ? 4 : 3);
     stage = clean(next);
     stageBegan = now;
     append(now, stage, "", 2);
@@ -121,7 +157,13 @@ public final class StartupTrace {
   }
 
   private void append(long now, String text, String previous, int kind) {
-    Line line = new Line(now - began, text, previous, kind);
+    Line line =
+        new Line(
+            now - began,
+            browserReady ? Math.max(0, now - browserReadyAt) : -1,
+            text,
+            previous,
+            kind);
     if (!lines.isEmpty() && lines.peekLast().render("zh").equals(line.render("zh"))) return;
     lines.addLast(line);
     length += line.text.length() + line.previous.length() + 80;
@@ -138,6 +180,13 @@ public final class StartupTrace {
     int conflict = WebPortPolicy.conflictPort(reason);
     if (conflict > 0) name = "";
     if (name.length() > 180 || reason.isEmpty()) return;
+    if (browserReady) {
+      add(
+          expected,
+          now,
+          "RUNTIME_ERROR" + (name.isEmpty() ? "" : "[" + name + "]") + ": " + reason);
+      return;
+    }
     if (reason.length() > 1200) reason = reason.substring(0, 1200) + "…";
     if (reason.equals(issues.get(name))) return;
     issues.put(name, reason);
@@ -145,14 +194,30 @@ public final class StartupTrace {
     owned(
         expected,
         now,
-        conflict > 0 ? "Web 端口被占用：" + conflict : name.isEmpty() ? "插件加载异常" : "插件加载异常：" + name);
+        conflict > 0 ? "Web 端口被占用：" + conflict : name.isEmpty() ? "DSH 启动异常" : "插件加载异常：" + name);
     add(expected, now, reason);
+  }
+
+  public synchronized void backendReady(long expected, long now) {
+    if (expected != generation || backendReadyAt >= 0) return;
+    backendReadyAt = now;
+    add(expected, now, "BACKEND_AUTH_READY: " + format(now - began));
+    revision++;
   }
 
   public synchronized void browserReady(long expected, long now) {
     if (expected != generation || browserReady) return;
-    browserReady = true;
     stage(expected, now, com.deepseekharness.app.util.UiText.text("网页已就绪"));
+    add(expected, now, "BROWSER_READY: " + format(now - began));
+    browserReadyAt = now;
+    browserReady = true;
+    revision++;
+  }
+
+  /** Stop startup duration without losing subsequent process output or its elapsed timestamps. */
+  public synchronized void completed(long expected, long now) {
+    if (expected != generation || endedAt >= 0) return;
+    endedAt = now;
     revision++;
   }
 
@@ -170,8 +235,11 @@ public final class StartupTrace {
     return new Snapshot(
         generation,
         revision,
-        Math.max(0, now - began),
-        Math.max(0, now - stageBegan),
+        Math.max(0, (browserReady ? browserReadyAt : endedAt >= 0 ? endedAt : now) - began),
+        Math.max(0, (browserReady ? browserReadyAt : endedAt >= 0 ? endedAt : now) - stageBegan),
+        Math.max(0, (endedAt >= 0 ? endedAt : now) - began),
+        backendReadyAt < 0 ? -1 : Math.max(0, backendReadyAt - began),
+        browserReadyAt < 0 ? -1 : Math.max(0, browserReadyAt - began),
         StartupText.render(stage, language),
         renderedLog,
         safe,

@@ -1,4 +1,4 @@
-"""Verify required actual license bytes in both APKs and inventory shipped npm packages."""
+"""Verify actual license bytes in each selected APK and inventory shipped npm packages."""
 import argparse,hashlib,importlib.util,json,tarfile,zipfile
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
@@ -10,7 +10,7 @@ def stream_digest(stream):
  for block in iter(lambda:stream.read(1048576),b''):value.update(block)
  return value.hexdigest()
 def main():
- parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('apks',type=Path,nargs=2);parser.add_argument('--output',type=Path,required=True);args=parser.parse_args()
+ parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('apks',type=Path,nargs='+');parser.add_argument('--output',type=Path,required=True);args=parser.parse_args()
  required=gate.REQUIRED_LICENSES
  gate.verify_licenses();gate.verify_native_members()
  notices=(ROOT/'THIRD_PARTY_NOTICES.md').read_text(encoding='utf-8')

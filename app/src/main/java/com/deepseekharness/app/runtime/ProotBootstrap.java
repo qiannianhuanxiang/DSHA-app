@@ -196,6 +196,31 @@ public class ProotBootstrap {
     return pluginScripts.builtin("");
   }
 
+  /** Synchronous startup scope; every helper still has its own bounded guest and exit proof. */
+  public StartupPlugins prepareStartupPlugins() throws IOException, InterruptedException {
+    return new StartupPlugins(pluginScripts.startup());
+  }
+
+  public static final class StartupPlugins implements AutoCloseable {
+    private final GuestPluginScripts.Startup scripts;
+
+    private StartupPlugins(GuestPluginScripts.Startup scripts) {
+      this.scripts = scripts;
+    }
+
+    public BoundedProcessRunner.Result register() throws IOException, InterruptedException {
+      return scripts.register();
+    }
+
+    public BoundedProcessRunner.Result legacy() throws IOException, InterruptedException {
+      return scripts.legacy();
+    }
+
+    public void close() {
+      scripts.close();
+    }
+  }
+
   public String prepareRc1Migration(String startupId) {
     return pluginScripts.migrationText("prepare", startupId);
   }
@@ -310,6 +335,12 @@ public class ProotBootstrap {
   public BoundedProcessRunner.Result execAndReadWithProotResult(String command, long timeoutMs)
       throws IOException, InterruptedException {
     return execution.collect(command, timeoutMs, true);
+  }
+
+  /** 旧 CAS 迁移仍使用固定 proot，诊断只记录本次宿主阶段。 */
+  public BoundedProcessRunner.Result materializeCasLinksResult(
+      java.util.function.Consumer<String> timing) throws IOException, InterruptedException {
+    return execution.collectCasLinks(timing);
   }
 
   public void prepareDataMaintenance() throws IOException {

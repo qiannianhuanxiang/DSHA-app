@@ -6,6 +6,9 @@
     <application android:requestLegacyExternalStorage="true">
         <activity android:name=".ui.GeckoPreviewActivity" android:exported="false"
             android:launchMode="singleTask"
+            android:documentLaunchMode="never"
+            android:excludeFromRecents="true"
+            android:taskAffinity="${applicationId}.browser.gecko"
             android:supportsPictureInPicture="true" android:configChanges="screenSize|smallestScreenSize|screenLayout|orientation"
             android:windowSoftInputMode="adjustResize" android:theme="@style/Theme.DeepseekHarness" />
     </application>
