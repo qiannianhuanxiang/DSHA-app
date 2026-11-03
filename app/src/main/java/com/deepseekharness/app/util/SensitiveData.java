@@ -16,9 +16,9 @@ public final class SensitiveData {
     java.util.regex.Pattern.compile(
         "(?im)((?:authorization|proxy-authorization|cookie|set-cookie|x-token)\\s*:\\s*)[^\\r\\n]+"),
     java.util.regex.Pattern.compile(
-        "(?i)([?&](?:token|api[_-]?key|access[_-]?token|refresh[_-]?token|auth|secret|password)=)[^\\s&#'\"<>]+"),
+        "(?i)([?&](?:token|api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|auth|secret|password|code|state|authorization_code|code_verifier|code_challenge|authorize_id)=)[^\\s&#'\"<>]+"),
     java.util.regex.Pattern.compile(
-        "(?i)(\\b(?:[A-Z0-9_]*API_KEY|api[_-]?key|authorization|cookie|access[_-]?token|refresh[_-]?token|token|password|passwd|secret)\\b[\"']?\\s*[:=：]\\s*)(?:\"[^\"]*\"|'[^']*'|[^\\s,;<>]+)"),
+        "(?i)(\\b(?:[A-Z0-9_]*API_KEY|api[_-]?key|authorization|cookie|access[_-]?token|refresh[_-]?token|id[_-]?token|token|password|passwd|secret|code_verifier|code_challenge|authorization_code|authorize_id)\\b[\"']?\\s*[:=：]\\s*)(?:\"[^\"]*\"|'[^']*'|[^\\s,;<>&#]+)"),
     java.util.regex.Pattern.compile("(?i)(https?://)[^\\s/@:]+:[^\\s/@]+@"),
     java.util.regex.Pattern.compile("(?i)\\bBearer\\s+[A-Za-z0-9._~+/-]+=*"),
     java.util.regex.Pattern.compile(

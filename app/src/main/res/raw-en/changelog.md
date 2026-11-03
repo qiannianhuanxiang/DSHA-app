@@ -1,9 +1,6 @@
-# DSHA 0.2.8 / build157
+# DSHA 0.2.1-rc.3-bxroot.14-dsh0.2.1-rc.3 / build216
 
-Retains build156 features and fixes, DSH 0.2.0-rc.2, base environment 10, the original application ID and historical E7E3 signing certificate.
-
-- Qualifies and pins the current rc2 patch set for recovery so identical signed DSH archive bytes are stored once in the APK, removing approximately 122.7 MB of duplicate content.
-- Recovery retains its independent lock, extraction directory, HOME and controlled repair tools; it does not depend on the installed main environment or user plugins.
-- Main environment contents, base version and runtime identity remain unchanged. Future main runtime updates do not automatically update the recovery pin.
-
-See the build157 verification report for actual APK sizes, software checks and device acceptance. No GitHub publication or website deployment was performed.
+- Fixed `begin` failing permanently for screen control: the stop-notification check compared a hard-coded notification id, but the notification is posted under a different id, so every call was treated as "stop notification missing" and paused screen control. Nothing cleared that pause once the assistant service exited, and restarting the app only helped briefly. The check now matches the stop action, and that exact pause reason is released when the service that required it is gone; user pauses and other reasons are untouched.
+- Keeps the build215 fix: resuming screen control collapses the assistant session first, so the expanded flag cannot pause the just-resumed control again.
+- Otherwise identical to build214: bxroot runtime, Termux path compatibility, startup and extraction speedups, native call commands.
+- Not verified on a device this round: after installing, call `/app/ui/task-begin` and confirm `SCREEN_CONTROL_PAUSED` no longer appears.

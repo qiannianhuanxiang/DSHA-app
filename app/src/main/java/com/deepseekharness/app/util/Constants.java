@@ -39,7 +39,7 @@ public final class Constants {
    * 当前 APK 内置 dsh 版本（不是远端 latest 标签）。
    * 对应上游 deepseek-ai/deepseek-harness 仓库。
    */
-  public static final String DSH_VERSION = "0.2.0-rc.2";
+  public static final String DSH_VERSION = "0.2.1-rc.3";
 
   public static final String DSH_RUNTIME_ID = "dsh-v" + DSH_VERSION;
 
@@ -49,6 +49,7 @@ public final class Constants {
   // ================= SharedPreferences 键（历史键名保持兼容，见 AGENTS.md） =================
   public static final String KEY_API_KEY = "api_key";
   public static final String KEY_PORT = "port";
+  public static final String KEY_WEB_PORT_MODE = "web_port_mode";
   public static final String KEY_MODEL = "model";
   public static final String KEY_WORKDIR = "workdir";
   public static final String KEY_PERMISSION_MODE = "permission_mode";
@@ -69,8 +70,18 @@ public final class Constants {
   /** 电脑模式（预览用桌面浏览器 UA）。 */
   public static final String KEY_DESKTOP_MODE = "desktop_mode";
 
+  /** 任务状态上岛（Android 16 实时活动 / promoted ongoing），默认开启。 */
+  public static final String KEY_TASK_ISLAND = "task_island";
+
+  /** 岛上用系统计时器显示耗时，省掉 1Hz 重绘；默认关闭。 */
+  public static final String KEY_TASK_ISLAND_CHRONOMETER = "task_island_chronometer";
+
   /** 仅内置 DSH 网页支持画中画，默认关闭。 */
   public static final String KEY_PICTURE_IN_PICTURE = "picture_in_picture";
+
+  /** 本机设置页的明确选择；旧默认值和归档导入不能代替用户开启。 */
+  public static final String KEY_PICTURE_IN_PICTURE_USER_CHOICE =
+      "picture_in_picture_user_choice_v1";
 
   public static final String KEY_PICTURE_IN_PICTURE_LAYOUT = "picture_in_picture_layout";
 

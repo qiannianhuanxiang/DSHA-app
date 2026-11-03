@@ -14,6 +14,16 @@ from unittest.mock import patch
 from runtime_fixture_proof import SCHEMA, content, validate, reuse, io_path, logical_path
 
 ROOT = Path(__file__).resolve().parents[1]
+from runtime_stable_patches import load_chains, apply as apply_stable_patches
+
+class FixtureBuilder:
+    PATCHES = {}
+    COMBO_MODULE = DEEPSEEK_MESSAGES_MODULE = CONVERSATION_MATERIALIZED_MODULE = RC1_SETTINGS_MODULE = STORAGE_JSON_MODULE = WORKSPACE_DIRECTORY_MODULE = SESSION_PERSISTENCE_JSONL_MODULE = 'third-party/index.js'
+    load_chains = staticmethod(load_chains)
+    apply_stable_patches = staticmethod(apply_stable_patches)
+    def recipe_inputs(self): return {}
+    def patched_content(self, path, body): return body
+    def destructive_policy_files(self): return {}
 
 
 class RuntimeProofTest(unittest.TestCase):
@@ -107,8 +117,8 @@ class RuntimeProofTest(unittest.TestCase):
         self.put(assets,'runtime-patches.json',json.dumps({'schema':1,'dshVersion':'0.2.0-rc.2','active':[],'specialized':[],'retired':[]}))
         for folder in ['runtime-fs','session-compat','client-combo-cache']:self.put(assets,folder+'/index.cjs','signed-helper-fixture')
         module.ROOT=repository;module.ASSETS=assets;module.STORE=store
-        builder=type('Builder',(),{'recipe_inputs':lambda self:{},'patched_content':lambda self,path,body:body})()
-        args=type('Args',(),dict(platform='host',offline=True,cache=None,allow_stale_archive=False))()
+        builder=FixtureBuilder()
+        args=type('Args',(),dict(platform='host',offline=True,cache=None,allow_stale_archive=False,archive=None))()
         calls=[]
         def install(command,check):
             calls.append(command);self.assertIn('--ignore-scripts',command);self.assertIn('--offline',command)
@@ -126,6 +136,24 @@ class RuntimeProofTest(unittest.TestCase):
         with contextlib.ExitStack() as stack:
             for p in patches:stack.enter_context(p)
             with contextlib.redirect_stdout(io.StringIO()):callback(module,args,calls,store)
+
+    def test_explicit_candidate_archive_proof_is_used_without_replacing_release_asset(self):
+        def run(module,args,calls,store):
+            candidate=self.put(self.root,'candidate/dsh-runtime.bin','explicit candidate bytes')
+            proof_path=candidate.with_suffix('.inputs.json')
+            proof_path.write_text(json.dumps({'archive_sha256':hashlib.sha256(candidate.read_bytes()).hexdigest(),'inputs':{}}))
+            original=(module.ASSETS/'dsh-runtime.bin').read_bytes()
+            args.archive=candidate
+            module.prepare(args)
+            raw=Path(json.loads((store/'current.json').read_text())['raw'])
+            proof=json.loads((raw/'dsha-test-runtime.json').read_text())
+            self.assertEqual(hashlib.sha256(candidate.read_bytes()).hexdigest(),proof['archiveSha256'])
+            self.assertTrue(proof['archiveCurrent'])
+            self.assertEqual(original,(module.ASSETS/'dsh-runtime.bin').read_bytes())
+            proof_path.write_text(json.dumps({'archive_sha256':'0'*64,'inputs':{}}))
+            with self.assertRaisesRegex(ValueError,'ARCHIVE_INPUTS_STALE'):module.prepare(args)
+            self.assertEqual(1,len(calls))
+        self.with_producer(run)
 
     def test_normal_same_input_reuse_does_not_reinstall_or_rebless_changed_bytes(self):
         def run(module,args,calls,store):
@@ -165,7 +193,7 @@ class RuntimeProofTest(unittest.TestCase):
             self.put(module.ASSETS,'prepend-helper.js','helper();')
             self.put(module.ASSETS,'deepseek-messages-compat-patch.json',json.dumps({'dshVersion':'0.2.0-rc.2','module':'third-party/index.js','patches':[{'before':'fresh locked install bytes','after':'fresh locked install bytes','prependAsset':'prepend-helper.js'}]}))
             self.put(module.ASSETS,'runtime-patches.json',json.dumps({'schema':1,'dshVersion':'0.2.0-rc.2','active':[{'asset':'deepseek-messages-compat-patch.json'}],'specialized':[],'retired':[]}))
-            class Builder:
+            class Builder(FixtureBuilder):
                 def recipe_inputs(self):return {}
                 def patched_content(self,path,body):return b'helper();\n'+body if path.as_posix()=='third-party/index.js' else body
             with patch.object(module,'load_builder',return_value=Builder()):module.prepare(args)

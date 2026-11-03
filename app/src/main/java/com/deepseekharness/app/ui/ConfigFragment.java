@@ -42,6 +42,10 @@ public class ConfigFragment extends Fragment {
       "android.settings.PICTURE_IN_PICTURE_SETTINGS";
   private View pictureSettings;
   private TextView pictureStatus;
+  private CompoundButton pictureEnabled;
+  private boolean renderingPictureInPicture;
+  private static final java.util.concurrent.atomic.AtomicBoolean savingLanPassword =
+      new java.util.concurrent.atomic.AtomicBoolean();
 
   @Nullable
   @Override
@@ -51,21 +55,6 @@ public class ConfigFragment extends Fragment {
       @Nullable Bundle savedInstanceState) {
     View v = inflater.inflate(R.layout.fragment_config, container, false);
     ConfigStore c = new ConfigStore(requireContext());
-    String[] permissionModes = {"danger-full-access", "workspace-write", "read-only"};
-    java.util.concurrent.atomic.AtomicReference<String> permissionMode =
-        new java.util.concurrent.atomic.AtomicReference<>(c.getPermissionMode());
-    int selectedPermission = java.util.Arrays.asList(permissionModes).indexOf(permissionMode.get());
-    bindChoice(
-        v,
-        R.id.config_permission_choice,
-        getString(R.string.permission_mode_title),
-        new String[] {
-          getString(R.string.permission_mode_full),
-          getString(R.string.permission_mode_workspace),
-          getString(R.string.permission_mode_readonly)
-        },
-        selectedPermission,
-        index -> permissionMode.set(permissionModes[index]));
     Context ctx = requireContext();
     android.widget.RadioGroup dns = v.findViewById(R.id.config_dns_mode);
     dns.check(
@@ -76,13 +65,20 @@ public class ConfigFragment extends Fragment {
     v.findViewById(R.id.config_workspace_entry)
         .setOnClickListener(x -> open(new WorkspaceFragment()));
 
-    v.findViewById(R.id.config_models)
-        .setOnClickListener(
-            x -> startActivity(new Intent(requireContext(), ModelSetupActivity.class)));
-    EditText apiKey = v.findViewById(R.id.config_api_key);
     EditText port = v.findViewById(R.id.config_port);
+    CompoundButton automaticPort = v.findViewById(R.id.config_automatic_port);
+    v.findViewById(R.id.config_restore_port_drafts)
+        .setOnClickListener(x -> BrowserOriginRestore.show(requireContext()));
     CompoundButton checkUpdate = v.findViewById(R.id.config_check_update);
     CompoundButton desktop = v.findViewById(R.id.config_desktop_mode);
+    pictureEnabled = v.findViewById(R.id.config_picture_in_picture);
+    pictureEnabled.setChecked(c.isPictureInPictureEnabled());
+    pictureEnabled.setOnCheckedChangeListener(
+        (button, enabled) -> {
+          if (renderingPictureInPicture) return;
+          c.setPictureInPictureEnabled(enabled);
+          renderPictureInPictureStatus();
+        });
     pictureSettings = v.findViewById(R.id.config_picture_in_picture_settings);
     pictureStatus = v.findViewById(R.id.config_picture_in_picture_status);
     pictureSettings.setOnClickListener(x -> openPictureInPictureSettings());
@@ -104,98 +100,10 @@ public class ConfigFragment extends Fragment {
                 advBody.setVisibility(
                     advBody.getVisibility() == View.VISIBLE ? View.GONE : View.VISIBLE));
 
-    // 回填当前值
-    java.util.concurrent.atomic.AtomicReference<com.deepseekharness.app.util.CredentialRead>
-        credential = new java.util.concurrent.atomic.AtomicReference<>(c.readApiKey());
-    apiKey.setSaveEnabled(false);
-    apiKey.setText("");
-    TextView credentialState = v.findViewById(R.id.config_credential_state);
-    Button retryCredential = v.findViewById(R.id.config_credential_retry),
-        removeCredential = v.findViewById(R.id.config_credential_remove);
-    retryCredential.setText(com.deepseekharness.app.util.UiText.text("重试读取 API Key"));
-    removeCredential.setText(
-        com.deepseekharness.app.util.UiText.choose("移除本机 API Key 记录", "Remove the saved API key"));
-    Runnable renderCredential =
-        () -> {
-          boolean failed = !credential.get().usable();
-          credentialState.setVisibility(View.VISIBLE);
-          credentialState.setText(
-              failed
-                  ? ConfigStore.credentialMessage(credential.get())
-                  : credential.get().state
-                          == com.deepseekharness.app.util.CredentialRead.State.AVAILABLE
-                      ? com.deepseekharness.app.util.UiText.choose(
-                          "API Key 已保存；输入新密钥可替换，留空保持原记录。",
-                          "An API key is saved. Enter a new key to replace it; leave blank to keep it.")
-                      : com.deepseekharness.app.util.UiText.choose(
-                          "尚未保存 API Key；可在上方输入新密钥。",
-                          "No API key is saved. Enter a new key above."));
-          retryCredential.setVisibility(failed ? View.VISIBLE : View.GONE);
-          removeCredential.setVisibility(
-              credential.get().state
-                      == com.deepseekharness.app.util.CredentialRead.State.NOT_CONFIGURED
-                  ? View.GONE
-                  : View.VISIBLE);
-        };
-    renderCredential.run();
-    retryCredential.setOnClickListener(
-        x -> {
-          credential.set(c.readApiKey());
-          renderCredential.run();
-        });
-    removeCredential.setOnClickListener(
-        x ->
-            new DshaDialogBuilder(ctx)
-                .setTitle(
-                    com.deepseekharness.app.util.UiText.choose(
-                        "移除本机 API Key 记录？", "Remove the saved API key?"))
-                .setMessage(
-                    com.deepseekharness.app.util.UiText.text(
-                        "仅移除本机保存的 API Key 记录，不删除对话或配置文件。继续使用相关接口时需要重新提供凭据。"))
-                .setNegativeButton(com.deepseekharness.app.util.UiText.text("取消"), null)
-                .setPositiveButton(
-                    com.deepseekharness.app.util.UiText.text("移除"),
-                    (dialog, which) -> {
-                      var lease =
-                          com.deepseekharness.app.util.EnvironmentTaskGate.tryAcquire(
-                              com.deepseekharness.app.util.UiText.text("保存配置"));
-                      if (lease == null) {
-                        toast(com.deepseekharness.app.util.UiText.text("有其他操作正在进行，请稍后重试。"));
-                        return;
-                      }
-                      try {
-                        lease.run(
-                            () -> {
-                              var current = c.readApiKey();
-                              var shown = credential.get();
-                              if (current.state != shown.state
-                                  || current.state
-                                          == com.deepseekharness.app.util.CredentialRead.State
-                                              .AVAILABLE
-                                      && !current.requireValue().equals(shown.requireValue())) {
-                                credential.set(current);
-                                renderCredential.run();
-                                toast(
-                                    com.deepseekharness.app.util.UiText.choose(
-                                        "凭据已变化，请重新确认。", "The credential changed. Confirm again."));
-                                return null;
-                              }
-                              if (c.saveApiKey("")) {
-                                credential.set(c.readApiKey());
-                                apiKey.setText("");
-                                renderCredential.run();
-                              } else
-                                toast(com.deepseekharness.app.util.UiText.text("凭据记录未能保存，原记录已保留。"));
-                              return null;
-                            });
-                      } catch (Exception failure) {
-                        toast(com.deepseekharness.app.util.UiText.text("凭据记录未能保存，原记录已保留。"));
-                      } finally {
-                        lease.close();
-                      }
-                    })
-                .show());
+    // 这里只编辑运行选项；模型与凭据统一由 Web UI 管理。
     port.setText(c.getPort());
+    automaticPort.setChecked("auto".equals(c.getWebPortMode()));
+    port.setEnabled(!automaticPort.isChecked());
     checkUpdate.setChecked(c.isCheckUpdate());
     desktop.setChecked(c.isDesktopMode());
     CompoundButton gecko = v.findViewById(R.id.config_gecko_core);
@@ -205,14 +113,41 @@ public class ConfigFragment extends Fragment {
     gecko.setChecked(c.isGeckoCore());
     proroot.setChecked(c.isProroot());
     lan.setChecked(c.isLanMode());
+    TextView lanPasswordStatus = v.findViewById(R.id.config_lan_password_status);
+    lanPasswordStatus.setText(
+        c.hasLanPassword() ? R.string.lan_password_set : R.string.lan_password_missing);
+    v.findViewById(R.id.config_lan_password)
+        .setOnClickListener(x -> showLanPasswordDialog(c, lanPasswordStatus));
     overlay.setChecked(pref(ctx, "overlay_stream", false));
+    final String[] runtimeMode = {c.getRuntimeMode()};
     bindChoice(
         v,
         R.id.config_runtime_choice,
         com.deepseekharness.app.util.UiText.choose("运行方式", "Runtime"),
-        new String[] {"proroot", "proot"},
-        c.isProroot() ? 0 : 1,
-        index -> proroot.setChecked(index == 0));
+        new String[] {
+          com.deepseekharness.app.util.UiText.choose("proot（默认，稳定）", "proot (default, stable)"),
+          com.deepseekharness.app.util.UiText.choose(
+              "proroot（可选，实验）", "proroot (optional, experimental)"),
+          com.deepseekharness.app.util.UiText.choose(
+              "bxroot（实验，Android 11+）", "bxroot (experimental, Android 11+)")
+        },
+        "bxroot".equals(runtimeMode[0]) ? 2 : c.isProroot() ? 1 : 0,
+        index -> {
+          String next = index == 2 ? "bxroot" : index == 1 ? "proroot" : "proot";
+          if ("bxroot".equals(next)) {
+            var bxroot = new com.deepseekharness.app.runtime.BxrootRuntime(ctx);
+            if (!bxroot.available()) {
+              toast(bxroot.unavailableReason());
+              ((DshaSelectView) v.findViewById(R.id.config_runtime_choice))
+                  .setSelection(
+                      "bxroot".equals(runtimeMode[0]) ? 2
+                          : "proroot".equals(runtimeMode[0]) ? 1 : 0);
+              return;
+            }
+          }
+          runtimeMode[0] = next;
+          proroot.setChecked(index == 1);
+        });
     bindChoice(
         v,
         R.id.config_dns_choice,
@@ -245,8 +180,9 @@ public class ConfigFragment extends Fragment {
     Runnable validateInputs =
         () -> {
           try {
-            com.deepseekharness.app.util.ConfigInput.port(port.getText().toString());
-            save.setEnabled(apiKey.getText().length() <= 16384);
+            if (!automaticPort.isChecked())
+              com.deepseekharness.app.util.ConfigInput.port(port.getText().toString());
+            save.setEnabled(true);
           } catch (IllegalArgumentException invalid) {
             save.setEnabled(false);
           }
@@ -261,14 +197,21 @@ public class ConfigFragment extends Fragment {
 
           public void afterTextChanged(android.text.Editable text) {}
         };
+    automaticPort.setOnCheckedChangeListener(
+        (button, checked) -> {
+          port.setEnabled(!checked);
+          validateInputs.run();
+        });
     port.addTextChangedListener(inputWatcher);
-    apiKey.addTextChangedListener(inputWatcher);
     validateInputs.run();
     save.setOnClickListener(
         x -> {
           final int chosenPort;
           try {
-            chosenPort = com.deepseekharness.app.util.ConfigInput.port(port.getText().toString());
+            chosenPort =
+                automaticPort.isChecked()
+                    ? c.getPortInt()
+                    : com.deepseekharness.app.util.ConfigInput.port(port.getText().toString());
           } catch (IllegalArgumentException e) {
             advBody.setVisibility(View.VISIBLE);
             port.setError(e.getMessage());
@@ -276,7 +219,13 @@ public class ConfigFragment extends Fragment {
             return;
           }
           port.setError(null);
-          apiKey.setError(null);
+          if ("bxroot".equals(runtimeMode[0])) {
+            var bxroot = new com.deepseekharness.app.runtime.BxrootRuntime(ctx);
+            if (!bxroot.available()) {
+              toast(bxroot.unavailableReason());
+              return;
+            }
+          }
           com.deepseekharness.app.util.EnvironmentTaskGate.Lease saving =
               com.deepseekharness.app.util.EnvironmentTaskGate.tryAcquire(
                   com.deepseekharness.app.util.UiText.text("保存配置"));
@@ -290,34 +239,12 @@ public class ConfigFragment extends Fragment {
           try {
             saving.run(
                 () -> {
-                  String key = apiKey.getText().toString().trim();
-                  boolean keepKey = key.isEmpty();
-                  if (!keepKey && !c.saveApiKey(key)) {
-                    apiKey.setError(
-                        com.deepseekharness.app.util.UiText.text("密钥加密保存失败，原配置已保留，请重试"));
-                    return null;
-                  }
-                  credential.set(c.readApiKey());
-                  if (!keepKey
-                      && (credential.get().state
-                              != com.deepseekharness.app.util.CredentialRead.State.AVAILABLE
-                          || !key.equals(credential.get().requireValue()))) {
-                    apiKey.setError(
-                        com.deepseekharness.app.util.UiText.choose(
-                            "密钥保存后读取未通过，请重试。", "API key readback failed. Retry."));
-                    renderCredential.run();
-                    return null;
-                  }
-                  boolean keepUnreadable = keepKey && !credential.get().usable();
-                  if (!keepKey) apiKey.setText("");
-                  renderCredential.run();
-                  c.setPort(String.valueOf(chosenPort));
-                  c.setPermissionMode(permissionMode.get());
+                  c.setWebPort(automaticPort.isChecked() ? "auto" : "fixed", chosenPort);
                   c.setCheckUpdate(checkUpdate.isChecked());
                   c.setDesktopMode(desktop.isChecked());
                   if (com.deepseekharness.app.BuildConfig.LOW_ANDROID)
                     c.setGeckoCore(gecko.isChecked());
-                  c.setProroot(proroot.isChecked());
+                  c.setRuntimeMode(runtimeMode[0]);
                   c.setProrootStaticLoader(staticLoader.isChecked());
                   c.setProotSeccompDisabled(noSeccomp.isChecked());
                   c.setDnsMode(
@@ -335,15 +262,16 @@ public class ConfigFragment extends Fragment {
                   if (!overlayEnabled) OverlayController.teardown(ctx.getApplicationContext());
                   else if (OverlayController.permitted(ctx))
                     OverlayController.applyStyleNow(ctx.getApplicationContext());
-                  applyLanMode(c, lan.isChecked());
+                  boolean lanApplied = applyLanMode(ctx, lan.isChecked());
+                  int lanMessage =
+                      lanSettingsMessage(lan.isChecked(), c.hasLanPassword(), lanApplied);
+                  if (lanMessage != 0) Toast.makeText(ctx, lanMessage, Toast.LENGTH_LONG).show();
                   if (lan.isChecked() && getActivity() instanceof MainActivity)
                     ((MainActivity) getActivity()).requestLocalNetwork();
                   Toast.makeText(
                           ctx,
                           com.deepseekharness.app.util.UiText.text(
-                              keepUnreadable
-                                  ? "其他设置已保存；无法读取的 API Key 原记录保持不变。"
-                                  : "已保存；网页显示选项重新进入对话生效，端口与运行时需重启 Web"),
+                              "已保存；网页显示选项重新进入对话生效，端口与运行时需重启 Web"),
                           Toast.LENGTH_LONG)
                       .show();
                   if (overlay.isChecked() && !OverlayController.permitted(ctx))
@@ -373,6 +301,7 @@ public class ConfigFragment extends Fragment {
   public void onDestroyView() {
     pictureSettings = null;
     pictureStatus = null;
+    pictureEnabled = null;
     super.onDestroyView();
   }
 
@@ -400,14 +329,22 @@ public class ConfigFragment extends Fragment {
     Context ctx = getContext();
     if (ctx == null || pictureSettings == null || pictureStatus == null) return;
     boolean supported = PictureInPictureActivity.supported(ctx);
+    if (pictureEnabled != null) {
+      renderingPictureInPicture = true;
+      pictureEnabled.setChecked(new ConfigStore(ctx).isPictureInPictureEnabled());
+      pictureEnabled.setEnabled(supported);
+      renderingPictureInPicture = false;
+    }
     pictureSettings.setEnabled(supported);
     pictureSettings.setAlpha(supported ? 1f : 0.55f);
     pictureStatus.setText(
         !supported
             ? R.string.picture_in_picture_unsupported
-            : PictureInPictureActivity.allowed(ctx)
-                ? R.string.picture_in_picture_allowed
-                : R.string.picture_in_picture_disabled);
+            : !new ConfigStore(ctx).isPictureInPictureEnabled()
+                ? R.string.picture_in_picture_opted_out
+                : PictureInPictureActivity.allowed(ctx)
+                    ? R.string.picture_in_picture_allowed
+                    : R.string.picture_in_picture_disabled);
   }
 
   private void openOverlayPermission() {
@@ -421,26 +358,118 @@ public class ConfigFragment extends Fragment {
     }
   }
 
-  /** LAN 开关真正生效：开启时若 dsh 已鉴权则启动 3081 代理，关闭时停掉监听。 */
-  private void applyLanMode(ConfigStore c, boolean on) {
+  private void showLanPasswordDialog(ConfigStore config, TextView status) {
+    if (savingLanPassword.get()) {
+      Toast.makeText(requireContext(), R.string.lan_password_saving, Toast.LENGTH_SHORT).show();
+      return;
+    }
+    Context context = requireContext();
+    LinearLayout fields = new LinearLayout(context);
+    fields.setOrientation(LinearLayout.VERTICAL);
+    int padding = (int) (20 * getResources().getDisplayMetrics().density);
+    fields.setPadding(padding, 0, padding, 0);
+    EditText password = new EditText(context);
+    password.setHint(R.string.lan_password_new);
+    password.setInputType(
+        android.text.InputType.TYPE_CLASS_TEXT
+            | android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD);
+    password.setImportantForAutofill(View.IMPORTANT_FOR_AUTOFILL_NO);
+    EditText confirmation = new EditText(context);
+    confirmation.setHint(R.string.lan_password_confirm);
+    confirmation.setInputType(
+        android.text.InputType.TYPE_CLASS_TEXT
+            | android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD);
+    confirmation.setImportantForAutofill(View.IMPORTANT_FOR_AUTOFILL_NO);
+    fields.addView(password);
+    fields.addView(confirmation);
+    var dialog =
+        new DshaDialogBuilder(context)
+            .setTitle(R.string.lan_password_button)
+            .setMessage(R.string.lan_password_prompt)
+            .setView(fields)
+            .setNegativeButton(R.string.lan_password_cancel, null)
+            .setPositiveButton(R.string.lan_password_save, null)
+            .create();
+    dialog.show();
+    dialog
+        .getButton(android.content.DialogInterface.BUTTON_POSITIVE)
+        .setOnClickListener(
+            ignored -> {
+              String value = password.getText().toString();
+              if (!com.deepseekharness.app.util.LanPassword.validPassword(value)
+                  || !value.equals(confirmation.getText().toString())) {
+                confirmation.setError(getString(R.string.lan_password_invalid));
+                return;
+              }
+              if (!savingLanPassword.compareAndSet(false, true)) return;
+              password.setText("");
+              confirmation.setText("");
+              dialog.dismiss();
+              status.setText(R.string.lan_password_saving);
+              Context app = context.getApplicationContext();
+              new Thread(
+                      () -> {
+                        boolean saved = false;
+                        try {
+                          config.setLanPassword(value);
+                          saved = true;
+                        } catch (RuntimeException ignoredFailure) {
+                          // Do not log exception details: the input is a secret.
+                        }
+                        final boolean success = saved;
+                        new android.os.Handler(android.os.Looper.getMainLooper())
+                            .post(
+                                () -> {
+                                  boolean enabled = config.isLanMode();
+                                  boolean applied = success && applyLanMode(app, enabled);
+                                  savingLanPassword.set(false);
+                                  if (!isAdded() || getView() == null) return;
+                                  TextView currentStatus =
+                                      getView().findViewById(R.id.config_lan_password_status);
+                                  currentStatus.setText(
+                                      config.hasLanPassword()
+                                          ? R.string.lan_password_set
+                                          : R.string.lan_password_missing);
+                                  int message = lanPasswordSavedMessage(success, enabled, applied);
+                                  Toast.makeText(app, message, Toast.LENGTH_LONG).show();
+                                });
+                      },
+                      "dsha-lan-password")
+                  .start();
+            });
+  }
+
+  // Submission is not proof of a successful asynchronous bind. The Launch page
+  // observes the actual listener and network state.
+  static int lanSettingsMessage(boolean enabled, boolean hasPassword, boolean submitted) {
+    if (!enabled) return submitted ? 0 : R.string.lan_apply_failed;
+    if (!hasPassword) return R.string.lan_password_missing;
+    return submitted ? R.string.lan_apply_check : R.string.lan_apply_failed;
+  }
+
+  static int lanPasswordSavedMessage(boolean saved, boolean enabled, boolean submitted) {
+    if (!saved) return R.string.lan_password_failed;
+    if (!submitted) return R.string.lan_password_listener_failed;
+    return enabled ? R.string.lan_password_saved_check : R.string.lan_password_waiting;
+  }
+
+  /** Submit the desired state; successful submission does not mean binding succeeded. */
+  private static boolean applyLanMode(Context context, boolean on) {
     try {
       if (!on) {
         com.deepseekharness.app.LanProxyService.stopLanListener();
-        com.deepseekharness.app.HarnessService.refreshPowerMode(requireContext());
-        return;
+        com.deepseekharness.app.HarnessService.refreshPowerMode(context);
+        return true;
       }
-      com.deepseekharness.app.HarnessService.ensureLanForeground(requireContext());
-      HarnessController hc = HarnessController.get(requireContext());
+      com.deepseekharness.app.HarnessService.ensureLanForeground(context);
+      HarnessController hc = HarnessController.get(context);
       long gen = hc.getWebGeneration();
-      if (gen <= 0 || !com.deepseekharness.app.LanProxyService.hasDshAuth(gen)) {
-        // dsh 还没起来/还没交换 cookie：等下次进入对话时 HarnessController 自动启动
-        return;
-      }
+      if (gen <= 0 || !com.deepseekharness.app.LanProxyService.hasDshAuth(gen)) return true;
       com.deepseekharness.app.LanProxyService.start(
-          hc.proot().getRootfsDir().getAbsolutePath(), requireContext(), hc.getWebPort(), gen);
-    } catch (Throwable t) {
-      android.util.Log.w(
-          "DSHA", com.deepseekharness.app.util.UiText.format("LAN 开关生效失败: %s", t.getMessage()));
+          hc.proot().getRootfsDir().getAbsolutePath(), context, hc.getWebPort(), gen);
+      return true;
+    } catch (RuntimeException failure) {
+      return false;
     }
   }
 

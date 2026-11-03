@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "dshVersion": "0.2.1-rc.3",
+  "module": "@deepseek-ai/dsh-client-ui-sidebar-right/lib/client.js",
+  "patches": [
+    {
+      "before": "\t\t\t} catch (_invalidLayout) {\n\t\t\t\tclearSidebarLayout(sessionId);",
+      "after": "\t\t\t} catch (_invalidLayout) {\n\t\t\t\ttry { dshaKeepLayout(sessionId, raw); } catch (_) { return; }\n\t\t\t\tclearSidebarLayout(sessionId);"
+    },
+    {
+      "before": "\t\t\t\tactions: {\n\t\t\t\t\topen: (d, sessionId) => {",
+      "after": "\t\t\t\tactions: {\n\t\t\t\t\tdshaRecoverLayout: (d, sessionId) => {\n\t\t\t\t\t\tconst current = d.bySession[sessionId];\n\t\t\t\t\t\tif (current === void 0 || dshaValidSurface(current)) return;\n\t\t\t\t\t\tdshaKeepLayout(sessionId, JSON.stringify(current));\n\t\t\t\t\t\td.bySession = { ...d.bySession, [sessionId]: createSurface() };\n\t\t\t\t\t},\n\t\t\t\t\topen: (d, sessionId) => {"
+    },
+    {
+      "before": "\t\tfunction RightbarSeat({ sessionId, width, viewportWidth, canShow, useStore, actions, t, renderSlot, syncPresentation, measureRoom, reportAutoFullscreen, openTab, closeTab, useTabTypes, useTabNavigation, occurrence, retainTab, active, useShortcuts, splitPane, toggleFullscreen }) {",
+      "after": "\t\tfunction RightbarSeat(props) {\n\t\t\treturn react.createElement(DshaLayoutBoundary, {sessionId:props.sessionId, actions:props.actions}, react.createElement(DshaRightbarSeatBody, props));\n\t\t}\n\t\tfunction DshaRightbarSeatBody({ sessionId, width, viewportWidth, canShow, useStore, actions, t, renderSlot, syncPresentation, measureRoom, reportAutoFullscreen, openTab, closeTab, useTabTypes, useTabNavigation, occurrence, retainTab, active, useShortcuts, splitPane, toggleFullscreen }) {",
+      "prependAsset": "dsha-layout-recovery.js"
+    }
+  ],
+  "sourceSha256": "9dec9cf5c17e0bde9ea7a00b2438aa2551ba38c735cb65f48d28078b8e76bb3e",
+  "packageIntegrity": "sha512-BmBbGjHwP/q+DoNc0suvVTFlqcU0Bv0QGZJ67pfKNNkUjMtQtt77+r43vJHsSfDQIO+EzxoXUSfTdnTWxE42Bg=="
+}

@@ -56,4 +56,18 @@ public class PortablePreferenceProjectionTest {
     assertFalse(
         PortablePreferenceProjection.mayImport(Map.of(), Map.of("projectionVersion", "invalid")));
   }
+
+  @Test
+  public void retiredNativePermissionChoicesCannotMigrateFromSystemBackup() {
+    for (String value : List.of("read-only", "workspace-write", "danger-full-access")) {
+      assertEquals(
+          Map.of("ui_language", "en"),
+          PortablePreferenceProjection.project(
+              Map.of("permission_mode", value, "ui_language", "en")));
+      assertFalse(PortablePreferenceProjection.transferable("permission_mode"));
+      assertTrue(
+          PortablePreferenceProjection.mayImport(
+              Map.of("permission_mode", value), Map.of("projectionVersion", 1)));
+    }
+  }
 }

@@ -7,7 +7,6 @@ import androidx.lifecycle.AndroidViewModel;
 import androidx.lifecycle.MutableLiveData;
 import com.deepseekharness.app.BuildConfig;
 import com.deepseekharness.app.data.DownloadsExport;
-import com.deepseekharness.app.util.Compat;
 import com.deepseekharness.app.util.SensitiveData;
 import java.io.File;
 import java.io.InputStream;
@@ -45,17 +44,25 @@ public final class ErrorLogRepository extends AndroidViewModel {
             false,
             uri.isEmpty()
                 ? com.deepseekharness.app.util.UiText.choose(
-                    "导出启动状态与错误类别。原始运行输出保留在应用内的诊断页，不进入默认导出。",
-                    "Export startup states and error categories. Raw runtime output stays in the app's diagnostics and is excluded from the default export.")
+                    "导出结构化状态、现有脱敏操作记录尾部及摘要。不主动采集业务正文，但自由格式错误可能包含业务内容，分享前请检查。可仅本次附加主动填写的说明。",
+                    "Export structured state, existing redacted operation tails and a summary. Business bodies are not actively collected, but free-form errors may contain business content; review before sharing. You may attach the context entered here for this export only.")
                 : com.deepseekharness.app.util.UiText.format("上次保存：%s（点按查看）", name),
             uri.isEmpty() ? null : Uri.parse(uri)));
   }
 
   public static String filename() {
-    return "DSHA-error-log-"
+    return "DSHA-diagnostics-"
         + new java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.ROOT)
             .format(new java.util.Date())
-        + ".txt";
+        + "-"
+        + java.util.UUID.randomUUID()
+        + ".tar.gz";
+  }
+
+  public String savedMimeType() {
+    String name =
+        getApplication().getSharedPreferences("dsha_log_exports", 0).getString("last_name", "");
+    return name != null && name.endsWith(".txt") ? "text/plain" : "application/gzip";
   }
 
   public void download() {
@@ -63,7 +70,15 @@ public final class ErrorLogRepository extends AndroidViewModel {
   }
 
   public void export(Uri destination) {
+    export(destination, false, "");
+  }
+
+  /** This choice belongs only to the current export; it is never saved or restored. */
+  public void export(Uri destination, boolean includeAdditionalContext, String additionalContext) {
     if (!working.compareAndSet(false, true)) return;
+    final String selectedContext =
+        includeAdditionalContext && additionalContext != null ? additionalContext : "";
+    final long receivedAt = System.currentTimeMillis();
     State previous = state.getValue();
     state.setValue(
         new State(
@@ -73,10 +88,15 @@ public final class ErrorLogRepository extends AndroidViewModel {
     IO.execute(
         () -> {
           File staged = null;
+          com.deepseekharness.app.backup.BackupFileSystem.Node stagedIdentity = null;
           try {
             String name = filename();
-            staged = File.createTempFile("dsha-error-log-", ".txt", getApplication().getCacheDir());
-            Compat.write(staged, collect(getApplication()).getBytes(StandardCharsets.UTF_8));
+            staged =
+                stageArchive(
+                    getApplication(), includeAdditionalContext, selectedContext, receivedAt);
+            var fs = new com.deepseekharness.app.backup.AndroidBackupFileSystem();
+            stagedIdentity = fs.stat(staged);
+            var control = new com.deepseekharness.app.backup.BackupControl(null);
             Uri uri;
             if (destination == null) {
               DownloadsExport.Result written =
@@ -85,31 +105,33 @@ public final class ErrorLogRepository extends AndroidViewModel {
               name = written.displayName;
             } else {
               com.deepseekharness.app.util.FileIntegrity.Result written;
-              try (InputStream in = new java.io.FileInputStream(staged);
+              try (InputStream in = fs.read(staged, stagedIdentity);
                   OutputStream out =
-                      getApplication().getContentResolver().openOutputStream(destination, "wt")) {
+                      com.deepseekharness.app.backup.DocumentStreams.output(
+                          getApplication().getContentResolver(), destination, control)) {
                 if (out == null)
                   throw new java.io.IOException(
                       com.deepseekharness.app.util.UiText.text("无法写入所选位置"));
-                written = com.deepseekharness.app.util.FileIntegrity.copy(in, out, staged.length());
+                written =
+                    com.deepseekharness.app.util.FileIntegrity.copy(
+                        in, out, stagedIdentity.size, control::check);
               }
               try (InputStream in =
-                  getApplication().getContentResolver().openInputStream(destination)) {
+                  com.deepseekharness.app.backup.DocumentStreams.input(
+                      getApplication().getContentResolver(), destination, control)) {
                 if (!written.matches(
-                    com.deepseekharness.app.util.FileIntegrity.copy(in, null, staged.length())))
+                    com.deepseekharness.app.util.FileIntegrity.copy(
+                        in, null, stagedIdentity.size, control::check)))
                   throw new java.io.IOException(
                       com.deepseekharness.app.util.UiText.text("保存后的日志校验失败"));
               }
               uri = destination;
               try (android.database.Cursor cursor =
-                  getApplication()
-                      .getContentResolver()
-                      .query(
-                          uri,
-                          new String[] {android.provider.OpenableColumns.DISPLAY_NAME},
-                          null,
-                          null,
-                          null)) {
+                  com.deepseekharness.app.backup.DocumentStreams.optionalQuery(
+                      getApplication().getContentResolver(),
+                      uri,
+                      new String[] {android.provider.OpenableColumns.DISPLAY_NAME},
+                      control)) {
                 if (cursor != null && cursor.moveToFirst()) name = cursor.getString(0);
               }
               try {
@@ -146,10 +168,128 @@ public final class ErrorLogRepository extends AndroidViewModel {
                         SensitiveData.redact(String.valueOf(error.getMessage()))),
                     previous == null ? null : previous.uri));
           } finally {
-            if (staged != null) staged.delete();
+            if (staged != null && stagedIdentity != null)
+              try {
+                var fs = new com.deepseekharness.app.backup.AndroidBackupFileSystem();
+                if (stagedIdentity.same(fs.stat(staged))) fs.delete(staged);
+              } catch (java.io.IOException | RuntimeException retained) {
+                // A changed or unreadable staged export is retained rather than guessed disposable.
+              }
             working.set(false);
           }
         });
+  }
+
+  /** Numbered private output, independent of guest readiness, Python, or model credentials. */
+  private static File stageArchive(
+      android.content.Context context, boolean include, String note, long receivedAt)
+      throws java.io.IOException {
+    if (note.length() > 32768) throw new java.io.IOException("ADDITIONAL_CONTEXT_LIMIT");
+    var fs = new com.deepseekharness.app.backup.AndroidBackupFileSystem();
+    File root = context.getFilesDir().getCanonicalFile();
+    File folder = fs.child(root, "diagnostic-exports");
+    if (fs.stat(folder).type.equals("MISSING")) fs.directory(folder);
+    File archive = fs.child(folder, java.util.UUID.randomUUID() + ".tar.gz");
+    java.util.Map<String, byte[]> entries = new java.util.LinkedHashMap<>();
+    entries.put("summary.txt", collect(context).getBytes(StandardCharsets.UTF_8));
+    entries.put(
+        "status.json", com.deepseekharness.app.backup.BackupJson.write(status(context), 65536));
+    entries.put(
+        "operations-tail.jsonl",
+        com.deepseekharness.app.backup.DiagnosticExportArchive.operationEvents(
+            DiagnosticLog.readExportTail(context)));
+    if (include)
+      entries.put(
+          "additional-context.txt", SensitiveData.redact(note).getBytes(StandardCharsets.UTF_8));
+    entries.put(
+        "additional-context.json",
+        com.deepseekharness.app.backup.BackupJson.write(
+            java.util.Map.of(
+                "source",
+                "USER_PROVIDED_ADDITIONAL_CONTEXT",
+                "included",
+                include,
+                "windowStartMillis",
+                receivedAt,
+                "windowEndMillis",
+                System.currentTimeMillis(),
+                "automaticBusinessCapture",
+                false),
+            4096));
+    entries.put(
+        "README.txt",
+        ("DSHA diagnostics, not a data backup.\n"
+                + "manifest.json lists capture limits and the checksum of every included file.\n"
+                + "Existing operation records are a bounded tail; prior rotated records cannot be reconstructed.\n"
+                + "Recognized parser failures are reduced to safe classifications and positions; unframed history and continuation bodies are omitted.\n"
+                + "Historical time/stage prefixes are not authenticated; text can imitate an operation record.\n"
+                + "The exporter does not independently read process logs or actively collect business bodies. Free-form errors may contain business content or sensitive values beyond known redaction patterns. Review before sharing.\n"
+                + "Additional context, when selected, is only the text entered for this action. Review before sharing.\n")
+            .getBytes(StandardCharsets.UTF_8));
+    try (OutputStream output = fs.create(archive)) {
+      com.deepseekharness.app.backup.DiagnosticExportArchive.write(
+          output,
+          entries,
+          java.util.Map.of(
+              "operationHistory",
+              "BOUNDED_OPERATION_TAIL",
+              "rawProcessOutput",
+              "NOT_INCLUDED",
+              "fullExceptionChains",
+              "NOT_RECONSTRUCTED",
+              "businessBodies",
+              "MAY_BE_PRESENT_IN_FREE_FORM_ERRORS",
+              "parserMessages",
+              "RECOGNIZED_PARSERS_SAFE_CLASSIFICATION",
+              "historicalRecordIdentity",
+              "NOT_AUTHENTICATED",
+              "unframedHistory",
+              "OMITTED",
+              "additionalContextIncluded",
+              include,
+              "missingHistory",
+              "NOT_RECONSTRUCTED"),
+          new com.deepseekharness.app.backup.BackupControl(null));
+    }
+    fs.syncDirectory(folder);
+    return archive;
+  }
+
+  private static java.util.Map<String, Object> status(android.content.Context context) {
+    var config = new ConfigStore(context);
+    var startup = HarnessController.get(context).startupDiagnostics().snapshot();
+    var emergency = com.deepseekharness.app.recovery.RecoveryController.get(context).snapshot();
+    java.util.Map<String, Object> value = new java.util.LinkedHashMap<>();
+    value.put("schema", 1L);
+    value.put("capturedAtMillis", System.currentTimeMillis());
+    value.put("versionCode", (long) BuildConfig.VERSION_CODE);
+    value.put("versionName", BuildConfig.VERSION_NAME);
+    value.put("applicationId", context.getPackageName());
+    value.put("flavor", BuildConfig.LOW_ANDROID ? "low" : "standard");
+    value.put("configuredRuntime", config.isProroot() ? "proroot" : "proot");
+    value.put("failureStage", category(config.getDiagnosticFailureStage()));
+    value.put("failureRecorded", !config.getDiagnosticFailureReason().isEmpty());
+    value.put(
+        "startup",
+        java.util.Map.of(
+            "stage",
+            category(startup.stage),
+            "browserReady",
+            startup.browserReady,
+            "safe",
+            startup.safe,
+            "issueCount",
+            (long) startup.issues.size()));
+    value.put(
+        "emergency",
+        java.util.Map.of(
+            "state",
+            emergency.state.toString(),
+            "generation",
+            emergency.generation,
+            "errorCode",
+            category(emergency.errorCode)));
+    return value;
   }
 
   public static String collect(android.content.Context context) {
@@ -221,8 +361,8 @@ public final class ErrorLogRepository extends AndroidViewModel {
           .append('\n');
     text.append(
         com.deepseekharness.app.util.UiText.choose(
-            "\n原始进程输出、插件消息与日志正文未进入默认报告；可在应用内诊断页查看。分享前仍请检查设备型号等信息。\n",
-            "\nRaw process output, plugin messages and log bodies are excluded from this default report; inspect them in the app's diagnostics. Review device details before sharing.\n"));
+            "\n不主动采集业务正文；现有操作尾部的自由格式错误仍可能包含业务内容。历史时间与阶段前缀未经认证，缺失历史不能补回。分享前请检查内容。\n",
+            "\nBusiness bodies are not actively collected, but existing free-form operation errors may contain business content. Historical time/stage prefixes are not authenticated and missing history cannot be reconstructed. Review before sharing.\n"));
     return SensitiveData.redact(text.toString());
   }
 

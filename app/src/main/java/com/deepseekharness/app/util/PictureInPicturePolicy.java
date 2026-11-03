@@ -6,11 +6,12 @@ public final class PictureInPicturePolicy {
 
   public static boolean canEnter(
       boolean supported,
+      boolean userEnabled,
       boolean allowed,
       boolean contentReady,
       boolean leavingForActivity,
       boolean finishing) {
-    return supported && allowed && contentReady && !leavingForActivity && !finishing;
+    return supported && userEnabled && allowed && contentReady && !leavingForActivity && !finishing;
   }
 
   /** Android 要求宽高比位于 1:2.39 至 2.39:1，超长屏使用留边而不裁切。 */
@@ -63,5 +64,15 @@ public final class PictureInPicturePolicy {
     if (windowWidth <= 0 || windowHeight <= 0) return preferred;
     long fitted = Math.round((double) preferred[0] * windowHeight / windowWidth);
     return new int[] {preferred[0], (int) Math.max(1, Math.min(16384, fitted))};
+  }
+
+  /** 几何缓存不吞子树的布局请求；空闲和单纯窗口缩放仍复用逻辑布局。 */
+  public static boolean mustDispatchChildLayout(
+      int viewportWidth,
+      int viewportHeight,
+      int cachedWidth,
+      int cachedHeight,
+      boolean childRequestedLayout) {
+    return childRequestedLayout || viewportWidth != cachedWidth || viewportHeight != cachedHeight;
   }
 }

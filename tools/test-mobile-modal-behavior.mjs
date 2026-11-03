@@ -8,6 +8,7 @@ import { browserFixture } from './rc1-browser-fixture.mjs';
 const runtime = process.env.DSHA_TEST_RUNTIME || JSON.parse(fs.readFileSync('app/build/test-runtimes/current.json', 'utf8')).raw;
 const fixture = await browserFixture(runtime);
 const page = fixture.page;
+page.setDefaultTimeout(3000);
 try {
   const frontend = path.resolve(runtime, 'node_modules/@deepseek-ai/dsh-web-frontend/dist');
   const html = fs.readFileSync(path.join(frontend, 'index.html'), 'utf8');
@@ -57,6 +58,8 @@ try {
   await page.keyboard.press('Tab');
   assert.equal(await search.evaluate(el => el === document.activeElement), true, 'Tab 可进入搜索');
   await search.fill('Action 31');
+  // Firefox fill通过composition完成文字；释放其关闭键后再验证独立的Escape命令。
+  await page.keyboard.press('ArrowRight');
   assert.equal(await modal.locator('li').count(), 1, '真实目录过滤生效');
   await modal.getByRole('button', {name:'clear-search', exact:true}).click();
   assert.equal(await search.inputValue(), '');
@@ -93,10 +96,13 @@ try {
   await page.setViewportSize({width:360,height:800});
   await page.waitForFunction(() => document.documentElement.style.getPropertyValue('--dsha-mobile-visible-vh') === '800px');
   // 模拟 overlay 键盘：只有 visualViewport 变高/偏移，layout viewport 不改变。
-  const visual = await page.evaluate(() => {
+  await page.evaluate(() => {
     Object.defineProperty(visualViewport, 'height', {configurable:true, value:290});
     Object.defineProperty(visualViewport, 'offsetTop', {configurable:true, value:16});
     visualViewport.dispatchEvent(new Event('resize'));
+  });
+  await page.waitForFunction(() => document.documentElement.style.getPropertyValue('--dsha-mobile-visible-vh') === '290px');
+  const visual = await page.evaluate(() => {
     const el = document.querySelector('[data-shortcut-modal="shortcuts"]');
     el.querySelector('footer').scrollIntoView({block:'end'});
     const box = el.getBoundingClientRect();
@@ -122,6 +128,37 @@ try {
       viewport:document.documentElement.style.getPropertyValue('--dsha-mobile-visible-vh')};
   });
   assert.deepEqual(cleanup, {same:true,owns:true,viewport:''});
+  const sharedFocus = await page.evaluate(() => {
+    const results=[];
+    for(const shortcutFirst of [true,false]) {
+      const local=[];
+      const ctx={effect(run){local.push(run());}};
+      const modelGuard=mobileRequire('./effects/model-menu-keyboard-guard.js');
+      guard.installShortcutModalKeyboardGuard(ctx);
+      modelGuard.installModelMenuKeyboardGuard(ctx);
+      document.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,pointerType:'touch'}));
+      const menu=document.createElement('div');menu.dataset.menuMaterial='';
+      const model=document.createElement('input');model.setAttribute('role','searchbox');menu.append(model);
+      document.querySelector('[data-shortcut-modal="shortcuts"]').append(menu);
+      document.activeElement?.blur();model.focus();
+      const blockedWithBoth=document.activeElement!==model;
+      local[shortcutFirst?0:1]();
+      model.focus();
+      const modelRuleRemaining=shortcutFirst?document.activeElement!==model:document.activeElement===model;
+      let shortcutRuleRemaining=true;
+      if(!shortcutFirst) {
+        const auto=document.createElement('input');auto.setAttribute('data-modal-autofocus','');
+        auto.setAttribute('data-dsh-automatic-focus','');menu.append(auto);auto.focus();
+        shortcutRuleRemaining=document.activeElement!==auto;
+      }
+      local[shortcutFirst?1:0]();menu.remove();
+      results.push({shortcutFirst,blockedWithBoth,modelRuleRemaining,shortcutRuleRemaining,
+        originalRestored:HTMLInputElement.prototype.focus===originalFocus});
+    }
+    return results;
+  });
+  for(const row of sharedFocus)assert.deepEqual(row,{shortcutFirst:row.shortcutFirst,blockedWithBoth:true,
+    modelRuleRemaining:true,shortcutRuleRemaining:true,originalRestored:true});
   const ownership = await page.evaluate(() => {
     guard.installShortcutModalKeyboardGuard(context);
     const inner=HTMLInputElement.prototype.focus;
@@ -144,7 +181,7 @@ try {
   await page.setViewportSize({width:360,height:800});
   await page.waitForFunction(() => HTMLInputElement.prototype.focus !== originalFocus);
   await page.evaluate(() => disposers.pop()());
-  const gestures = await page.evaluate(() => {
+  const gestures = await page.evaluate(async () => {
     root.unmount();
     const frame=document.createElement('div'); frame.dataset.mobileNav='frame'; frame.setAttribute('data-sidebar-collapsed','');
     frame.style.cssText='position:fixed;inset:0';
@@ -154,29 +191,39 @@ try {
     const ctx={effect:context.effect,layout:{toggleSidebar(){frame.toggleAttribute('data-sidebar-collapsed');}}};
     const swipe=mobileRequire('./effects/sidebar-swipe.js');
     swipe.installSidebarSwipe(ctx,()=>{});
-    const pointer=(type,x=20)=>target.dispatchEvent(new PointerEvent(type,{bubbles:true,pointerType:'touch',pointerId:1,clientX:x,clientY:100}));
+    const pointer=(type,x=20,y=100)=>target.dispatchEvent(new PointerEvent(type,{bubbles:true,pointerType:'touch',pointerId:1,clientX:x,clientY:y}));
     const touch=(cancelable=true,count=1)=>{
       const event=new Event('touchmove',{bubbles:true,cancelable});
       Object.defineProperty(event,'touches',{value:Array(count).fill({})}); target.dispatchEvent(event); return event.defaultPrevented;
     };
+    // 3.2.0 fixes iOS dead scroll zones: touchmove belongs to the browser until
+    // the pointer has locked horizontally. Test both sides of that boundary.
+    pointer('pointerdown'); const beforeLock=touch();
+    pointer('pointermove',22,150); const verticalPrevented=touch(); pointer('pointercancel');
     const rows=[];
     for(const cause of ['blur','hidden','uncancelable','multitouch','pointercancel']) {
-      pointer('pointerdown'); const owned=touch();
+      pointer('pointerdown'); pointer('pointermove',100); const owned=touch();
       if(cause==='blur')window.dispatchEvent(new Event('blur'));
       if(cause==='hidden'){Object.defineProperty(document,'hidden',{configurable:true,value:true});document.dispatchEvent(new Event('visibilitychange'));delete document.hidden;}
       if(cause==='uncancelable')touch(false);
       if(cause==='multitouch')touch(true,2);
       if(cause==='pointercancel')pointer('pointercancel');
-      rows.push({cause,owned,released:!touch()});
+      const released=!touch();
+      // Each cancel may close with a 280ms animation and a 350ms input
+      // cooldown. Settle that real transition before starting another stroke.
+      await new Promise(resolve=>window.setTimeout(resolve,400));
+      rows.push({cause,owned,released,closed:frame.hasAttribute('data-sidebar-collapsed'),inlineTransform:drawer.style.transform});
     }
-    pointer('pointerdown');pointer('pointermove',100);
+    pointer('pointerdown');pointer('pointermove',100);const owned=touch();
     disposers.pop()();
-    const disposed={released:!touch(),closed:frame.hasAttribute('data-sidebar-collapsed'),inlineTransform:drawer.style.transform};
+    const disposed={owned,released:!touch(),closed:frame.hasAttribute('data-sidebar-collapsed'),inlineTransform:drawer.style.transform};
     frame.remove();
-    return {rows,disposed};
+    return {beforeLock,verticalPrevented,rows,disposed};
   });
-  for(const row of gestures.rows)assert.deepEqual(row,{cause:row.cause,owned:true,released:true});
-  assert.deepEqual(gestures.disposed,{released:true,closed:true,inlineTransform:''});
+  assert.equal(gestures.beforeLock,false,'pre-lock touchmove must preserve native scrolling');
+  assert.equal(gestures.verticalPrevented,false,'vertical strokes must preserve native scrolling');
+  for(const row of gestures.rows)assert.deepEqual(row,{cause:row.cause,owned:true,released:true,closed:true,inlineTransform:''});
+  assert.deepEqual(gestures.disposed,{owned:true,released:true,closed:true,inlineTransform:''});
   const frozen = await page.evaluate(() => {
     guard.installShortcutModalKeyboardGuard(context);
     Object.defineProperty(HTMLInputElement.prototype,'focus',{configurable:false});
@@ -188,6 +235,6 @@ try {
   });
   assert.equal(frozen,true);
   assert.deepEqual(fixture.errors, []);
-  console.log(JSON.stringify({runtime,host:'actual rc2 ShortcutReference + Modal',cases,largeFont,visual,gestures,
+  console.log(JSON.stringify({runtime,host:'actual rc2 ShortcutReference + Modal',cases,largeFont,visual,gestures,sharedFocus,
     checks:['initial focus','touch','Tab','search/clear','accessibility tree','reopen','later automatic focus','owner cleanup','same-width resize','visualViewport keyboard'],errors:fixture.errors},null,2));
 } finally { await fixture.close(); }

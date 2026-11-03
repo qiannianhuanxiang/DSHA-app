@@ -189,10 +189,10 @@ class PolicyTest(unittest.TestCase):
         source = '/data/app/com.dsh.client/base.apk'
         ticket = '0123456789abcdef0123456789abcdef0123456789abcdef'
         plan = dict(version=1, kind='VIRTUAL_SCREEN', argv=['app_process', '-Djava.class.path=' + source,
-            '/system/bin', 'com.deepseekharness.app.vscreen.VirtualScreenCore', '--launch', '--port', '8800', '--package', 'com.dsh.clienu'],
+            '/system/bin', 'com.deepseekharness.app.vscreen.VirtualScreenCore', '--launch', '--port', '0', '--package', 'com.dsh.clienu'],
             sourceApk=source, selfPackage="com.dsh.clienu", nativeAuthorization='managed-vscreen-start', nativeTicket=ticket, su=False)
         self.execute(plan)
-        self.assertEqual('/system/bin/app_process -Djava.class.path=/data/app/com.dsh.client/base.apk /system/bin com.deepseekharness.app.vscreen.VirtualScreenCore --launch --port 8800 --package com.dsh.clienu', self.sent[-1])
+        self.assertEqual('/system/bin/app_process -Djava.class.path=/data/app/com.dsh.client/base.apk /system/bin com.deepseekharness.app.vscreen.VirtualScreenCore --launch --port 0 --package com.dsh.clienu', self.sent[-1])
         self.sent.clear()
         for change in (
                 {'nativeTicket': ''}, {'nativeAuthorization': 'generic'}, {'su': True},

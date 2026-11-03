@@ -9,12 +9,12 @@ public class WebUploadSessionBudgetTest {
     WebUploadSessionBudget budget = new WebUploadSessionBudget();
     for (int batch = 0; batch < 2; batch++) {
       var reservation = budget.beginBatch(20);
-      budget.addBytes(reservation, 256L * 1024L * 1024L);
+      budget.addBytes(reservation, WebTransferPolicy.UPLOAD_LIMIT);
       budget.finishCopy(reservation);
       assertTrue(budget.commit(reservation));
     }
     assertEquals(40, budget.committedFiles());
-    assertEquals(512L * 1024L * 1024L, budget.committedBytes());
+    assertEquals(WebUploadSessionBudget.MAX_SESSION_BYTES, budget.committedBytes());
     assertThrows(WebUploadSessionBudget.LimitExceededException.class, () -> budget.beginBatch(1));
   }
 
@@ -22,14 +22,52 @@ public class WebUploadSessionBudgetTest {
   public void failedOrStaleBatchReleasesReservationsWithoutWeakeningCaps() {
     WebUploadSessionBudget budget = new WebUploadSessionBudget();
     var abandoned = budget.beginBatch(20);
-    budget.addBytes(abandoned, 300L * 1024L * 1024L);
+    budget.addBytes(abandoned, WebUploadSessionBudget.MAX_SESSION_BYTES);
     budget.rollback(abandoned);
     assertEquals(0, budget.reservedFiles());
     assertEquals(0, budget.reservedBytes());
     var accepted = budget.beginBatch(20);
-    budget.addBytes(accepted, 256L * 1024L * 1024L);
+    budget.addBytes(accepted, WebTransferPolicy.UPLOAD_LIMIT);
     budget.finishCopy(accepted);
     assertTrue(budget.commit(accepted));
+  }
+
+  @Test
+  public void concurrentByteReservationsAndRetainedFailedCopiesConsumeTheSameBudget() {
+    WebUploadSessionBudget budget = new WebUploadSessionBudget();
+    var first = budget.beginBatch(1);
+    var second = budget.beginBatch(1);
+    budget.addBytes(first, 5_000_000_000L);
+    budget.addBytes(second, WebUploadSessionBudget.MAX_SESSION_BYTES - 5_000_000_000L);
+    assertThrows(
+        WebUploadSessionBudget.LimitExceededException.class, () -> budget.addBytes(second, 1));
+    assertThrows(
+        WebUploadSessionBudget.LimitExceededException.class,
+        () -> budget.addBytes(first, Long.MAX_VALUE));
+    budget.retainFailedCopy(first); // 无法删除的失败现场依然占有配额。
+    budget.rollback(second);
+    assertEquals(5_000_000_000L, budget.committedBytes());
+    var next = budget.beginBatch(1);
+    budget.addBytes(next, WebUploadSessionBudget.MAX_SESSION_BYTES - 5_000_000_000L);
+    assertThrows(
+        WebUploadSessionBudget.LimitExceededException.class, () -> budget.addBytes(next, 1));
+  }
+
+  @Test
+  public void closingThePageDoesNotEraseUndeletableCopyAccounting() {
+    WebUploadSessionBudget budget = new WebUploadSessionBudget();
+    var copy = budget.beginBatch(1);
+    budget.addBytes(copy, 5_000_000_000L);
+    budget.close();
+    assertFalse(budget.canDeleteOwnedFiles());
+    budget.retainFailedCopy(copy);
+    assertTrue(budget.canDeleteOwnedFiles());
+    assertEquals(5_000_000_000L, budget.committedBytes());
+    assertEquals(1, budget.committedFiles());
+    assertFalse(budget.commit(copy));
+    assertThrows(WebUploadSessionBudget.SessionClosedException.class, () -> budget.beginBatch(1));
+    budget.rollback(copy);
+    assertEquals(5_000_000_000L, budget.committedBytes());
   }
 
   @Test

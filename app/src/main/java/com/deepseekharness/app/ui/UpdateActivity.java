@@ -12,6 +12,7 @@ import androidx.lifecycle.ViewModelProvider;
 import com.deepseekharness.app.BuildConfig;
 import com.deepseekharness.app.R;
 import com.deepseekharness.app.core.UpdateRepository;
+import com.deepseekharness.app.util.CurrentReleaseNotes;
 import com.deepseekharness.app.util.UpdatePolicy;
 
 /** 更新由用户选择通道和确认安装；下载任务不依赖页面生命周期。 */
@@ -29,6 +30,12 @@ public final class UpdateActivity extends AppCompatActivity {
     repository.restoreInterruptedInstall(saved != null && saved.getBoolean("installPending"));
     ((TextView) findViewById(R.id.update_current)).setText(BuildConfig.VERSION_NAME);
     ((TextView) findViewById(R.id.update_code)).setText(String.valueOf(BuildConfig.VERSION_CODE));
+    ((TextView) findViewById(R.id.update_changelog_summary))
+        .setText(
+            getString(
+                R.string.ui134_changelog_sub,
+                CurrentReleaseNotes.versionLabel(BuildConfig.VERSION_NAME),
+                BuildConfig.VERSION_CODE));
     ((TextView) findViewById(R.id.update_edition))
         .setText(
             BuildConfig.LOW_ANDROID
@@ -174,11 +181,23 @@ public final class UpdateActivity extends AppCompatActivity {
         if (output.size() + count > 16384) throw new java.io.IOException("CHANGELOG_LIMIT");
         output.write(block, 0, count);
       }
-      return "DSHA " + BuildConfig.VERSION_NAME + "\n\n" + output.toString("UTF-8");
+      String notes = output.toString("UTF-8");
+      if (!CurrentReleaseNotes.matches(BuildConfig.VERSION_NAME, BuildConfig.VERSION_CODE, notes))
+        com.deepseekharness.app.core.DiagnosticLog.record(
+            this, "changelog", "Bundled notes do not match the installed build");
+      return currentChangelog(notes);
     } catch (java.io.IOException | android.content.res.Resources.NotFoundException failure) {
       com.deepseekharness.app.core.DiagnosticLog.record(this, "changelog", failure.toString());
-      return "DSHA " + BuildConfig.VERSION_NAME;
+      return currentChangelog(null);
     }
+  }
+
+  private String currentChangelog(String notes) {
+    return CurrentReleaseNotes.render(
+        BuildConfig.VERSION_NAME,
+        BuildConfig.VERSION_CODE,
+        notes,
+        com.deepseekharness.app.util.UiText.language());
   }
 
   private void renderState(UpdateRepository.State state) {
@@ -198,9 +217,7 @@ public final class UpdateActivity extends AppCompatActivity {
       ((TextView) findViewById(R.id.update_status))
           .setText(
               com.deepseekharness.app.util.UiText.format(
-                  "%s\n%s",
-                  com.deepseekharness.app.util.UiStateText.render(state.message),
-                  com.deepseekharness.app.util.UiStateText.render(install.error)));
+                  "%s\n%s", UpdateUi.status(state.message), UpdateUi.status(install.error)));
     }
   }
 
@@ -242,8 +259,11 @@ public final class UpdateActivity extends AppCompatActivity {
   }
 
   private void showInstallError(Exception error) {
+    com.deepseekharness.app.core.DiagnosticLog.record(this, "APP_UPDATE_INSTALL", error.toString());
     repository.installFailed(
-        com.deepseekharness.app.util.UiText.format("无法安装：%s；可重试", error.getMessage()));
+        com.deepseekharness.app.util.UiText.choose(
+            "无法打开系统安装器，请重试或在浏览器下载安装。",
+            "Unable to open the system installer. Retry or download in the browser."));
     Toast.makeText(this, repository.installation().getValue().error, Toast.LENGTH_LONG).show();
   }
 

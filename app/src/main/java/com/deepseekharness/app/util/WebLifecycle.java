@@ -6,6 +6,20 @@ public final class WebLifecycle {
   private boolean starting;
   private boolean stopping;
   private boolean userStopped;
+  // 只记录本代实际创建进程的引擎；配置更改或旧进程恢复不能充当运行证据。
+  private String runtimeMode = "";
+
+  /** 仅未收到任何启停意图的宿主会话可认领完整核验的原Web，不执行命令。 */
+  public synchronized boolean adoptRunning(long savedGeneration) {
+    if (generation != 0
+        || starting
+        || stopping
+        || userStopped
+        || savedGeneration < 1
+        || savedGeneration == Long.MAX_VALUE) return false;
+    generation = savedGeneration;
+    return true;
+  }
 
   /** 返回新代次；忙碌或不允许自动拉起时返回 -1。 */
   public synchronized long beginStart(boolean automatic, boolean stopSentinelPresent) {
@@ -14,6 +28,7 @@ public final class WebLifecycle {
     }
     userStopped = false;
     starting = true;
+    runtimeMode = "";
     return ++generation;
   }
 
@@ -23,9 +38,23 @@ public final class WebLifecycle {
       userStopped = true;
       starting = false;
       stopping = true;
+      runtimeMode = "";
       generation++;
     }
     return generation;
+  }
+
+  /** 仅启动中的当前代次可发布实际引擎；兼容重试可在鉴权前更新为 proot。 */
+  public synchronized boolean recordRuntime(long expected, String mode) {
+    if (!isCurrent(expected) || !starting) return false;
+    if (!"proot".equals(mode) && !"proroot".equals(mode) && !"bxroot".equals(mode)) return false;
+    runtimeMode = mode;
+    return true;
+  }
+
+  /** 空值表示尚无证据；恢复旧会话时不得根据当前偏好猜测实际引擎。 */
+  public synchronized String runtimeMode() {
+    return runtimeMode;
   }
 
   public synchronized boolean finishStart(long expected) {

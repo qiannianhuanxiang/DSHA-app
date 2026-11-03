@@ -7,6 +7,10 @@ public final class ResolverConfig {
   private static final String OWNED = "# DSHA managed IPv4 DNS compatibility\noptions no-aaaa\n";
   private static final String DNS_BEGIN = "# DSHA managed device DNS\n";
   private static final String DNS_END = "# DSHA end device DNS\n";
+  // Exact bytes of the resolv.conf shipped in the legacy rootfs. Any user edit,
+  // including a comment, opts out of this migration.
+  private static final String LEGACY_DEFAULT =
+      "nameserver 8.8.8.8\nnameserver 223.5.5.5\n";
   private static final java.util.regex.Pattern MANAGED_DNS =
       java.util.regex.Pattern.compile(
           "(?m)^# DSHA managed device DNS\\r?\\n(?:nameserver [0-9A-Fa-f:.]+\\r?\\n)*# DSHA end device DNS\\r?\\n");
@@ -36,6 +40,12 @@ public final class ResolverConfig {
     java.util.LinkedHashSet<String> unique = new java.util.LinkedHashSet<>();
     if (deviceServers != null)
       for (String server : deviceServers) if (validServer(server)) unique.add(server);
+    // A pristine bundled file is not a user override. Never remove it while
+    // device DNS is unavailable; keep modified and custom configurations intact.
+    if (!unique.isEmpty() && unmanaged.equals(LEGACY_DEFAULT)) {
+      unmanaged = "";
+      nameserver = false;
+    }
     if (nameserver) {
       text = unmanaged;
     } else if (!unique.isEmpty()) {

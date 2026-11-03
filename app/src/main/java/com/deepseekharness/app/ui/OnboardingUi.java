@@ -14,14 +14,14 @@ final class OnboardingUi {
     activity = owner;
     page = new LinearLayout(owner);
     page.setOrientation(LinearLayout.VERTICAL);
-    page.setBackgroundColor(owner.getColor(R.color.surface));
-    page.setPadding(dp(24), dp(18), dp(24), dp(18));
+    page.setBackgroundColor(owner.getColor(R.color.shell_bg));
+    page.setPadding(dp(20), dp(18), dp(20), dp(18));
     LinearLayout header = new LinearLayout(owner);
     header.setGravity(Gravity.CENTER_VERTICAL);
-    TextView brand = text("DSHA", 18, R.color.text);
+    TextView brand = text("DSHA", 18, R.color.shell_text);
     brand.setTypeface(null, android.graphics.Typeface.BOLD);
     header.addView(brand, new LinearLayout.LayoutParams(0, -2, 1));
-    header.addView(text(step, 11, R.color.text_muted));
+    header.addView(text(step, 11, R.color.shell_text_muted));
     page.addView(header);
     ScrollView scroll = new ScrollView(owner);
     body = new LinearLayout(owner);
@@ -29,7 +29,7 @@ final class OnboardingUi {
     body.setPadding(0, dp(24), 0, dp(16));
     scroll.addView(body);
     page.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
-    TextView heading = text(title, 27, R.color.text);
+    TextView heading = text(title, 28, R.color.shell_text);
     heading.setTypeface(null, android.graphics.Typeface.BOLD);
     body.addView(heading);
     note(subtitle);
@@ -53,7 +53,7 @@ final class OnboardingUi {
   }
 
   void note(String s) {
-    TextView t = text(s, 13, R.color.text_secondary);
+    TextView t = text(s, 13, R.color.shell_text_secondary);
     t.setLineSpacing(dp(5), 1);
     LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(-1, -2);
     p.topMargin = dp(14);
@@ -65,9 +65,9 @@ final class OnboardingUi {
     LinearLayout card = new LinearLayout(activity);
     card.setOrientation(LinearLayout.VERTICAL);
     card.setPadding(dp(16), dp(14), dp(16), dp(14));
-    card.setBackgroundResource(R.drawable.bg_card);
-    card.addView(text(label, 11, R.color.text_muted));
-    TextView content = text(value, 16, R.color.text);
+    card.setBackgroundResource(R.drawable.bg_shell_card);
+    card.addView(text(label, 11, R.color.shell_text_muted));
+    TextView content = text(value, 16, R.color.shell_text);
     content.setPadding(0, dp(7), 0, 0);
     card.addView(content);
     LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(-1, -2);
@@ -89,10 +89,10 @@ final class OnboardingUi {
     b.setTextSize(14);
     b.setAllCaps(false);
     b.setGravity(Gravity.CENTER);
-    b.setMinHeight(dp(48));
-    b.setBackgroundResource(primary ? R.drawable.bg_btn_primary : R.drawable.bg_action_plain);
+    b.setMinHeight(dp(primary ? 52 : 46));
+    b.setBackgroundResource(primary ? R.drawable.bg_btn_primary : R.drawable.bg_btn);
     b.setTextColor(
-        activity.getColorStateList(primary ? R.color.button_primary_text : R.color.primary));
+        activity.getColorStateList(primary ? R.color.button_primary_text : R.color.button_text));
     b.setOnClickListener(v -> action.run());
     LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(-1, -2);
     p.topMargin = dp(8);

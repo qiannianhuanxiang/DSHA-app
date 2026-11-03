@@ -31,7 +31,11 @@ public class DataRootPolicyTest {
   public void actualBridgeCredentialsAndSessionTrashAreExcludedWithoutDeletingOriginals() {
     for (String name :
         new String[] {
-          ".bridge_token", ".bridge_headers", ".anonymous-user-id", ".bridge_token.previous"
+          ".bridge_token",
+          ".bridge_headers",
+          ".bridge_port",
+          ".anonymous-user-id",
+          ".bridge_token.previous"
         }) assertTrue(DataRootPolicy.machine(name));
     assertEquals(
         "RETAINED_SESSION_TRASH", DataRootPolicy.exclusion("sessions", ".sessions-trash/a"));

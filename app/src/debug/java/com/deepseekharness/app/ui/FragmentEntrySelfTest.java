@@ -4,28 +4,24 @@ import android.app.Activity;
 import android.app.Instrumentation;
 import android.os.Bundle;
 import android.view.View;
-import android.widget.Switch;
 import android.widget.TextView;
 import androidx.fragment.app.Fragment;
 import androidx.fragment.app.FragmentActivity;
 import androidx.lifecycle.MutableLiveData;
-import androidx.lifecycle.ViewModelProvider;
 import androidx.recyclerview.widget.RecyclerView;
-import com.deepseekharness.app.core.PluginRepository;
 import com.deepseekharness.app.R;
-import org.json.JSONObject;
+import com.deepseekharness.app.core.PluginRepository;
 import java.lang.reflect.Constructor;
-import java.lang.reflect.Field;
 import java.util.Collections;
 import java.util.List;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
+import org.json.JSONObject;
 
 /**
- * 调试入口：在 instrumentation 工作线程调用 run(driver, 空测试 Activity, 容器 ID)。
- * 替换鉴权/打开页面/刷新边界；不启动 Web、不更改实际插件。调用方提供独立测试 Activity。
+ * 调试入口：在 instrumentation 工作线程调用 run(driver, 空测试 Activity, 容器 ID)。 替换打开页面/刷新边界；鉴权由 PreviewAuth
+ * 定向测试覆盖。 不启动 Web、不更改实际插件，调用方提供独立测试 Activity。
  */
 public final class FragmentEntrySelfTest {
   private FragmentEntrySelfTest() {}
@@ -43,8 +39,6 @@ public final class FragmentEntrySelfTest {
       throws Exception {
     EntryProbe entry = new EntryProbe();
     PluginProbe plugin = new PluginProbe();
-    PluginRepository[] fixture = {null};
-    main(driver, () -> fixture[0] = new ViewModelProvider(host).get(PluginRepository.class));
     try {
       show(driver, host, container, entry);
       main(
@@ -52,69 +46,28 @@ public final class FragmentEntrySelfTest {
           () -> {
             for (int i = 0; i < 30; i++)
               entry.requireView().findViewById(R.id.launch_start).performClick();
-            require(!entry.requireView().findViewById(R.id.launch_start).isEnabled(), "鉴权中按钮未禁用");
+            require(!entry.requireView().findViewById(R.id.launch_start).isEnabled(), "进入中按钮未禁用");
             require(
                 ((TextView) entry.requireView().findViewById(R.id.launch_status))
                     .getText()
                     .toString()
-                    .contains("验证"),
-                "缺少鉴权状态");
+                    .contains("打开"),
+                "缺少打开页面状态");
           });
-      until(() -> entry.auth.get() == 1);
-      entry.release.countDown();
-      until(() -> entry.opened.get() == 1);
+      require(entry.opened.get() == 1, "连点未保持单次导航");
       main(
           driver,
           () -> {
             for (int i = 0; i < 30; i++)
               entry.requireView().findViewById(R.id.launch_start).performClick();
           });
-      require(entry.auth.get() == 1 && entry.opened.get() == 1, "已打开后重复进入");
+      require(entry.opened.get() == 1, "已打开后重复进入");
 
-      // 销毁视图后重建同一 Fragment，旧回调不能启动页面或解除新请求的锁。
+      // 页面返回/重建允许显式重入；Launch 不再拥有鉴权工作线程或迟到的 HTTP 回调。
       rebuild(driver, host, entry);
-      entry.release = new CountDownLatch(1);
       click(driver, entry);
-      until(() -> entry.auth.get() == 2);
-      CountDownLatch old = entry.release;
+      require(entry.opened.get() == 2, "重建后不能显式重新进入");
       rebuild(driver, host, entry);
-      entry.release = new CountDownLatch(1);
-      click(driver, entry);
-      until(() -> entry.auth.get() == 3);
-      old.countDown();
-      entry.authThreads.get(1).join(5000);
-      require(!entry.authThreads.get(1).isAlive(), "旧鉴权线程未完成");
-      driver.waitForIdleSync();
-      require(entry.opened.get() == 1, "旧视图鉴权回调打开了页面");
-      main(
-          driver,
-          () ->
-              require(
-                  !entry.requireView().findViewById(R.id.launch_start).isEnabled(), "旧回调解除了新请求的锁"));
-      entry.release.countDown();
-      until(() -> entry.opened.get() == 2);
-
-      rebuild(driver, host, entry);
-      entry.throwAuth = true;
-      click(driver, entry);
-      untilUi(driver, () -> entry.requireView().findViewById(R.id.launch_start).isEnabled());
-      main(
-          driver,
-          () ->
-              require(
-                  ((TextView) entry.requireView().findViewById(R.id.launch_status))
-                      .getText()
-                      .toString()
-                      .contains("鉴权失败"),
-                  "异常未显示可重试状态"));
-      require(entry.opened.get() == 2, "鉴权异常仍打开页面");
-      entry.throwAuth = false;
-
-      entry.emptyCookie = true;
-      click(driver, entry);
-      untilUi(driver, () -> entry.requireView().findViewById(R.id.launch_start).isEnabled());
-      require(entry.opened.get() == 2, "空 cookie 仍打开页面");
-      entry.emptyCookie = false;
       entry.throwOpen = true;
       click(driver, entry);
       untilUi(driver, () -> entry.requireView().findViewById(R.id.launch_start).isEnabled());
@@ -127,22 +80,36 @@ public final class FragmentEntrySelfTest {
                       .toString()
                       .contains("无法打开"),
                   "Activity 异常未返回可重试状态"));
+      require(entry.opened.get() == 2, "Activity 导航异常仍计入打开");
       entry.throwOpen = false;
-
-      entry.release = new CountDownLatch(1);
-      int authBefore = entry.auth.get();
       click(driver, entry);
-      until(() -> entry.auth.get() == authBefore + 1);
-      main(driver, () -> entry.generation++);
-      entry.release.countDown();
+      require(entry.opened.get() == 3, "Activity 导航异常后不能重试");
+
+      rebuild(driver, host, entry);
+      main(
+          driver,
+          () -> {
+            entry.generationReads = 0;
+            entry.changeGeneration = true;
+            enter(entry);
+          });
       untilUi(driver, () -> entry.requireView().findViewById(R.id.launch_start).isEnabled());
-      require(entry.opened.get() == 2, "Web 代次变化后仍打开旧页面");
-      result.accept("launch=PASS：连点只进入一次，鉴权失败和旧视图回调可安全返回");
+      require(entry.opened.get() == 3, "Web 代次变化后仍打开旧页面");
+      main(
+          driver,
+          () -> {
+            entry.changeGeneration = false;
+            entry.urlReads = 0;
+            entry.changeUrl = true;
+            enter(entry);
+          });
+      untilUi(driver, () -> entry.requireView().findViewById(R.id.launch_start).isEnabled());
+      require(entry.opened.get() == 3, "Web 地址变化后仍打开旧页面");
+      result.accept("launch=PASS：连点单次导航、重建重入、Activity异常可重试、派发前代次/地址围栏；鉴权由PreviewAuth单独验证");
 
       Bundle installed = new Bundle();
       installed.putBoolean("show_installed", true);
       plugin.setArguments(installed);
-      main(driver, fixture[0]::invalidateInstalledState);
       show(driver, host, container, plugin);
       until(() -> plugin.refreshes.get() == 1);
       untilUi(driver, () -> plugin.showsSafeMode(false));
@@ -152,7 +119,7 @@ public final class FragmentEntrySelfTest {
           driver,
           () -> {
             host.getSupportFragmentManager().beginTransaction().detach(plugin).commitNow();
-            fixture[0].invalidateInstalledState();
+            plugin.fixtureDirty = true;
             plugin.fixtureSafeMode = true;
             plugin.blocked = true;
             host.getSupportFragmentManager().beginTransaction().attach(plugin).commitNow();
@@ -160,7 +127,12 @@ public final class FragmentEntrySelfTest {
       Thread.sleep(650);
       require(plugin.refreshes.get() == 1, "安全启动未完成就刷新了旧状态");
       main(driver, () -> require(plugin.showsSafeMode(false), "未刷新前测试缓存不正确"));
-      plugin.blocked = false;
+      main(
+          driver,
+          () -> {
+            plugin.blocked = false;
+            plugin.publishFixture(); // 模拟应用级引擎主动发布结果；页面没有 500ms 门禁轮询。
+          });
       until(() -> plugin.refreshes.get() == 2);
       untilUi(driver, () -> plugin.showsSafeMode(true));
       rebuild(driver, host, plugin);
@@ -170,7 +142,7 @@ public final class FragmentEntrySelfTest {
           () -> {
             host.getSupportFragmentManager().beginTransaction().detach(plugin).commitNow();
             plugin.fixtureSafeMode = false;
-            fixture[0].invalidateInstalledState();
+            plugin.fixtureDirty = true;
             host.getSupportFragmentManager().beginTransaction().attach(plugin).commitNow();
           });
       until(() -> plugin.refreshes.get() == 3);
@@ -178,9 +150,8 @@ public final class FragmentEntrySelfTest {
       rebuild(driver, host, plugin);
       require(plugin.refreshes.get() == 3, "恢复后的普通返回重复刷新");
       result.accept("plugin=PASS：内存夹具的安全状态、启用开关、恢复按钮同步，刷新次数 1→2→3");
-      return "PASS：Launch 连点/空 cookie/鉴权异常/Activity 异常/旧视图/代次变化；Plugin 内存夹具安全状态、开关和恢复按钮同步，刷新次数 1→2→3";
+      return "PASS：Launch 单次导航/重建重入/Activity异常重试/代次与地址围栏；Plugin 内存夹具安全状态、开关和恢复按钮同步，刷新次数 1→2→3";
     } finally {
-      entry.release.countDown();
       main(
           driver,
           () -> {
@@ -211,6 +182,16 @@ public final class FragmentEntrySelfTest {
           host.getSupportFragmentManager().beginTransaction().attach(fragment).commitNow();
         });
     driver.waitForIdleSync();
+  }
+
+  private static void enter(EntryProbe entry) {
+    try {
+      java.lang.reflect.Method enter = LaunchFragment.class.getDeclaredMethod("enterWeb");
+      enter.setAccessible(true);
+      enter.invoke(entry);
+    } catch (Exception error) {
+      throw new AssertionError("调用进入边界失败", error);
+    }
   }
 
   private static void click(Instrumentation driver, EntryProbe entry) {
@@ -251,66 +232,88 @@ public final class FragmentEntrySelfTest {
   }
 
   public static class EntryProbe extends LaunchFragment {
-    final AtomicInteger auth = new AtomicInteger(), opened = new AtomicInteger();
-    final java.util.List<Thread> authThreads = new java.util.concurrent.CopyOnWriteArrayList<>();
-    volatile CountDownLatch release = new CountDownLatch(1);
-    volatile boolean throwAuth, emptyCookie, throwOpen;
-    long generation;
+    final AtomicInteger opened = new AtomicInteger();
+    boolean throwOpen, changeGeneration, changeUrl;
+    int generationReads, urlReads;
 
     @Override
     String webEntryUrl() {
-      return "http://127.0.0.1:3080/?token=debug-fixture";
+      return changeUrl && urlReads++ > 0
+          ? "http://127.0.0.1:3081/?token=changed-fixture"
+          : "http://127.0.0.1:3080/?token=debug-fixture";
     }
 
     @Override
     long webEntryGeneration() {
-      return generation;
-    }
-
-    @Override
-    String exchangeWebEntryCookie() {
-      CountDownLatch gate = release;
-      authThreads.add(Thread.currentThread());
-      auth.incrementAndGet();
-      if (throwAuth) throw new IllegalStateException("调试鉴权异常");
-      try {
-        if (!gate.await(5, TimeUnit.SECONDS)) throw new IllegalStateException("自测未释放鉴权");
-      } catch (InterruptedException error) {
-        Thread.currentThread().interrupt();
-        throw new IllegalStateException(error);
-      }
-      return emptyCookie ? null : "dsh-auth-fixture=debug";
+      return changeGeneration && generationReads++ > 0 ? 8 : 7;
     }
 
     @Override
     void openWebEntry(Activity activity, String url, String cookie) {
+      require(cookie == null, "Launch 不应传递预鉴权 cookie");
       if (throwOpen) throw new IllegalStateException("调试 Activity 异常");
       opened.incrementAndGet();
     }
   }
 
+  /** 构造纯内存目录快照，不创建生产/Activity Repository，不触发后台执行。 */
+  static PluginRepository.State fixtureState(
+      List<PluginRepository.Item> items, boolean busy, String message, boolean safeMode)
+      throws Exception {
+    var registry = new com.deepseekharness.app.plugins.PluginRegistry();
+    var source =
+        new com.deepseekharness.app.plugins.PluginSourceIdentity(
+            new java.io.File("/fixture/plugin-ui/data"),
+            "memory-data",
+            0,
+            new java.io.File("/fixture/plugin-ui/rootfs"),
+            "memory-rootfs",
+            0,
+            "fixture",
+            0);
+    registry.completeQuery(registry.beginQuery(source), items, Collections.emptyList(), safeMode);
+    Constructor<PluginRepository.State> state =
+        PluginRepository.State.class.getDeclaredConstructor(
+            com.deepseekharness.app.plugins.PluginRegistry.Snapshot.class,
+            List.class,
+            boolean.class,
+            String.class,
+            boolean.class,
+            int.class);
+    state.setAccessible(true);
+    return state.newInstance(
+        registry.snapshot(), Collections.emptyList(), busy, message, false, -1);
+  }
+
   public static class PluginProbe extends PluginFragment {
     final AtomicInteger refreshes = new AtomicInteger();
+    final MutableLiveData<PluginRepository.State> fixture = new MutableLiveData<>();
     volatile boolean blocked;
-    boolean fixtureSafeMode;
-    PluginRepository fixtureRepository;
+    boolean fixtureSafeMode, fixtureDirty = true;
     volatile Throwable fixtureFailure;
 
     @Override
-    PluginRepository installedRepository() {
-      return new ViewModelProvider(requireActivity()).get(PluginRepository.class);
+    com.deepseekharness.app.plugins.PluginManagementEngine managementEngine() {
+      return null;
     }
 
     @Override
-    boolean pluginRefreshBlocked() {
-      return blocked;
+    androidx.lifecycle.LiveData<PluginRepository.State> installedState() {
+      return fixture;
+    }
+
+    @Override
+    boolean safeModeActive() {
+      return fixture.getValue() != null && fixture.getValue().catalog.safeMode;
     }
 
     @Override
     void syncInstalledState() {
+      if (!blocked && fixtureDirty) publishFixture();
+    }
+
+    void publishFixture() {
       try {
-        // 独立测试宿主的 ViewModel；只发布内存夹具，不调用 refresh/safeMode/runPluginManager。
-        fixtureRepository = new ViewModelProvider(requireActivity()).get(PluginRepository.class);
         Constructor<PluginRepository.Item> item =
             PluginRepository.Item.class.getDeclaredConstructor(JSONObject.class);
         item.setAccessible(true);
@@ -323,18 +326,10 @@ public final class FragmentEntrySelfTest {
                         .put("version", "0.0.0")
                         .put("available", true)
                         .put("enabled", !fixtureSafeMode)));
-        Field safe = PluginRepository.class.getDeclaredField("safeMode");
-        safe.setAccessible(true);
-        safe.setBoolean(fixtureRepository, fixtureSafeMode);
-        Field cached = PluginRepository.class.getDeclaredField("items");
-        cached.setAccessible(true);
-        cached.set(fixtureRepository, items);
-        Constructor<PluginRepository.State> state =
-            PluginRepository.State.class.getDeclaredConstructor(
-                List.class, boolean.class, String.class);
-        state.setAccessible(true);
-        ((MutableLiveData<PluginRepository.State>) fixtureRepository.state())
-            .setValue(state.newInstance(items, false, fixtureSafeMode ? "测试夹具：安全模式" : "测试夹具：普通模式"));
+        fixture.setValue(
+            fixtureState(
+                items, false, fixtureSafeMode ? "测试夹具：安全模式" : "测试夹具：普通模式", fixtureSafeMode));
+        fixtureDirty = false;
         refreshes.incrementAndGet();
       } catch (Exception error) {
         fixtureFailure = error;
@@ -345,16 +340,20 @@ public final class FragmentEntrySelfTest {
     boolean showsSafeMode(boolean safe) {
       if (fixtureFailure != null) throw new AssertionError("发布插件夹具失败", fixtureFailure);
       View root = getView();
-      if (root == null || fixtureRepository == null || fixtureRepository.isSafeMode() != safe)
-        return false;
-      if ((root.findViewById(R.id.btnPluginRestore).getVisibility() == View.VISIBLE) != safe)
+      if (root == null || fixture.getValue() == null || fixture.getValue().catalog.safeMode != safe)
         return false;
       RecyclerView list = root.findViewById(R.id.pluginList);
-      RecyclerView.ViewHolder holder = list.findViewHolderForAdapterPosition(0);
-      if (holder == null) return false;
-      Switch toggle = holder.itemView.findViewById(R.id.pluginSwitch);
+      // 恢复按钮在 footer；插件从位置 1 开始，位置 0 是 header。
+      if ((find(R.id.btnPluginRestore).getVisibility() == View.VISIBLE) != safe) return false;
+      RecyclerView.ViewHolder holder = list.findViewHolderForAdapterPosition(1);
+      if (holder == null) {
+        list.scrollToPosition(1);
+        return false;
+      }
+      android.widget.CompoundButton toggle = holder.itemView.findViewById(R.id.pluginSwitch);
       TextView status = holder.itemView.findViewById(R.id.pluginStatus);
-      return toggle.isChecked() != safe
+      return toggle != null
+          && toggle.isChecked() != safe
           && status.getText().toString().contains(safe ? "已禁用" : "已启用");
     }
   }

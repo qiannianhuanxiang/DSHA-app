@@ -4,6 +4,7 @@ import base64
 import concurrent.futures
 import functools
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -147,6 +148,15 @@ class Lifecycle:
 
     def metadata(self, root):
         return self.package_metadata(self.g['plugin_package'](root))
+
+    def capabilities(self, root, package, candidate_sha='', snapshot=None):
+        spec = importlib.util.spec_from_file_location('plugin_capabilities', os.path.join(os.path.dirname(__file__), 'plugin-capabilities.py'))
+        module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+        snapshot = snapshot or {}
+        report = module.analyze(root, package, candidate_sha=candidate_sha,
+                                lock_sha=snapshot.get('lockSha256', ''), resolved=snapshot.get('resolved', []))
+        report['runtimeDsh'] = self.dsh_version()
+        return report
 
     def package_metadata(self, pkg):
         author = pkg.get('author', '')

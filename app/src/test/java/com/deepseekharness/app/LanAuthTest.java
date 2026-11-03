@@ -34,6 +34,37 @@ public class LanAuthTest {
   }
 
   @Test
+  public void currentCookieStillCleansAFreshlyCopiedCredentialLink() {
+    assertEquals(
+        LanAuth.AUTH_OK_SET_COOKIE,
+        LanAuth.tokenOk(
+            "GET /?token=" + TOKEN + " HTTP/1.1\r\nCookie: dsha_lan=" + TOKEN + "\r\n\r\n", TOKEN));
+  }
+
+  @Test
+  public void cleanRedirectPreservesCallbackAndEncodedValues() {
+    assertEquals(
+        "/auth/callback?code=a%2Bb&state=x%2Fy",
+        LanAuth.cleanRedirectTarget("/auth/callback?token=" + TOKEN + "&code=a%2Bb&state=x%2Fy"));
+    assertEquals(
+        "/chat?token2=keep", LanAuth.cleanRedirectTarget("/chat?token2=keep&token=" + TOKEN));
+    assertEquals("/", LanAuth.cleanRedirectTarget("/?token=" + TOKEN));
+  }
+
+  @Test
+  public void cleanRedirectCannotBecomeAnExternalAuthorityOrHeader() {
+    for (String target :
+        new String[] {
+          "//external.invalid/path",
+          "/\\external.invalid/path",
+          "https://external.invalid/",
+          "/path\r\nX-Fixture: value",
+          "/path#fragment",
+          null
+        }) assertEquals("/", LanAuth.cleanRedirectTarget(target));
+  }
+
+  @Test
   public void wrongTokenDenied() {
     assertEquals(
         LanAuth.AUTH_DENY,
@@ -119,5 +150,21 @@ public class LanAuthTest {
     assertEquals(
         LanAuth.AUTH_DENY, LanAuth.tokenOk("GET /?token=" + old + " HTTP/1.1\r\n\r\n", current));
     assertFalse(LanAuth.stripTokenFromUrl("/?token=" + current).contains(current));
+  }
+
+  @Test
+  public void missingInvalidAndUnavailableCredentialsGetDifferentGuidance() {
+    assertEquals(
+        com.deepseekharness.app.util.LanFailureResponse.Reason.TOKEN_MISSING,
+        LanAuth.denialReason("GET / HTTP/1.1\r\nReferer: /?token=old\r\n\r\n", TOKEN));
+    assertEquals(
+        com.deepseekharness.app.util.LanFailureResponse.Reason.TOKEN_INVALID,
+        LanAuth.denialReason("GET /?token=old HTTP/1.1\r\n\r\n", TOKEN));
+    assertEquals(
+        com.deepseekharness.app.util.LanFailureResponse.Reason.TOKEN_INVALID,
+        LanAuth.denialReason("GET / HTTP/1.1\r\nCookie: dsha_lan=old\r\n\r\n", TOKEN));
+    assertEquals(
+        com.deepseekharness.app.util.LanFailureResponse.Reason.TOKEN_UNAVAILABLE,
+        LanAuth.denialReason("GET / HTTP/1.1\r\n\r\n", ""));
   }
 }

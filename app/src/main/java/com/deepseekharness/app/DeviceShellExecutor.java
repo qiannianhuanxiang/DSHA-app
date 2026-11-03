@@ -87,7 +87,7 @@ public final class DeviceShellExecutor {
     try {
       if (identity == null) throw new IOException("SELF_PACKAGE_UNVERIFIED");
       DeviceShellPolicy.Plan plan =
-          DeviceShellPolicy.inspectVirtualScreenLaunch(command, identity.source, identity.name);
+          DeviceShellPolicy.inspectManagedVirtualScreen(command, identity.source, identity.name);
       if (!plan.allowed()) return plan.reason + "\n[EXIT=126]";
       return runner.run(plan.argv);
     } catch (IOException | IllegalArgumentException error) {

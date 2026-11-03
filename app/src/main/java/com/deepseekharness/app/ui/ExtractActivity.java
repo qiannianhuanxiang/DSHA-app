@@ -7,7 +7,6 @@ import android.os.Looper;
 import android.view.View;
 import android.view.WindowManager;
 import android.widget.Button;
-import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.TextView;
 import androidx.annotation.Nullable;
@@ -24,12 +23,11 @@ public class ExtractActivity extends AppCompatActivity {
   private HarnessController controller;
   private TextView status, detail, error;
   private ProgressBar spinner, progress;
-  private Button retry, enter, format;
+  private Button retry, enter;
   private long taskId;
   private boolean automaticEntry;
   private boolean automaticDeclined;
   private boolean rebuildRequested;
-  private boolean freshStartScheduled;
   private String lastRender = "";
   private Boolean cachedReady;
   private long cachedReadyTaskId = -1;
@@ -56,43 +54,20 @@ public class ExtractActivity extends AppCompatActivity {
     progress = findViewById(R.id.extract_progress);
     ((TextView) findViewById(R.id.extract_title))
         .setText(com.deepseekharness.app.util.UiText.text("运行环境维护"));
-    LinearLayout content = findViewById(R.id.extract_actions);
-    retry = new androidx.appcompat.widget.AppCompatButton(this);
-    enter = new androidx.appcompat.widget.AppCompatButton(this);
-    format = new androidx.appcompat.widget.AppCompatButton(this);
-    retry.setBackgroundResource(R.drawable.bg_btn_primary);
-    retry.setTextColor(getColorStateList(R.color.button_primary_text));
-    retry.setTextSize(14);
-    retry.setAllCaps(false);
-    enter.setBackgroundResource(R.drawable.bg_action_plain);
-    enter.setTextColor(getColor(R.color.primary));
-    enter.setTextSize(13);
-    enter.setAllCaps(false);
-    format.setBackgroundResource(R.drawable.bg_action_plain);
-    format.setTextColor(getColor(R.color.err));
-    format.setTextSize(13);
-    format.setAllCaps(false);
-    content.addView(retry, new LinearLayout.LayoutParams(-1, -2));
-    content.addView(enter, new LinearLayout.LayoutParams(-1, -2));
-    Button emergency = new androidx.appcompat.widget.AppCompatButton(this);
+    retry = findViewById(R.id.extract_retry);
+    enter = findViewById(R.id.extract_enter);
+    Button emergency = findViewById(R.id.extract_emergency);
+    Button logs = findViewById(R.id.extract_logs);
     emergency.setText(
         com.deepseekharness.app.util.UiText.choose("启动应急 DSH", "Start emergency DSH"));
-    emergency.setBackgroundResource(R.drawable.bg_btn);
-    emergency.setTextColor(getColorStateList(R.color.button_text));
-    emergency.setTextSize(15);
-    emergency.setAllCaps(false);
     emergency.setOnClickListener(v -> startActivity(new Intent(this, RecoveryActivity.class)));
-    content.addView(emergency, new LinearLayout.LayoutParams(-1, -2));
-    Button logs = new androidx.appcompat.widget.AppCompatButton(this);
     logs.setText(com.deepseekharness.app.util.UiText.choose("查看本次维护记录", "View maintenance record"));
     logs.setOnClickListener(v -> startActivity(DiagnosticActivity.downloadLogs(this)));
-    content.addView(logs, new LinearLayout.LayoutParams(-1, -2));
-    content.addView(format, new LinearLayout.LayoutParams(-1, -2));
     retry.setOnClickListener(
         v -> {
           boolean recovery = task.pendingMaintenance();
           boolean update = !rebuildRequested && controller.proot().canUpdateManagedRuntime();
-          new com.deepseekharness.app.ui.DshaDialogBuilder(this)
+          new com.deepseekharness.app.ui.DshaDialogBuilder(this, true)
               .setTitle(
                   recovery
                       ? com.deepseekharness.app.util.UiText.text("恢复原环境？")
@@ -123,9 +98,6 @@ public class ExtractActivity extends AppCompatActivity {
         });
     enter.setText(com.deepseekharness.app.util.UiText.text("进入主界面"));
     enter.setOnClickListener(v -> proceed());
-    format.setText(
-        com.deepseekharness.app.util.UiText.choose("格式化并全新开始", "Format and start fresh"));
-    format.setOnClickListener(v -> confirmFormat());
     taskId =
         saved == null
             ? getIntent().getLongExtra("data_task_id", 0)
@@ -150,7 +122,7 @@ public class ExtractActivity extends AppCompatActivity {
           getSharedPreferences("dsha_environment_upgrade", MODE_PRIVATE);
       String attemptKey = "";
       try {
-        attemptKey = "runtime:" + controller.proot().expectedRuntimeDescriptor().id();
+        attemptKey = com.deepseekharness.app.core.EnvironmentAccess.candidateAttemptKey(controller);
       } catch (java.io.IOException invalid) {
       }
       if (!force
@@ -159,7 +131,10 @@ public class ExtractActivity extends AppCompatActivity {
               task.busy(),
               task.pendingMaintenance(),
               attemptKey,
-              attempts.getString("attempted_identity", ""))) {
+              attempts.getString("attempted_identity", ""),
+              task.snapshot().status,
+              controller.isEnvironmentReady(),
+              controller.hasUnresolvedWebSession())) {
         // 先记一次尝试再启动应用级任务；旋转、失败和进程重建都不会重复覆盖旧环境。
         if (attempts.edit().putString("attempted_identity", attemptKey).commit()) {
           if (task.updateEnvironment()) {
@@ -172,12 +147,11 @@ public class ExtractActivity extends AppCompatActivity {
     // 从受限主界面重新查看时也展示上次失败；自动重试判定已完成，不能因此阻止修复包升级。
     BackupTaskState.Snapshot previous = task.snapshot();
     if (taskId == 0
-        && !controller.isEnvironmentReady()
+        && (!controller.isEnvironmentReady()
+            || !com.deepseekharness.app.core.EnvironmentAccess.runtimeLatest(controller))
         && (previous.status == BackupTaskState.Status.FAILED
             || previous.status == BackupTaskState.Status.INTERRUPTED)) taskId = previous.id;
     render();
-    if (saved == null && getIntent().getBooleanExtra("request_factory_reset", false))
-      main.post(this::confirmFormat);
   }
 
   private final Runnable refresh =
@@ -196,8 +170,6 @@ public class ExtractActivity extends AppCompatActivity {
         pending = task.pendingMaintenanceForUi(),
         executionBusy = task.busy();
     boolean ready = environmentReady(s, busy, pending);
-    boolean formatTask = task.isFactoryReset(taskId),
-        formatComplete = task.isCompletedFactoryReset(taskId);
     String renderKey =
         s.id
             + ":"
@@ -213,9 +185,7 @@ public class ExtractActivity extends AppCompatActivity {
             + ":"
             + ready
             + ":"
-            + taskId
-            + ":"
-            + formatComplete;
+            + taskId;
     if (renderKey.equals(lastRender)) return;
     lastRender = renderKey;
     if (busy) getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
@@ -224,20 +194,13 @@ public class ExtractActivity extends AppCompatActivity {
     progress.setVisibility(busy ? View.VISIBLE : View.GONE);
     progress.setIndeterminate(true);
     ((TextView) findViewById(R.id.extract_title))
-        .setText(
-            formatTask
-                ? com.deepseekharness.app.util.UiText.choose("格式化 DSHA", "Format DSHA")
-                : com.deepseekharness.app.util.UiText.text("运行环境维护"));
+        .setText(com.deepseekharness.app.util.UiText.text("运行环境维护"));
     status.setText(
-        formatComplete
-            ? com.deepseekharness.app.util.UiText.choose("格式化完成", "Formatting complete")
-            : formatTask && busy
-                ? com.deepseekharness.app.util.UiText.choose("正在格式化 DSHA", "Formatting DSHA")
-                : busy
-                    ? com.deepseekharness.app.util.UiStateText.render(s.kind)
-                    : pending
-                        ? com.deepseekharness.app.util.UiText.text("上次维护未完成，请先恢复原环境")
-                        : com.deepseekharness.app.util.UiText.text("环境维护"));
+        busy
+            ? com.deepseekharness.app.util.UiStateText.render(s.kind)
+            : pending
+                ? com.deepseekharness.app.util.UiText.text("上次维护未完成，请先恢复原环境")
+                : com.deepseekharness.app.util.UiText.text("环境维护"));
     boolean mine = taskId != 0 && taskId == s.id;
     detail.setVisibility(View.VISIBLE);
     detail.setText(
@@ -257,10 +220,10 @@ public class ExtractActivity extends AppCompatActivity {
               s.lastStage.isEmpty()
                   ? com.deepseekharness.app.util.UiText.choose(
                       "旧记录未提供；请查看维护日志", "Not available in the old record; inspect maintenance logs")
-                  : com.deepseekharness.app.util.UiStateText.render(s.lastStage),
+                  : com.deepseekharness.app.util.LogCompactor.compactReason(
+                      com.deepseekharness.app.util.UiStateText.render(s.lastStage), 240),
               com.deepseekharness.app.util.MaintenanceErrorText.render(s.detail)));
-    boolean incomplete =
-        mine && s.status == BackupTaskState.Status.SUCCEEDED && !ready && !formatTask;
+    boolean incomplete = mine && s.status == BackupTaskState.Status.SUCCEEDED && !ready;
     error.setVisibility(failed || incomplete || automaticDeclined ? View.VISIBLE : View.GONE);
     error.setText(
         incomplete
@@ -281,36 +244,10 @@ public class ExtractActivity extends AppCompatActivity {
                 ? com.deepseekharness.app.util.UiText.text("更新运行时")
                 : com.deepseekharness.app.util.UiText.text("保护数据并重建"));
     retry.setEnabled(!executionBusy);
-    retry.setVisibility(formatTask ? View.GONE : View.VISIBLE);
-    enter.setVisibility(formatTask && (busy || formatComplete) ? View.GONE : View.VISIBLE);
     enter.setText(
         !busy && !pending && ready
             ? com.deepseekharness.app.util.UiText.text("进入主界面")
             : com.deepseekharness.app.util.UiText.text("进入受限主界面 · 查看日志与配置"));
-    format.setVisibility(formatTask && (busy || formatComplete) ? View.GONE : View.VISIBLE);
-    format.setEnabled(!executionBusy);
-    if (formatComplete && !freshStartScheduled) {
-      freshStartScheduled = true;
-      main.postDelayed(
-          () -> {
-            if (isFinishing() || isDestroyed()) return;
-            if (task.completeFactoryReset(taskId) || !controller.config().isWelcomed()) {
-              // 系统清除数据过去靠进程重启恢复默认语言/主题；应用内格式化需显式重载。
-              LanguageController.apply(this);
-              ThemeController.apply(this);
-              Intent welcome =
-                  new Intent(this, WelcomeActivity.class)
-                      .setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
-              startActivity(welcome);
-              finish();
-            } else {
-              freshStartScheduled = false;
-              lastRender = "";
-              render();
-            }
-          },
-          900);
-    }
     if (com.deepseekharness.app.util.EnvironmentIdentity.mayAdvanceAfterMaintenance(
         automaticEntry, mine, s.status == BackupTaskState.Status.SUCCEEDED, busy, pending, ready)) {
       automaticEntry = false;
@@ -342,63 +279,17 @@ public class ExtractActivity extends AppCompatActivity {
     return cachedReady;
   }
 
-  private void confirmFormat() {
-    new DshaDialogBuilder(this)
-        .setTitle(
-            com.deepseekharness.app.util.UiText.choose("格式化并全新开始？", "Format and start fresh?"))
-        .setMessage(
-            com.deepseekharness.app.util.UiText.choose(
-                "这会永久删除 DSHA 的运行环境、会话、配置、API Key、插件和本机自动备份，并尝试清理旧版 Documents/dshdata。公共或外置目录不可访问时会记录提示，不会阻止私有数据完成格式化；手动导出的备份与其他个人目录会保留。",
-                "This permanently deletes the DSHA runtime, conversations, configuration, API key, plugins, and local automatic backups, and attempts to remove legacy Documents/dshdata. Unavailable public or external storage is reported without blocking private-data formatting. Exported backups and other personal folders stay untouched."))
-        .setNegativeButton(com.deepseekharness.app.util.UiText.choose("取消", "Cancel"), null)
-        .setPositiveButton(
-            com.deepseekharness.app.util.UiText.choose("继续", "Continue"),
-            (dialog, which) -> confirmFormatFinal())
-        .show();
-  }
-
-  private void confirmFormatFinal() {
-    new DshaDialogBuilder(this)
-        .setTitle(com.deepseekharness.app.util.UiText.choose("最后确认", "Final confirmation"))
-        .setMessage(
-            com.deepseekharness.app.util.UiText.choose(
-                "格式化不可撤销。确认后会展示清理过程，完成时直接返回欢迎页并重新准备环境。",
-                "Formatting cannot be undone. Progress will be shown, then DSHA will return directly to welcome and prepare a fresh environment."))
-        .setNegativeButton(com.deepseekharness.app.util.UiText.choose("返回", "Back"), null)
-        .setPositiveButton(
-            com.deepseekharness.app.util.UiText.choose("删除全部并格式化", "Delete all and format"),
-            (dialog, which) -> {
-              if (task.factoryReset()) {
-                taskId = task.snapshot().id;
-                automaticEntry = false;
-                automaticDeclined = false;
-              } else
-                new DshaDialogBuilder(this)
-                    .setTitle(
-                        com.deepseekharness.app.util.UiText.choose("暂时无法格式化", "Cannot format yet"))
-                    .setMessage(
-                        com.deepseekharness.app.util.UiText.choose(
-                            "另一个任务正在运行，请结束后重试。",
-                            "Another task is running. Try again after it finishes."))
-                    .setPositiveButton(
-                        com.deepseekharness.app.util.UiText.choose("知道了", "OK"), null)
-                    .show();
-              render();
-            })
-        .show();
-  }
-
   private void proceed() {
     boolean limited =
         task.maintenanceBusy() || task.pendingMaintenance() || !controller.isEnvironmentReady();
-    if (limited) controller.config().allowLimitedEntry(controller.proot().environmentIdentity());
+    if (limited)
+      controller
+          .config()
+          .allowLimitedEntry(
+              com.deepseekharness.app.core.EnvironmentAccess.limitedEntryKey(controller));
     Intent intent =
-        new Intent(
-            this,
-            getIntent().getBooleanExtra("first_setup", false) && !limited
-                ? ModelSetupActivity.class
-                : MainActivity.class);
-    intent.putExtra("first_run", getIntent().getBooleanExtra("first_setup", false));
+        FirstRunWebStart.mainIntent(
+            this, getIntent().getBooleanExtra("first_setup", false) && !limited);
     intent.putExtra("limited_entry", limited);
     intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
     startActivity(intent);

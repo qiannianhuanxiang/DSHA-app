@@ -14,69 +14,9 @@
   "nonFindings": [
     {
       "kind": "translated_choose_fragment_concat",
-      "file": "app/src/main/java/com/deepseekharness/app/core/BackupTask.java",
-      "signature": "UiText.choose(\"正在尝试清理旧版 Documents/dshdata；手动导出的备份与其他个人目录会保留…\",\"Attempting to remove legacy Documents/dshdata; exported backups and other personal folders stay untouched…\")+",
-      "sourceSha256": "59c698950d49d332d69243d227539cdeb360c8074c6d44608f8c9aef8569c5b6",
-      "occurrences": 1,
-      "classification": "independent_complete_paragraph_join",
-      "reason": "A complete translated stage sentence is followed by an independent newline-prefixed progress line. The count line now uses the registered full template with raw entries and formatted bytes; the six stage sentences do not embed label fragments.",
-      "evidence": "docs/audits/build156/choose-complete-paragraph-evidence.json"
-    },
-    {
-      "kind": "translated_choose_fragment_concat",
-      "file": "app/src/main/java/com/deepseekharness/app/core/BackupTask.java",
-      "signature": "UiText.choose(\"正在清除运行环境、会话和插件…\",\"Removing the runtime, conversations, and plugins…\")+",
-      "sourceSha256": "59c698950d49d332d69243d227539cdeb360c8074c6d44608f8c9aef8569c5b6",
-      "occurrences": 1,
-      "classification": "independent_complete_paragraph_join",
-      "reason": "A complete translated stage sentence is followed by an independent newline-prefixed progress line. The count line now uses the registered full template with raw entries and formatted bytes; the six stage sentences do not embed label fragments.",
-      "evidence": "docs/audits/build156/choose-complete-paragraph-evidence.json"
-    },
-    {
-      "kind": "translated_choose_fragment_concat",
-      "file": "app/src/main/java/com/deepseekharness/app/core/BackupTask.java",
-      "signature": "UiText.choose(\"正在清除本机备份和应用私有文件…\",\"Removing local backups and private app files…\")+",
-      "sourceSha256": "59c698950d49d332d69243d227539cdeb360c8074c6d44608f8c9aef8569c5b6",
-      "occurrences": 1,
-      "classification": "independent_complete_paragraph_join",
-      "reason": "A complete translated stage sentence is followed by an independent newline-prefixed progress line. The count line now uses the registered full template with raw entries and formatted bytes; the six stage sentences do not embed label fragments.",
-      "evidence": "docs/audits/build156/choose-complete-paragraph-evidence.json"
-    },
-    {
-      "kind": "translated_choose_fragment_concat",
-      "file": "app/src/main/java/com/deepseekharness/app/core/BackupTask.java",
-      "signature": "UiText.choose(\"正在清理缓存和临时文件…\",\"Clearing caches and temporary files…\")+",
-      "sourceSha256": "59c698950d49d332d69243d227539cdeb360c8074c6d44608f8c9aef8569c5b6",
-      "occurrences": 1,
-      "classification": "independent_complete_paragraph_join",
-      "reason": "A complete translated stage sentence is followed by an independent newline-prefixed progress line. The count line now uses the registered full template with raw entries and formatted bytes; the six stage sentences do not embed label fragments.",
-      "evidence": "docs/audits/build156/choose-complete-paragraph-evidence.json"
-    },
-    {
-      "kind": "translated_choose_fragment_concat",
-      "file": "app/src/main/java/com/deepseekharness/app/core/BackupTask.java",
-      "signature": "UiText.choose(\"正在重置设置、设备授权和 API Key…\",\"Resetting settings, device grants, and the API key…\")+",
-      "sourceSha256": "59c698950d49d332d69243d227539cdeb360c8074c6d44608f8c9aef8569c5b6",
-      "occurrences": 1,
-      "classification": "independent_complete_paragraph_join",
-      "reason": "A complete translated stage sentence is followed by an independent newline-prefixed progress line. The count line now uses the registered full template with raw entries and formatted bytes; the six stage sentences do not embed label fragments.",
-      "evidence": "docs/audits/build156/choose-complete-paragraph-evidence.json"
-    },
-    {
-      "kind": "translated_choose_fragment_concat",
-      "file": "app/src/main/java/com/deepseekharness/app/core/BackupTask.java",
-      "signature": "UiText.choose(\"格式化完成，正在返回欢迎页…\",\"Formatting is complete. Returning to welcome…\")+",
-      "sourceSha256": "59c698950d49d332d69243d227539cdeb360c8074c6d44608f8c9aef8569c5b6",
-      "occurrences": 1,
-      "classification": "independent_complete_paragraph_join",
-      "reason": "A complete translated stage sentence is followed by an independent newline-prefixed progress line. The count line now uses the registered full template with raw entries and formatted bytes; the six stage sentences do not embed label fragments.",
-      "evidence": "docs/audits/build156/choose-complete-paragraph-evidence.json"
-    },
-    {
-      "kind": "translated_choose_fragment_concat",
       "file": "app/src/main/java/com/deepseekharness/app/core/EnvironmentMaintenance.java",
       "signature": "UiText.choose(\"环境重建完成，数据逐文件核验与运行试验通过。\\n\",\"Environment rebuilt; data verification and the runtime trial passed.\\n\")+",
-      "sourceSha256": "5d3d4ff417ef108ffb88ad994169fb4661c3e4e858b2959cf19b2b71cb50aac9",
+      "sourceSha256": "b4298523b8a96eff62323fee18b2527769163653893c85e4a008696c63354c29",
       "occurrences": 1,
       "classification": "independent_complete_paragraph_join",
       "reason": "The complete translated rebuild-result sentence ends with a newline. The separately assembled cleanup outcome is either its own complete static result or registered complete error templates preserving raw error arguments. Joining these paragraphs is intentional.",

@@ -1,0 +1,145 @@
+package com.deepseekharness.app.util;
+
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+/** 有界启动握手：允许 ROM 的普通输出，但只信任精确的受管标记。 */
+public final class VirtualScreenBootstrap {
+  private static final Pattern ERROR =
+      Pattern.compile("(?m)^DSHA_VSCREEN_ERROR=([A-Za-z0-9_]{1,160})\\r?$");
+  private final ByteArrayOutputStream line = new ByteArrayOutputStream();
+  private int bytes;
+  private String token = "";
+  private VirtualScreenHandshake handshake;
+
+  public VirtualScreenHandshake handshake() {
+    return handshake;
+  }
+
+  public String token() {
+    return token;
+  }
+
+  public void accept(int value) throws IOException {
+    if (++bytes > 65536) throw new IOException("CORE_BOOTSTRAP_LIMIT");
+    if (value == '\n') {
+      String text = line.toString(StandardCharsets.UTF_8.name()).replace("\r", "");
+      line.reset();
+      Matcher marker = ERROR.matcher(text);
+      String failure = marker.find() ? marker.group(1) : "";
+      if (!failure.isEmpty()) throw new IOException(failure);
+      String prefix = "DSHA_VSCREEN_BOOTSTRAP ";
+      if (text.startsWith(prefix)) {
+        String secret = text.substring(prefix.length());
+        try {
+          handshake = VirtualScreenHandshake.parse(secret);
+          token = handshake.token;
+        } catch (RuntimeException invalid) {
+          throw new IOException("CORE_BOOTSTRAP_INVALID");
+        }
+      }
+    } else {
+      if (line.size() >= 4096) throw new IOException("CORE_BOOTSTRAP_LIMIT");
+      line.write(value);
+    }
+  }
+
+  public static String error(String output) {
+    if (output == null) return "";
+    Matcher match = ERROR.matcher(output);
+    return match.find() ? match.group(1) : startFailureCode(output);
+  }
+
+  /** Return only fixed diagnostic codes; never copy launch output or credentials into logs. */
+  static String startFailureCode(String output) {
+    if (output == null) return "";
+    for (String stage : new String[] {"START", "COMMIT"})
+      for (String reason :
+          new String[] {
+            "AUTH_REJECTED", "TICKET_REJECTED", "PATH_UNVERIFIED", "CHANNEL_UNAVAILABLE",
+            "PLAN_REJECTED", "CREDENTIAL_UNAVAILABLE", "HTTP_ERROR", "TIMEOUT",
+            "CONNECT_FAILED", "INVALID_RESPONSE", "FAILED"
+          }) {
+        String code = "ADB_" + stage + "_BRIDGE_" + reason;
+        if (output.contains(code)) return code;
+      }
+    if (output.contains("ENVIRONMENT_BUSY")) return "ADB_ENVIRONMENT_BUSY";
+    if (output.contains("Native virtual-screen launch ticket missing")) return "ADB_TICKET_MISSING";
+    if (output.contains("Invalid native virtual-screen ticket")) return "ADB_TICKET_INVALID";
+    if (output.contains("[POLICY_BLOCKED]")) return "ADB_POLICY_BLOCKED";
+    if (output.contains("ADB_PROCESS_EXIT_UNCONFIRMED")) return "ADB_PROCESS_EXIT_UNCONFIRMED";
+    if (output.contains("EXECUTION_UNKNOWN")) return "ADB_EXECUTION_UNKNOWN";
+    if (output.contains("CONNECT_FAIL:")) return "ADB_CONNECT_FAILED";
+    if (output.contains("NO_KEY:")) return "ADB_PAIRING_KEY_MISSING";
+    if (output.contains("DEPS_MISSING:")) return "ADB_DEPENDENCIES_MISSING";
+    if (output.contains("INVALID_ARGUMENT:")) return "ADB_INVALID_ARGUMENT";
+    if (output.contains("ADB_CANCELLED:")) return "ADB_CANCELLED";
+    if (output.contains("ADB_ERROR:")) return "ADB_PROCESS_FAILED";
+    return "";
+  }
+
+  /** Log only established machine codes, never arbitrary exception/bridge messages. */
+  public static String diagnosticCode(String code) {
+    if (code == null) return "VSCREEN_FAILURE_UNCLASSIFIED";
+    if (code.matches(
+        "VSCREEN_CORE_(?:CONTEXT|IDENTITY|LAUNCH|SHELL_CONTEXT|BIND_LISTENER|BOOTSTRAP|REACHABILITY|START)_SDK[0-9]{1,3}_(?:PERMISSION_DENIED|DISPLAY_SERVICE_UNAVAILABLE|NATIVE_API_UNAVAILABLE|INVALID_DISPLAY_REQUEST|DISPLAY_STATE|DISPLAY_IO|OPERATION_FAILED|DISPLAY_CREATE_FAILED)"))
+      return code;
+    if (code.startsWith("VSCREEN_ADB_")) {
+      String suffix = code.substring("VSCREEN_".length());
+      if (suffix.equals(startFailureCode(suffix))) return code;
+    }
+    for (String known :
+        new String[] {
+          "VSCREEN_NOT_RUNNING",
+          "VSCREEN_START_IN_PROGRESS",
+          "VSCREEN_REVOKED",
+          "VSCREEN_START_CANCELLED",
+          "VSCREEN_START_RESULT_UNKNOWN",
+          "VSCREEN_START_UNKNOWN",
+          "VSCREEN_DISCONNECTED",
+          "VSCREEN_CLOSE_UNKNOWN",
+          "VSCREEN_JOURNAL_UNAVAILABLE",
+          "VSCREEN_JOURNAL_INVALID",
+          "VSCREEN_TRANSPORT_UNAVAILABLE",
+          "DEVICE_CHANNEL_UNAVAILABLE",
+          "SCREEN_TARGET_CHANGED",
+          "VSCREEN_UNSUPPORTED_LOW",
+          "VSCREEN_API_30_REQUIRED",
+          "VSCREEN_APPLICATION_SCOPE_UNAVAILABLE",
+          "INVALID_ORIENTATION",
+          "STALE_GENERATION",
+          "STALE_FRAME",
+          "INPUT_RESULT_UNKNOWN",
+          "INPUT_REJECTED",
+          "VSCREEN_INPUT_UNAVAILABLE",
+          "VSCREEN_PERMISSION_DENIED",
+          "VSCREEN_TRUSTED_DISPLAY_DENIED",
+          "VSCREEN_DISPLAY_SERVICE_UNAVAILABLE",
+          "VSCREEN_DISPLAY_CREATE_FAILED",
+          "VSCREEN_INVALID_DISPLAY_REQUEST",
+          "VSCREEN_DISPLAY_STATE",
+          "VSCREEN_DISPLAY_IO",
+          "VSCREEN_OPERATION_FAILED",
+          "VSCREEN_NATIVE_API_UNAVAILABLE",
+          "INVALID_PACKAGE",
+          "INVALID_TEXT",
+          "ACCESSIBILITY_REQUIRED_FOR_UNICODE",
+          "INVALID_NODE_ACTION",
+          "INVALID_EDITOR_ARGUMENTS",
+          "VSCREEN_RESPONSE_LIMIT",
+          "INVALID_EDITOR_OPERATION"
+        }) if (known.equals(code)) return code;
+    return "VSCREEN_FAILURE_UNCLASSIFIED";
+  }
+
+  public static String failureCode(String stage, int sdk, Throwable failure) {
+    String propagated = failure == null ? "" : error("DSHA_VSCREEN_ERROR=" + failure.getMessage());
+    if (!propagated.isEmpty() && propagated.startsWith("CORE_")) return propagated;
+    String type = VirtualScreenFailures.code(failure).substring("VSCREEN_".length());
+    String safeStage = stage != null && stage.matches("[A-Z_]{1,32}") ? stage : "START";
+    return "CORE_" + safeStage + "_SDK" + Math.max(0, sdk) + "_" + type;
+  }
+}

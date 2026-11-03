@@ -1,1 +1,3 @@
-[]
+- insert:
+    - id: dsh-tool-vscreen
+      name: dsh-tool-vscreen

@@ -43,7 +43,7 @@ final class CardSheet {
       String title,
       java.util.function.Supplier<java.util.List<String>> source,
       java.util.function.IntConsumer selected) {
-    CardPage page = new CardPage(context, title, "");
+    CardPage page = new CardPage(context, title, "", true);
     var dialog = create(context, page);
     java.util.List<String> values = source.get();
     for (int i = 0; i < values.size(); i++) {
@@ -67,7 +67,7 @@ final class CardSheet {
   }
 
   static void show(Context context, String title, String body) {
-    CardPage page = new CardPage(context, title, "");
+    CardPage page = new CardPage(context, title, "", true);
     TextView text = page.text(body, 13, R.color.text_secondary);
     text.setPadding(0, page.dp(14), 0, 0);
     text.setTextIsSelectable(true);

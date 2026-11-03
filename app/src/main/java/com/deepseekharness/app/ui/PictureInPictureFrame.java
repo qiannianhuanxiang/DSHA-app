@@ -19,6 +19,8 @@ final class PictureInPictureFrame extends FrameLayout {
    * repeatedly (the high-frequency PiP flicker reported on the tablet).
    * Keep one logical viewport for the whole PiP session and only scale the
    * already laid-out child into the current bounds.
+   * Geometry caching must still dispatch the child's own requestLayout().
+   * Child layout and value-deduplicated transforms are independent work.
    */
   private int compactViewportWidth = -1, compactViewportHeight = -1;
   private int measuredChildWidth = -1, measuredChildHeight = -1;
@@ -61,6 +63,8 @@ final class PictureInPictureFrame extends FrameLayout {
   void resumeViewport() {
     if (!compact) {
       frozen = false;
+      clearChildTransform();
+      resetGeometryCache();
       requestLayout();
     }
   }
@@ -124,6 +128,11 @@ final class PictureInPictureFrame extends FrameLayout {
     childTransformApplied = false;
   }
 
+  private boolean childRequestedLayout() {
+    for (int i = 0; i < getChildCount(); i++) if (getChildAt(i).isLayoutRequested()) return true;
+    return false;
+  }
+
   @Override
   protected void onMeasure(int widthSpec, int heightSpec) {
     if (!compact || viewportWidth <= 0 || viewportHeight <= 0) {
@@ -140,7 +149,12 @@ final class PictureInPictureFrame extends FrameLayout {
     }
     int[] viewport =
         drawingViewport(MeasureSpec.getSize(widthSpec), MeasureSpec.getSize(heightSpec));
-    if (viewport[0] != measuredChildWidth || viewport[1] != measuredChildHeight) {
+    if (PictureInPicturePolicy.mustDispatchChildLayout(
+        viewport[0],
+        viewport[1],
+        measuredChildWidth,
+        measuredChildHeight,
+        childRequestedLayout())) {
       for (int i = 0; i < getChildCount(); i++)
         getChildAt(i)
             .measure(
@@ -163,32 +177,44 @@ final class PictureInPictureFrame extends FrameLayout {
     float scale = PictureInPicturePolicy.scale(getWidth(), getHeight(), viewport[0], viewport[1]);
     float tx = (getWidth() - viewport[0] * scale) / 2f;
     float ty = (getHeight() - viewport[1] * scale) / 2f;
-    boolean geometryChanged =
-        viewport[0] != laidOutViewportWidth
-            || viewport[1] != laidOutViewportHeight
+    boolean layoutChild =
+        PictureInPicturePolicy.mustDispatchChildLayout(
+            viewport[0],
+            viewport[1],
+            laidOutViewportWidth,
+            laidOutViewportHeight,
+            childRequestedLayout());
+    boolean transformChanged =
+        !childTransformApplied
             || getWidth() != laidOutWidth
             || getHeight() != laidOutHeight
             || Float.compare(scale, laidOutScale) != 0
             || Float.compare(tx, laidOutTranslationX) != 0
             || Float.compare(ty, laidOutTranslationY) != 0;
-    if (!geometryChanged) return;
+    if (!layoutChild && !transformChanged) return;
     for (int i = 0; i < getChildCount(); i++) {
       View child = getChildAt(i);
-      child.layout(0, 0, viewport[0], viewport[1]);
-      child.setPivotX(0);
-      child.setPivotY(0);
-      child.setScaleX(scale);
-      child.setScaleY(scale);
-      child.setTranslationX(tx);
-      child.setTranslationY(ty);
+      if (layoutChild) child.layout(0, 0, viewport[0], viewport[1]);
+      if (transformChanged) {
+        child.setPivotX(0);
+        child.setPivotY(0);
+        child.setScaleX(scale);
+        child.setScaleY(scale);
+        child.setTranslationX(tx);
+        child.setTranslationY(ty);
+      }
     }
-    laidOutViewportWidth = viewport[0];
-    laidOutViewportHeight = viewport[1];
-    laidOutWidth = getWidth();
-    laidOutHeight = getHeight();
-    laidOutScale = scale;
-    laidOutTranslationX = tx;
-    laidOutTranslationY = ty;
-    childTransformApplied = true;
+    if (layoutChild) {
+      laidOutViewportWidth = viewport[0];
+      laidOutViewportHeight = viewport[1];
+    }
+    if (transformChanged) {
+      laidOutWidth = getWidth();
+      laidOutHeight = getHeight();
+      laidOutScale = scale;
+      laidOutTranslationX = tx;
+      laidOutTranslationY = ty;
+      childTransformApplied = true;
+    }
   }
 }

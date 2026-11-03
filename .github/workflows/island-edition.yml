@@ -1,0 +1,82 @@
+name: Island edition debug APK
+
+# 只在手动触发时运行：产出带独立包名（.island）的调试 APK，用于与本机正式 DSHA 并存验证。
+# 正式交付仍走 ci-package / 发布流程，本工作流不签名、不打 tag、不发布。
+on:
+  push:
+    branches: [island-edition]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Restore fixed build inputs from the release archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/inputs
+          gh release download v0.2.1-rc.3-20261027.1312 \
+            --repo "${{ github.repository }}" \
+            --pattern '*source.zip' --dir /tmp/inputs
+          sha256sum /tmp/inputs/*source.zip
+          unzip -q -o /tmp/inputs/*source.zip -d .
+          # 归档里也含发布时源码；恢复本分支的受跟踪文件，只保留未被跟踪的固定输入。
+          git checkout -f -- .
+          test -s app/src/main/assets/offline-rootfs.bin
+          test -s app/src/main/assets/dsh-runtime.bin
+          echo "inputs restored"
+
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+
+      - name: Android SDK components
+        run: |
+          set -euo pipefail
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+          "$SDKMANAGER" "platform-tools" "build-tools;36.0.0"
+          "$SDKMANAGER" "platforms;android-37.0" || "$SDKMANAGER" "platforms;android-37"
+          "$SDKMANAGER" --list_installed | sed -n '1,20p'
+
+      - name: Build island edition debug APK
+        run: |
+          set -euo pipefail
+          chmod +x gradlew
+          ./gradlew :app:assembleStandardDebug -Pdsha.islandEdition=true \
+            --no-daemon --console=plain
+
+      - name: Report APK identity
+        if: always()
+        run: |
+          APK=$(ls -1 app/build/outputs/apk/standard/debug/*.apk 2>/dev/null | head -1 || true)
+          if [ -n "$APK" ]; then
+            ls -l "$APK"
+            sha256sum "$APK"
+            "$ANDROID_HOME/build-tools/36.0.0/aapt2" dump badging "$APK" \
+              | grep -E 'package:|application-label:' | head -5
+          else
+            echo "no apk produced"
+          fi
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: dsha-island-debug
+          path: app/build/outputs/apk/standard/debug/*.apk
+          if-no-files-found: warn

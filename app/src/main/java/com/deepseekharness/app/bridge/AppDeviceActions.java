@@ -15,23 +15,42 @@ public final class AppDeviceActions {
   public static String launch(
       Context ctx,
       String pkg,
-      java.util.function.BiPredicate<String, String> authorize,
+      java.util.function.BiFunction<String, String, String> confirmationFailure,
       java.util.function.BooleanSupplier current) {
+    return "[ERR] EXPLICIT_CAPABILITY_REQUEST_REQUIRED";
+  }
+
+  public static String launch(
+      Context ctx,
+      String pkg,
+      java.util.function.BiFunction<String, String, String> confirmationFailure,
+      java.util.function.BooleanSupplier current,
+      com.deepseekharness.app.capabilities.CapabilityBroker broker,
+      com.deepseekharness.app.capabilities.CapabilityRequest request) {
+    boolean submitted = false;
     try {
       if (pkg.isEmpty()) return "NO_PKG";
-      boolean sensitive = com.deepseekharness.app.util.SensitiveAppPolicy.sensitive(pkg);
-      if (sensitive
-          && !authorize.test(com.deepseekharness.app.util.UiText.format("启动敏感应用：%s", pkg), pkg))
-        return "[ERR] USER_REJECTED";
+      if (request == null
+          || !(request.target instanceof AppLaunchTargetEvidence target)
+          || !pkg.equals(target.packageName)) return "[ERR] CAPABILITY_TARGET_CHANGED";
+      if (!current.getAsBoolean()) return "[ERR] SCREEN_RUN_CHANGED";
+      String failure =
+          confirmationFailure.apply(
+              com.deepseekharness.app.util.UiText.format("启动应用：%s", pkg), pkg);
+      if (failure != null) return "[ERR] " + failure;
       android.content.Intent i = ctx.getPackageManager().getLaunchIntentForPackage(pkg);
       if (i == null)
         return com.deepseekharness.app.util.UiText.format("NOT_FOUND: %s（该应用没有启动入口或未安装）", pkg);
       i.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
-      if (sensitive && !current.getAsBoolean()) return "[ERR] SCREEN_RUN_CHANGED";
+      if (!current.getAsBoolean()) return "[ERR] SCREEN_RUN_CHANGED";
+      if (broker == null || broker.claimDispatch(request) == null)
+        return "[ERR] CAPABILITY_NOT_AUTHORIZED";
+      submitted = true;
       ctx.startActivity(i);
       return com.deepseekharness.app.util.UiText.format("OK: 已启动 %s", pkg);
     } catch (Throwable e) {
-      return "ERROR: " + safeError(e);
+      return (submitted ? "[RESULT_UNKNOWN] APP_LAUNCH_RESULT_UNKNOWN: " : "ERROR: ")
+          + safeError(e);
     }
   }
 

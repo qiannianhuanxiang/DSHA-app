@@ -11,6 +11,11 @@ import android.os.Looper;
 import android.os.SystemClock;
 import org.json.JSONObject;
 import com.deepseekharness.app.util.VirtualScreenPolicy;
+import com.deepseekharness.app.util.VirtualScreenCoreIdentity;
+import com.deepseekharness.app.util.VirtualScreenHandshake;
+import com.deepseekharness.app.util.VirtualScreenFailures;
+import com.deepseekharness.app.util.VirtualScreenInputResult;
+import com.deepseekharness.app.util.VirtualScreenInputPolicy;
 import java.io.*;
 import java.net.*;
 import java.nio.ByteBuffer;
@@ -19,17 +24,23 @@ import java.util.*;
 import java.util.concurrent.*;
 
 /** 独立 shell/root 进程，只接受认证后的固定虚拟屏操作。 */
-@android.annotation.SuppressLint("NewApi")
 @androidx.annotation.RequiresApi(30)
 public final class VirtualScreenCore {
   private static final String CLASS = VirtualScreenCore.class.getName();
-  private static volatile long lastRequest = SystemClock.elapsedRealtime();
+  private static java.util.function.LongSupplier clock = SystemClock::elapsedRealtime;
+  private static volatile long lastRequest;
+  private static Runnable processExit = () -> System.exit(0);
+  private static DisplayFactory hostDisplayFactory;
+  private static java.util.function.Supplier<String> hostPackageObserver;
   private static volatile boolean running = true;
   private static String token;
   private static String selfPackage;
   private static Context context;
-  private static Session session;
+  private static VirtualScreenDisplaySession session;
+  private static VirtualScreenCoreIdentity identity;
   private static ServerSocket server;
+  private static String startupStage = "CONTEXT";
+  private static String missingDisplayFlags = "";
   private static final ThreadPoolExecutor CLIENTS =
       new ThreadPoolExecutor(
           2,
@@ -43,23 +54,132 @@ public final class VirtualScreenCore {
             return t;
           });
 
+  interface DisplayFactory {
+    VirtualScreenDisplaySession create(int width, int height) throws Exception;
+  }
+
+  interface HostListenerFactory {
+    ServerSocket bind() throws IOException;
+  }
+
+  /** Host fixtures replace platform facts only. Socket parsing, auth and route are production code. */
+  static final class HostControl implements AutoCloseable {
+    private final ServerSocket bound;
+    private final VirtualScreenHandshake endpoint;
+
+    private HostControl(ServerSocket bound, VirtualScreenHandshake endpoint) {
+      this.bound = bound;
+      this.endpoint = endpoint;
+    }
+
+    VirtualScreenHandshake handshake() {
+      return endpoint;
+    }
+
+    void tick() {
+      synchronized (VirtualScreenCore.class) {
+        if (server == bound && elapsed() - lastRequest > 60_000) shutdown(bound);
+      }
+    }
+
+    public void close() {
+      shutdown(bound);
+    }
+  }
+
+  static HostControl bindControlForHost(
+      VirtualScreenCoreIdentity birth,
+      DisplayFactory displays,
+      java.util.function.Supplier<String> packages,
+      java.util.function.LongSupplier monotonicClock,
+      Runnable exit)
+      throws IOException {
+    return bindControlForHost(
+        birth,
+        displays,
+        packages,
+        monotonicClock,
+        exit,
+        () -> new ServerSocket(0, 8, InetAddress.getByName("127.0.0.1")));
+  }
+
+  static synchronized HostControl bindControlForHost(
+      VirtualScreenCoreIdentity birth,
+      DisplayFactory displays,
+      java.util.function.Supplier<String> packages,
+      java.util.function.LongSupplier monotonicClock,
+      Runnable exit,
+      HostListenerFactory listeners)
+      throws IOException {
+    if (server != null && !server.isClosed()) throw new IOException("CORE_ALREADY_BOUND");
+    identity = java.util.Objects.requireNonNull(birth);
+    hostDisplayFactory = java.util.Objects.requireNonNull(displays);
+    hostPackageObserver = java.util.Objects.requireNonNull(packages);
+    clock = java.util.Objects.requireNonNull(monotonicClock);
+    processExit = java.util.Objects.requireNonNull(exit);
+    running = true;
+    lastRequest = elapsed();
+    token = randomToken();
+    server = listeners.bind();
+    VirtualScreenHandshake endpoint =
+        new VirtualScreenHandshake(server.getLocalPort(), token, identity);
+    startAcceptLoop(server, endpoint);
+    return new HostControl(server, endpoint);
+  }
+
+  static long elapsed() {
+    return clock.getAsLong();
+  }
+
+  private static void startAcceptLoop(ServerSocket bound, VirtualScreenHandshake endpoint) {
+    Thread accept =
+        new Thread(
+            () -> {
+              while (running && server == bound) {
+                try {
+                  Socket socket = bound.accept();
+                  try {
+                    CLIENTS.execute(() -> handle(bound, endpoint, socket));
+                  } catch (RejectedExecutionException full) {
+                    socket.close();
+                  }
+                } catch (IOException closed) {
+                  shutdown(bound);
+                }
+              }
+            },
+            "vscreen-listener");
+    accept.setDaemon(true);
+    accept.start();
+  }
+
   public static void main(String[] args) {
     try {
       if (android.os.Build.VERSION.SDK_INT < 30)
         throw new UnsupportedOperationException("API_30_REQUIRED");
       if (Arrays.asList(args).contains("--token"))
         throw new IllegalArgumentException("TOKEN_MUST_NOT_BE_IN_ARGV");
-      Context system = com.deepseekharness.app.runtime.PrivilegedPackageContext.systemContext();
+      Context system =
+          com.deepseekharness.app.runtime.PrivilegedPackageContext.virtualScreenContext();
+      startupStage = "IDENTITY";
       selfPackage = arg(args, "--package", "");
       if (!com.deepseekharness.app.util.SelfPackageIdentity.validName(selfPackage))
         throw new SecurityException("SELF_PACKAGE_UNVERIFIED");
-      int port = Integer.parseInt(arg(args, "--port", "8998"));
-      if (port < 8000 || port > 8999) throw new IllegalArgumentException("INVALID_PORT");
+      int port = Integer.parseInt(arg(args, "--port", "0"));
+      if (port != 0) throw new IllegalArgumentException("DYNAMIC_PORT_REQUIRED");
       String classPath = System.getProperty("java.class.path", "");
       if (!installedDshaApkPath(system).equals(classPath))
         throw new SecurityException("INVALID_CLASSPATH");
+      if (Arrays.asList(args).contains("--probe-exit")) {
+        printExitProof(VirtualScreenCoreIdentity.parse(arg(args, "--identity", "")));
+        System.exit(0);
+        return;
+      }
       if (Arrays.asList(args).contains("--launch")) {
+        startupStage = "LAUNCH";
         launch(port);
+        // ROM 可能留下非守护线程；一次性启动父进程必须明确结束，常驻服务由子进程承担。
+        System.exit(0);
         return;
       }
       if (!Arrays.asList(args).contains("--server"))
@@ -68,8 +188,12 @@ public final class VirtualScreenCore {
         throw new UnsupportedOperationException("API_30_REQUIRED");
       token = randomToken();
       // The shared helper prepares one main Looper before the first systemMain attach.
+      startupStage = "SHELL_CONTEXT";
       context = system.createPackageContext("com.android.shell", 0);
-      server = new ServerSocket(port, 8, InetAddress.getByName("127.0.0.1"));
+      startupStage = "BIND_LISTENER";
+      server = new ServerSocket(0, 8, InetAddress.getByName("127.0.0.1"));
+      identity = selfIdentity();
+      lastRequest = elapsed();
       Thread watchdog =
           new Thread(
               () -> {
@@ -79,39 +203,28 @@ public final class VirtualScreenCore {
                   } catch (InterruptedException e) {
                     return;
                   }
-                  Session current = session;
+                  VirtualScreenDisplaySession current = session;
                   if (current != null) current.input.expire();
-                  if (SystemClock.elapsedRealtime() - lastRequest > 60_000) shutdown();
+                  if (elapsed() - lastRequest > 60_000) shutdown();
                 }
               },
               "vscreen-heartbeat");
       watchdog.setDaemon(true);
       watchdog.start();
-      Thread accept =
-          new Thread(
-              () -> {
-                while (running)
-                  try {
-                    Socket socket = server.accept();
-                    try {
-                      CLIENTS.execute(() -> handle(socket));
-                    } catch (RejectedExecutionException full) {
-                      socket.close();
-                    }
-                  } catch (IOException closed) {
-                    if (running) shutdown();
-                  }
-              },
-              "vscreen-listener");
-      accept.setDaemon(true);
-      accept.start();
+      startAcceptLoop(server, new VirtualScreenHandshake(server.getLocalPort(), token, identity));
       // This one-time bootstrap secret travels only through the managed channel result,
       // never in app_process argv or the device command line.
-      System.out.println("DSHA_VSCREEN_BOOTSTRAP " + token);
+      System.out.println(
+          "DSHA_VSCREEN_BOOTSTRAP "
+              + new VirtualScreenHandshake(server.getLocalPort(), token, identity).payload());
       System.out.flush();
       Looper.loop();
     } catch (Throwable error) {
-      System.err.println("DSHA_VSCREEN_ERROR=" + cause(error).getClass().getSimpleName());
+      System.err.println(
+          "DSHA_VSCREEN_ERROR="
+              + com.deepseekharness.app.util.VirtualScreenBootstrap.failureCode(
+                  startupStage, android.os.Build.VERSION.SDK_INT, error));
+      System.err.flush();
       System.exit(1);
     }
   }
@@ -122,6 +235,9 @@ public final class VirtualScreenCore {
       throw new IllegalArgumentException("INVALID_CLASSPATH");
     Process child =
         new ProcessBuilder(
+                // ADB shell v1 关闭会清理所属进程组，核心需拥有独立会话。
+                // 不使用 setsid -d：保持直接子进程及 bootstrap 管道的生命周期可核验。
+                "/system/bin/setsid",
                 "/system/bin/app_process",
                 "-Djava.class.path=" + path,
                 "/system/bin",
@@ -132,35 +248,25 @@ public final class VirtualScreenCore {
                 "--package",
                 selfPackage)
             .redirectInput(new File("/dev/null"))
-            .redirectError(new File("/dev/null"))
+            .redirectErrorStream(true)
             .start();
     boolean started = false;
     try {
       // The server creates a secret after exec; its parent returns it through the
       // Root/Shizuku/ADB result channel, not an OS-visible command-line argument.
-      long deadline = SystemClock.elapsedRealtime() + 8000;
-      String childToken = readBootstrap(child, deadline);
-      while (SystemClock.elapsedRealtime() < deadline) {
+      long deadline = elapsed() + 8000;
+      startupStage = "BOOTSTRAP";
+      VirtualScreenHandshake handshake = readBootstrap(child, deadline);
+      startupStage = "REACHABILITY";
+      while (elapsed() < deadline) {
         if (!child.isAlive()) throw new IOException("CORE_EXITED");
-        HttpURLConnection c = null;
-        try {
-          c =
-              (HttpURLConnection)
-                  new URL("http://127.0.0.1:" + port + "/vscreen/ping").openConnection();
-          c.setRequestProperty("Authorization", "Bearer " + childToken);
-          c.setConnectTimeout(200);
-          c.setReadTimeout(200);
-          if (c.getResponseCode() == 200) {
-            System.out.println("DSHA_VSCREEN_STARTED " + childToken);
-            System.out.flush();
-            started = true;
-            return;
-          }
-        } catch (IOException waiting) {
-          Thread.sleep(80);
-        } finally {
-          if (c != null) c.disconnect();
+        if (new VirtualScreenTransport().request(handshake, "/vscreen/ping", "").optBoolean("ok")) {
+          System.out.println("DSHA_VSCREEN_STARTED " + handshake.payload());
+          System.out.flush();
+          started = true;
+          return;
         }
+        Thread.sleep(80);
       }
       throw new IOException("START_RESULT_UNKNOWN");
     } finally {
@@ -172,37 +278,29 @@ public final class VirtualScreenCore {
     }
   }
 
-  private static String readBootstrap(Process child, long deadline) throws Exception {
-    ByteArrayOutputStream line = new ByteArrayOutputStream();
+  private static VirtualScreenHandshake readBootstrap(Process child, long deadline)
+      throws Exception {
+    com.deepseekharness.app.util.VirtualScreenBootstrap bootstrap =
+        new com.deepseekharness.app.util.VirtualScreenBootstrap();
     InputStream input = child.getInputStream();
-    while (SystemClock.elapsedRealtime() < deadline) {
-      if (!child.isAlive()) throw new IOException("CORE_EXITED");
+    while (elapsed() < deadline) {
       int available = input.available();
       if (available <= 0) {
+        if (!child.isAlive()) throw new IOException("CORE_EXITED");
         Thread.sleep(20);
         continue;
       }
       int value = input.read();
       if (value < 0) throw new EOFException("CORE_BOOTSTRAP_EOF");
-      if (value == '\n') {
-        String text = line.toString(StandardCharsets.US_ASCII.name()).trim();
-        String prefix = "DSHA_VSCREEN_BOOTSTRAP ";
-        if (!text.startsWith(prefix)) throw new IOException("CORE_BOOTSTRAP_INVALID");
-        String secret = text.substring(prefix.length());
-        if (!secret.matches("[a-f0-9]{48}")) throw new IOException("CORE_BOOTSTRAP_INVALID");
-        return secret;
-      }
-      if (value != '\r') {
-        if (line.size() >= 128) throw new IOException("CORE_BOOTSTRAP_LIMIT");
-        line.write(value);
-      }
+      bootstrap.accept(value);
+      if (bootstrap.handshake() != null) return bootstrap.handshake();
     }
     throw new IOException("CORE_BOOTSTRAP_TIMEOUT");
   }
 
   private static String installedDshaApkPath() throws Exception {
     return installedDshaApkPath(
-        com.deepseekharness.app.runtime.PrivilegedPackageContext.systemContext());
+        com.deepseekharness.app.runtime.PrivilegedPackageContext.virtualScreenContext());
   }
 
   private static String installedDshaApkPath(Context system) throws Exception {
@@ -222,12 +320,13 @@ public final class VirtualScreenCore {
     return value.toString();
   }
 
-  private static void handle(Socket socket) {
+  private static void handle(ServerSocket bound, VirtualScreenHandshake endpoint, Socket socket) {
     boolean close = false;
     try (Socket accepted = socket) {
       accepted.setSoTimeout(3000);
+      VirtualScreenPeerProof.Session peer = VirtualScreenPeerProof.server(accepted, endpoint);
       InputStream input = accepted.getInputStream();
-      long deadline = SystemClock.elapsedRealtime() + 3000;
+      long deadline = elapsed() + 3000;
       String[] parts = line(input, 24576, deadline).split(" ", 3);
       if (parts.length != 3 || !parts[0].equals("GET")) return;
       String authorization = "";
@@ -237,20 +336,22 @@ public final class VirtualScreenCore {
         remaining -= header.length() + 2;
         if (header.isEmpty()) break;
         if (remaining <= 0) throw new IOException("HEAD_LIMIT");
-        if (header.toLowerCase(Locale.ROOT).startsWith("authorization:"))
-          authorization = header.substring(14).trim();
+        if (header
+            .toLowerCase(Locale.ROOT)
+            .startsWith(VirtualScreenPeerProof.HEADER.toLowerCase(Locale.ROOT) + ":"))
+          authorization = header.substring(VirtualScreenPeerProof.HEADER.length() + 1).trim();
       }
-      boolean authorized =
-          java.security.MessageDigest.isEqual(
-              ("Bearer " + token).getBytes(StandardCharsets.US_ASCII),
-              authorization.getBytes(StandardCharsets.US_ASCII));
+      boolean authorized = peer.authorizes(parts[0], parts[1], authorization);
       String path = parts[1].split("\\?", 2)[0];
       JSONObject result;
       if (!authorized) result = error("UNAUTHORIZED");
       else {
-        lastRequest = SystemClock.elapsedRealtime();
-        result = route(path, query(parts[1]));
-        close = path.equals("/vscreen/close");
+        synchronized (VirtualScreenCore.class) {
+          if (!running || server != bound) return;
+          lastRequest = elapsed();
+          result = route(path, query(parts[1]));
+          close = path.equals("/vscreen/close");
+        }
       }
       byte[] body = result.toString().getBytes(StandardCharsets.UTF_8);
       OutputStream out = accepted.getOutputStream();
@@ -265,7 +366,7 @@ public final class VirtualScreenCore {
       out.flush();
     } catch (Throwable ignored) {
     } finally {
-      if (close) shutdown();
+      if (close) shutdown(bound);
     }
   }
 
@@ -291,6 +392,27 @@ public final class VirtualScreenCore {
       if (path.equals("/vscreen/launch")) return launchPackage(q.get("package"));
       if (path.equals("/vscreen/preview"))
         return preview(Long.parseLong(q.getOrDefault("since", "-1")), q.get("generation"));
+      if (path.equals("/vscreen/observe")) {
+        if (!session.generation.equals(q.get("generation"))) return error("STALE_GENERATION");
+        return "true".equals(q.get("retain"))
+            ? session.observations.capture(session, VirtualScreenCore::status)
+            : preview(-1, session.generation);
+      }
+      if (path.equals("/vscreen/observation-region")) {
+        if (!session.generation.equals(q.get("generation"))) return error("STALE_GENERATION");
+        return session.observations.region(
+            session,
+            q.getOrDefault("observationId", ""),
+            new android.graphics.Rect(
+                Integer.parseInt(q.getOrDefault("left", "-1")),
+                Integer.parseInt(q.getOrDefault("top", "-1")),
+                Integer.parseInt(q.getOrDefault("right", "-1")),
+                Integer.parseInt(q.getOrDefault("bottom", "-1"))));
+      }
+      if (path.equals("/vscreen/observation-release")) {
+        session.observations.remove(q.getOrDefault("observationId", ""));
+        return ok();
+      }
       if (path.equals("/vscreen/touch")) {
         if (!session.generation.equals(q.get("generation"))) return error("STALE_GENERATION");
         String stroke = q.getOrDefault("stroke", "");
@@ -301,11 +423,16 @@ public final class VirtualScreenCore {
             y = Float.parseFloat(coordinate(q, "y", session.height));
         if (action == 0) {
           synchronized (session.lock) {
-            long observed = Long.parseLong(q.getOrDefault("frameSeq", "-1"));
-            if (!VirtualScreenPolicy.fresh(observed, session.sequence)) return error("STALE_FRAME");
+            long requested = Long.parseLong(q.getOrDefault("frameSeq", "-1"));
+            String rejection =
+                VirtualScreenPolicy.inputRejection(
+                    requested, session.sequence, session.observed, elapsed() - session.observedAt);
+            if (rejection != null)
+              return staleFrame(rejection, requested, session.sequence, session.observed);
+            session.observed = -1;
           }
         }
-        return session.input.touch(stroke, action, x, y) ? status() : error("TOUCH_REJECTED");
+        return inputResult(session.input.touch(stroke, action, x, y));
       }
       if (!Set.of(
               "/vscreen/tap", "/vscreen/swipe", "/vscreen/type", "/vscreen/key", "/vscreen/check")
@@ -313,10 +440,12 @@ public final class VirtualScreenCore {
       long observed = Long.parseLong(q.getOrDefault("frameSeq", "-1"));
       synchronized (session.lock) {
         if (!session.generation.equals(q.get("generation"))) return error("STALE_GENERATION");
-        if (!VirtualScreenPolicy.fresh(observed, session.sequence)
-            || observed != session.observed
-            || SystemClock.elapsedRealtime() - session.observedAt > 30_000)
-          return error("STALE_FRAME");
+        // 拒绝码只说"过期"是没用的：没看过这一帧、被新帧顶掉、观察超时是三种不同的自救方式。
+        String rejection =
+            VirtualScreenPolicy.inputRejection(
+                observed, session.sequence, session.observed, elapsed() - session.observedAt);
+        if (rejection != null)
+          return staleFrame(rejection, observed, session.sequence, session.observed);
         if (path.equals("/vscreen/check")) {
           session.observed = -1;
           return status();
@@ -333,15 +462,16 @@ public final class VirtualScreenCore {
           String stroke = UUID.randomUUID().toString();
           session.observed = -1;
           try {
-            if (!session.input.touch(stroke, 0, x, y)) return error("INPUT_REJECTED");
+            if (!session.input.touch(stroke, 0, x, y).accepted()) return inputFailure(session);
             int steps = Math.max(1, ms / 16);
             for (int n = 1; n < steps; n++) {
               Thread.sleep(16);
-              if (!session.input.touch(
-                  stroke, 2, x + (endX - x) * n / steps, y + (endY - y) * n / steps))
-                return error("INPUT_REJECTED");
+              if (!session
+                  .input
+                  .touch(stroke, 2, x + (endX - x) * n / steps, y + (endY - y) * n / steps)
+                  .accepted()) return inputFailure(session);
             }
-            return session.input.touch(stroke, 1, endX, endY) ? status() : error("INPUT_REJECTED");
+            return inputResult(session.input.touch(stroke, 1, endX, endY));
           } finally {
             session.input.cancel();
           }
@@ -350,66 +480,156 @@ public final class VirtualScreenCore {
           int code = Integer.parseInt(q.getOrDefault("keycode", "-1"));
           if (code != 3 && code != 4 && code != 66 && code != 67) return error("INVALID_KEY");
           session.observed = -1;
-          return session.input.key(code) ? status() : error("INPUT_REJECTED");
+          return inputResult(session.input.key(code));
         }
-        List<String> argv =
-            new ArrayList<>(List.of("/system/bin/input", "-d", String.valueOf(session.id)));
-        switch (path) {
-          case "/vscreen/type":
-            String text = q.getOrDefault("text", "");
-            if (text.isEmpty() || text.length() > 2000) return error("INVALID_TEXT");
-            if (!text.matches("[\\x20-\\x7e]+")) return error("ACCESSIBILITY_REQUIRED_FOR_UNICODE");
-            argv.addAll(List.of("text", text.replace(" ", "%s")));
-            break;
-          default:
-            return error("UNKNOWN_ROUTE");
-        }
-        // 消耗观察，执行失败或结果未知也不能重放同一动作。
+        String text = q.getOrDefault("text", "");
+        if (text.isEmpty() || text.length() > 2000) return error("INVALID_TEXT");
+        if (!text.matches("[\\x20-\\x7e]+")) return error("ACCESSIBILITY_REQUIRED_FOR_UNICODE");
         session.observed = -1;
-        Result r = exec(argv.toArray(new String[0]));
-        if (r.unknown) return error("INPUT_RESULT_UNKNOWN");
-        if (r.exit != 0 || r.text.contains("Error") || r.text.contains("Exception"))
-          return error("INPUT_REJECTED");
-        return status();
+        return inputResult(session.input.text(text));
       }
     } catch (IllegalArgumentException error) {
       return error("INVALID_ARGUMENT");
     } catch (Throwable error) {
-      return error("VSCREEN_" + cause(error).getClass().getSimpleName());
+      return failure(error);
     }
   }
 
   private static JSONObject create(int width, int height) throws Exception {
+    if (hostDisplayFactory != null) {
+      int[] size = VirtualScreenPolicy.phoneSize(width, height);
+      if (session != null && session.width == size[0] && session.height == size[1]) return status();
+      release();
+      VirtualScreenDisplaySession created = null;
+      try {
+        created = hostDisplayFactory.create(size[0], size[1]);
+        if (created == null
+            || created.id <= 0
+            || created.width != size[0]
+            || created.height != size[1])
+          throw new IllegalArgumentException("DISPLAY_ADAPTER_FACTS_INVALID");
+        session = created;
+        created.start();
+        return status();
+      } catch (Throwable failure) {
+        session = null;
+        if (created != null)
+          try {
+            created.close();
+          } catch (Throwable cleanup) {
+            failure.addSuppressed(cleanup);
+          }
+        return failure(failure);
+      }
+    }
     int[] size = VirtualScreenPolicy.phoneSize(width, height);
     if (session != null && session.width == size[0] && session.height == size[1]) return status();
     release();
     ImageReader reader = ImageReader.newInstance(size[0], size[1], PixelFormat.RGBA_8888, 3);
+    boolean trusted =
+        VirtualScreenPolicy.requestTrustedDisplay(
+            android.os.Process.myUid(), trustedDisplayPermission());
+    VirtualDisplay display = null;
+    VirtualScreenDisplaySession created = null;
+    boolean requestedTrusted = false;
+    Throwable displayCreateFailure = null;
     try {
       DisplayManager manager = (DisplayManager) context.getSystemService(Context.DISPLAY_SERVICE);
+      List<String> absent = new ArrayList<>();
       int flags =
           DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC
               | DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY
-              | flag("VIRTUAL_DISPLAY_FLAG_SUPPORTS_TOUCH")
-              | flag("VIRTUAL_DISPLAY_FLAG_DESTROY_CONTENT_ON_REMOVAL")
-              | flag("VIRTUAL_DISPLAY_FLAG_TRUSTED")
-              | flag("VIRTUAL_DISPLAY_FLAG_OWN_FOCUS");
-      VirtualDisplay display =
-          manager.createVirtualDisplay(
-              "DSHA-VirtualScreen", size[0], size[1], 320, reader.getSurface(), flags);
+              | flag("VIRTUAL_DISPLAY_FLAG_SUPPORTS_TOUCH", absent)
+              | flag("VIRTUAL_DISPLAY_FLAG_DESTROY_CONTENT_ON_REMOVAL", absent)
+              | flag("VIRTUAL_DISPLAY_FLAG_OWN_FOCUS", absent);
+      if (trusted) {
+        int trustedFlag = flag("VIRTUAL_DISPLAY_FLAG_TRUSTED", absent);
+        requestedTrusted = trustedFlag != 0;
+        flags |= trustedFlag;
+      }
+      missingDisplayFlags = String.join(",", absent);
+      try {
+        display =
+            manager.createVirtualDisplay(
+                "DSHA-VirtualScreen", size[0], size[1], 320, reader.getSurface(), flags);
+      } catch (Throwable platformFailure) {
+        displayCreateFailure = platformFailure;
+        throw platformFailure;
+      }
       if (display == null) throw new IOException("DISPLAY_CREATE_FAILED");
-      session = new Session(display, reader, size[0], size[1]);
-      session.start();
+      created = new VirtualScreenDisplaySession(display, reader, size[0], size[1]);
+      session = created;
+      created.start();
       return status();
     } catch (Throwable error) {
-      reader.close();
-      throw error;
+      session = null;
+      if (created != null) {
+        created.active = false;
+        try {
+          synchronized (created.lock) {
+            if (created.frame != null) created.frame.recycle();
+            created.frame = null;
+          }
+        } catch (Throwable cleanup) {
+          error.addSuppressed(cleanup);
+        }
+      }
+      try {
+        if (display != null) display.release();
+      } catch (Throwable cleanup) {
+        error.addSuppressed(cleanup);
+      }
+      try {
+        reader.close();
+      } catch (Throwable cleanup) {
+        error.addSuppressed(cleanup);
+      }
+      String stable = VirtualScreenFailures.code(error);
+      boolean denied = requestedTrusted && VirtualScreenFailures.PERMISSION_DENIED.equals(stable);
+      JSONObject result = failure(error, error == displayCreateFailure);
+      if (error instanceof IllegalArgumentException) return result.put("error", "INVALID_ARGUMENT");
+      return denied ? result.put("error", VirtualScreenFailures.TRUSTED_DISPLAY_DENIED) : result;
     }
+  }
+
+  /**
+   * 自身是否真的持有 ADD_TRUSTED_DISPLAY。{@code checkSelfPermission} 判的是**本进程 uid**
+   * （{@code Process.myPid()/myUid()}），与 DisplayManagerService 的 {@code Binder.getCallingUid()}
+   * 一致 —— 不要改成按包名判断，那会在 ADB/Shizuku 通道上给出错误答案。查不到就按"不持有"处理：
+   * 不请求 TRUSTED 的创建仍然可以成功，方向安全。
+   */
+  private static VirtualScreenPolicy.TrustedDisplayPermission trustedDisplayPermission() {
+    try {
+      if (context == null) return VirtualScreenPolicy.TrustedDisplayPermission.UNKNOWN;
+      return context.checkSelfPermission("android.permission.ADD_TRUSTED_DISPLAY")
+              == android.content.pm.PackageManager.PERMISSION_GRANTED
+          ? VirtualScreenPolicy.TrustedDisplayPermission.HELD
+          : VirtualScreenPolicy.TrustedDisplayPermission.NOT_HELD;
+    } catch (Throwable unavailable) {
+      return VirtualScreenPolicy.TrustedDisplayPermission.UNKNOWN;
+    }
+  }
+
+  /** 帧门拒绝：保留既有的 STALE_FRAME 码，同时给出可区分的原因与实际值/期望值。 */
+  private static JSONObject staleFrame(String reason, long requested, long current, long observed) {
+    JSONObject value = error("STALE_FRAME");
+    try {
+      value
+          .put("reason", reason)
+          .put("requestedFrameSeq", requested)
+          .put("currentFrameSeq", current)
+          .put("observedFrameSeq", observed);
+    } catch (Exception ignored) {
+    }
+    return value;
   }
 
   private static JSONObject status() throws Exception {
     if (session == null) return ok().put("active", false);
     String actual = currentPackage();
     return ok().put("active", true)
+        .put("protocol", 1)
+        .put("coreInstance", identity.instance)
         .put("displayId", session.id)
         .put("generation", session.generation)
         .put("width", session.width)
@@ -417,11 +637,18 @@ public final class VirtualScreenCore {
         .put("frameSeq", session.sequence)
         .put("package", actual)
         .put("packageVerified", !actual.isEmpty())
+        .put("inputBackend", session.input.backend())
+        .put("inputUnavailable", session.input.unavailableReason())
+        .put("missingDisplayFlags", missingDisplayFlags)
         .put("orientation", session.width > session.height ? "landscape" : "portrait");
   }
 
   private static String currentPackage() {
     try {
+      if (hostPackageObserver != null) {
+        String value = hostPackageObserver.get();
+        return com.deepseekharness.app.util.SelfPackageIdentity.validName(value) ? value : "";
+      }
       android.app.ActivityManager manager =
           (android.app.ActivityManager) context.getSystemService(Context.ACTIVITY_SERVICE);
       for (var task : manager.getRunningTasks(100))
@@ -433,43 +660,7 @@ public final class VirtualScreenCore {
   }
 
   private static JSONObject preview(long since, String generation) throws Exception {
-    Bitmap copy;
-    long seq, captured;
-    synchronized (session.lock) {
-      if (session.frame == null) return error("FRAME_NOT_READY");
-      if (since == session.sequence && session.generation.equals(generation))
-        return status().put("unchanged", true).put("frameSeq", session.sequence);
-      copy = session.frame.copy(Bitmap.Config.ARGB_8888, false);
-      seq = session.sequence;
-      captured = session.capturedAt;
-      session.observed = seq;
-      session.observedAt = SystemClock.elapsedRealtime();
-    }
-    Bitmap scaled = null;
-    try {
-      if (session.encodedSequence == seq)
-        return status()
-            .put("frameSeq", seq)
-            .put("previewB64", session.encoded)
-            .put("frameAgeMs", SystemClock.elapsedRealtime() - captured);
-      int width = Math.min(720, copy.getWidth()),
-          height = Math.round(copy.getHeight() * width / (float) copy.getWidth());
-      scaled = Bitmap.createScaledBitmap(copy, width, height, true);
-      ByteArrayOutputStream out = new ByteArrayOutputStream();
-      scaled.compress(Bitmap.CompressFormat.JPEG, 65, out);
-      session.encoded =
-          android.util.Base64.encodeToString(out.toByteArray(), android.util.Base64.NO_WRAP);
-      session.encodedSequence = seq;
-      return status()
-          .put("frameSeq", seq)
-          .put("previewWidth", width)
-          .put("previewHeight", height)
-          .put("frameAgeMs", SystemClock.elapsedRealtime() - captured)
-          .put("previewB64", session.encoded);
-    } finally {
-      if (scaled != null && scaled != copy) scaled.recycle();
-      copy.recycle();
-    }
+    return VirtualScreenPixels.preview(session, since, generation, VirtualScreenCore::status);
   }
 
   private static JSONObject launchPackage(String name) throws Exception {
@@ -553,33 +744,88 @@ public final class VirtualScreenCore {
   }
 
   private static void release() {
-    if (session != null) {
-      session.close();
-      session = null;
-    }
+    VirtualScreenDisplaySession current = session;
+    session = null;
+    if (current != null) current.close();
+  }
+
+  private static synchronized void shutdown(ServerSocket bound) {
+    if (server == bound) shutdown();
   }
 
   private static synchronized void shutdown() {
+    if (!running) return;
     running = false;
-    release();
     try {
-      if (server != null) server.close();
-    } catch (IOException ignored) {
+      release();
+    } catch (Throwable cleanup) {
+      // The independent birth probe reports process exit, never this local cleanup attempt.
+    } finally {
+      try {
+        if (server != null) server.close();
+      } catch (IOException ignored) {
+      }
+      processExit.run();
     }
-    System.exit(0);
   }
 
-  private static int flag(String name) {
+  private static int flag(String name, List<String> absent) {
     try {
       return DisplayManager.class.getField(name).getInt(null);
     } catch (ReflectiveOperationException e) {
+      absent.add(name);
       return 0;
     }
   }
 
-  private static Throwable cause(Throwable e) {
-    while (e.getCause() != null) e = e.getCause();
-    return e;
+  private static JSONObject failure(Throwable failure) {
+    return failure(failure, false);
+  }
+
+  /** 只有固定参数的显示创建平台调用可保留技术消息；输入/通用异常不得回显正文。 */
+  private static JSONObject failure(Throwable failure, boolean displayCreation) {
+    JSONObject value = error(VirtualScreenFailures.code(failure));
+    try {
+      var captured =
+          com.deepseekharness.app.diagnostics.Failure.capture(
+              value.optString("error"),
+              failure,
+              displayCreation
+                  ? null
+                  : com.deepseekharness.app.diagnostics.Failure.MessagePolicy.safeCodes(Set.of()));
+      value.put("failureOrigin", displayCreation ? "ANDROID_DISPLAY_CREATE" : "NATIVE_OPERATION");
+      if (captured != null) value.put("failure", new JSONObject(captured.toMap()));
+      value.put(
+          "cause",
+          displayCreation
+              ? VirtualScreenFailures.cause(failure)
+              : failure == null ? "" : failure.getClass().getSimpleName());
+    } catch (Exception ignored) {
+    }
+    return value;
+  }
+
+  private static JSONObject inputResult(VirtualScreenInputResult result) throws Exception {
+    if (result == VirtualScreenInputResult.ACCEPTED) {
+      try {
+        return status();
+      } catch (Throwable missingMetadata) {
+        return ok().put("resultMetadataUnavailable", true);
+      }
+    }
+    JSONObject value =
+        error(
+            result == VirtualScreenInputResult.UNKNOWN
+                ? "INPUT_RESULT_UNKNOWN"
+                : session.input.available()
+                    ? "INPUT_REJECTED"
+                    : VirtualScreenInputPolicy.INPUT_UNAVAILABLE);
+    if (result == VirtualScreenInputResult.UNKNOWN) value.put("executionUnknown", true);
+    return value;
+  }
+
+  private static JSONObject inputFailure(VirtualScreenDisplaySession failed) throws Exception {
+    return inputResult(failed.input.lastResult());
   }
 
   private static JSONObject ok() {
@@ -618,7 +864,7 @@ public final class VirtualScreenCore {
 
   private static String line(InputStream input, int maximum, long until) throws IOException {
     ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-    while (bytes.size() < maximum && SystemClock.elapsedRealtime() < until) {
+    while (bytes.size() < maximum && elapsed() < until) {
       int b = input.read();
       if (b < 0) throw new EOFException();
       if (b == '\n') return bytes.toString("US-ASCII").replace("\r", "");
@@ -627,95 +873,57 @@ public final class VirtualScreenCore {
     throw new IOException("HEAD_LIMIT");
   }
 
-  private static final class Session {
-    final VirtualDisplay display;
-    final ImageReader reader;
-    final int width, height, id;
-    final Object lock = new Object();
-    final String generation = UUID.randomUUID().toString();
-    volatile boolean active = true;
-    volatile long sequence;
-    long observed = -1, observedAt, capturedAt, encodedSequence = -1;
-    String packageName = "", encoded = "";
-    Bitmap frame;
-    final VirtualScreenInput input;
+  private static VirtualScreenCoreIdentity selfIdentity() throws Exception {
+    int pid = android.os.Process.myPid();
+    var stat = com.deepseekharness.app.util.ProcStat.parse(readSmall("/proc/self/stat"), pid);
+    if (stat == null) throw new IOException("CORE_BIRTH_UNAVAILABLE");
+    return new VirtualScreenCoreIdentity(
+        pid,
+        stat.started,
+        android.os.Process.myUid(),
+        readSmall("/proc/sys/kernel/random/boot_id").trim(),
+        UUID.randomUUID().toString());
+  }
 
-    Session(VirtualDisplay d, ImageReader r, int w, int h) throws Exception {
-      display = d;
-      reader = r;
-      width = w;
-      height = h;
-      id = d.getDisplay().getDisplayId();
-      input = new VirtualScreenInput(id);
-    }
-
-    void start() {
-      Thread t =
-          new Thread(
-              () -> {
-                while (active) {
-                  Image image = null;
-                  try {
-                    image = reader.acquireLatestImage();
-                    if (image != null) {
-                      Bitmap next = copy(image);
-                      synchronized (lock) {
-                        if (!active) {
-                          next.recycle();
-                          break;
-                        }
-                        if (frame != null && frame.sameAs(next)) next.recycle();
-                        else {
-                          if (frame != null) frame.recycle();
-                          frame = next;
-                          sequence++;
-                        }
-                        capturedAt = SystemClock.elapsedRealtime();
-                      }
-                    }
-                  } catch (Throwable ignored) {
-                  } finally {
-                    if (image != null) image.close();
-                  }
-                  try {
-                    Thread.sleep(33);
-                  } catch (InterruptedException end) {
-                    return;
-                  }
-                }
-              },
-              "vscreen-frames");
-      t.setDaemon(true);
-      t.start();
-    }
-
-    void close() {
-      active = false;
-      try {
-        input.cancel();
-      } catch (Exception ignored) {
+  private static String readSmall(String path) throws IOException {
+    try (InputStream input = new FileInputStream(path)) {
+      ByteArrayOutputStream output = new ByteArrayOutputStream();
+      byte[] buffer = new byte[1024];
+      int count;
+      while ((count = input.read(buffer)) >= 0) {
+        if (output.size() + count > 8192) throw new IOException("CORE_IDENTITY_LIMIT");
+        output.write(buffer, 0, count);
       }
-      synchronized (lock) {
-        if (frame != null) {
-          frame.recycle();
-          frame = null;
+      return output.toString("UTF-8");
+    }
+  }
+
+  /** Read-only birth probe: unreadable identity is UNKNOWN; no termination signal. */
+  private static void printExitProof(VirtualScreenCoreIdentity expected) {
+    VirtualScreenCoreIdentity.Exit result = VirtualScreenCoreIdentity.Exit.UNKNOWN;
+    try {
+      String boot = readSmall("/proc/sys/kernel/random/boot_id").trim();
+      com.deepseekharness.app.util.ProcStat stat = null;
+      Integer owner = null;
+      boolean absent = false;
+      if (boot.equals(expected.boot)) {
+        try {
+          android.system.Os.kill(expected.pid, 0);
+          stat =
+              com.deepseekharness.app.util.ProcStat.parse(
+                  readSmall("/proc/" + expected.pid + "/stat"), expected.pid);
+          owner = android.system.Os.stat("/proc/" + expected.pid).st_uid;
+        } catch (android.system.ErrnoException error) {
+          absent = error.errno == android.system.OsConstants.ESRCH;
         }
       }
-      display.release();
-      reader.close();
+      result =
+          com.deepseekharness.app.util.VirtualScreenExitProofPolicy.classify(
+              expected, boot, stat, owner, absent);
+    } catch (Throwable unavailable) {
+      result = VirtualScreenCoreIdentity.Exit.UNKNOWN;
     }
-
-    Bitmap copy(Image image) {
-      Image.Plane p = image.getPlanes()[0];
-      int paddedWidth = p.getRowStride() / p.getPixelStride();
-      ByteBuffer buffer = p.getBuffer();
-      buffer.rewind();
-      Bitmap b = Bitmap.createBitmap(paddedWidth, height, Bitmap.Config.ARGB_8888);
-      b.copyPixelsFromBuffer(buffer);
-      if (paddedWidth == width) return b;
-      Bitmap cropped = Bitmap.createBitmap(b, 0, 0, width, height);
-      b.recycle();
-      return cropped;
-    }
+    System.out.println("DSHA_VSCREEN_EXIT_PROOF 1 " + expected.encode() + " " + result);
+    System.out.flush();
   }
 }

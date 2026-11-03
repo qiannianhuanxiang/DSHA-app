@@ -30,6 +30,19 @@ public class MainActivity extends AppCompatActivity {
   private com.google.android.material.snackbar.Snackbar updateNotice;
   private boolean requestingLocalNetwork;
   private boolean restoreProbeStarted;
+  private boolean discardedLauncherEntry;
+  private boolean leavingUi;
+  private boolean mainReady;
+  private Bundle pendingMainState;
+  private android.view.View entryOverlay;
+
+  /** 平板左栏；手机布局没有这个视图，所有使用点都按可空处理。 */
+  private ShellRail shellRail;
+
+  private final java.util.List<Fragment> gatedPages = new java.util.ArrayList<>();
+  private final MainEntryGate entryGate = new MainEntryGate();
+  private static final java.util.concurrent.Executor ENTRY_IO =
+      java.util.concurrent.Executors.newSingleThreadExecutor();
 
   /**
    * 通知点击带来的「进入后自动打开 Web」意图，只在一次导航创建 LaunchFragment 期间有效。
@@ -38,6 +51,12 @@ public class MainActivity extends AppCompatActivity {
    * 否则会残留下来，让用户之后手动点启动页时被意外带进 Web。
    */
   private boolean pendingOpenWeb;
+
+  private boolean terminalPageInFlight;
+  private final androidx.activity.result.ActivityResultLauncher<Intent> terminalPage =
+      registerForActivityResult(
+          new androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult(),
+          result -> terminalPageInFlight = false);
 
   private String openedRecovery = "";
   private final androidx.activity.result.ActivityResultLauncher<String> localNetworkPermission =
@@ -77,51 +96,214 @@ public class MainActivity extends AppCompatActivity {
 
   @Override
   protected void onCreate(@Nullable Bundle savedInstanceState) {
-    super.onCreate(savedInstanceState);
-
-    if (savedInstanceState != null)
-      openedRecovery = savedInstanceState.getString("opened_startup_recovery", "");
     ConfigStore config = new ConfigStore(this);
-    HarnessController controller = HarnessController.get(this);
-    boolean skipExtract =
-        com.deepseekharness.app.BuildConfig.DEBUG
-            && getIntent().getBooleanExtra("skip_extract", false);
+    // 首次设置完成前不恢复旧终端或插件页，也不初始化 Ubuntu。
+    super.onCreate(config.isWelcomed() ? savedInstanceState : null);
+    getOnBackPressedDispatcher()
+        .addCallback(
+            this,
+            new androidx.activity.OnBackPressedCallback(true) {
+              @Override
+              public void handleOnBackPressed() {
+                var fragments = getSupportFragmentManager();
+                if (com.deepseekharness.app.util.TaskNavigationPolicy.back(
+                        fragments.getBackStackEntryCount(), fragments.isStateSaved())
+                    == com.deepseekharness.app.util.TaskNavigationPolicy.Back.POP_PAGE) {
+                  fragments.popBackStackImmediate();
+                } else {
+                  // Back from Main leaves the UI. A retained browser and the user's
+                  // running environment remain in place; neither becomes another home.
+                  leavingUi = true;
+                  entryGate.cancel();
+                  BrowserTasks.exitMain(MainActivity.this);
+                }
+              }
+            });
 
-    // 启动门禁：未欢迎 → Welcome；环境未解压 → Extract
+    BrowserTasks.entry("CREATE", getIntent());
+    if (resumeBackground(getIntent())) {
+      discardedLauncherEntry = true;
+      finish(); // Only this newly created native wrapper; the existing Web task is retained.
+      return;
+    }
+
+    if (BrowserTasks.duplicateLauncher(this, savedInstanceState)) {
+      discardedLauncherEntry = true;
+      finish();
+      BrowserTasks.openMain(this);
+      return;
+    }
+    BrowserTasks.rememberMain(this);
+
+    if (savedInstanceState != null) {
+      openedRecovery = savedInstanceState.getString("opened_startup_recovery", "");
+      terminalPageInFlight = savedInstanceState.getBoolean("terminal_page_in_flight", false);
+    }
+    // 所有入口共用本机设置门禁，恢复旧页面前先完成入口检查。
     if (!config.isWelcomed()) {
       startActivity(new Intent(this, WelcomeActivity.class));
       finish();
       return;
     }
-    boolean limitedAllowed =
-        getIntent().getBooleanExtra("limited_entry", false)
-            || config.allowsLimitedEntry(controller.proot().environmentIdentity());
-    if (!limitedAllowed
-        && (com.deepseekharness.app.core.MaintenanceCoordinator.pending(controller)
-            || !skipExtract
-                && (!controller.isEnvironmentReady()
-                    || com.deepseekharness.app.core.EnvironmentAccess
-                        .requiresMaintenanceBeforeStart(controller)))) {
-      startActivity(new Intent(this, ExtractActivity.class));
-      finish();
-      return;
+    showEntryCheck();
+    if (savedInstanceState != null) {
+      var hold = getSupportFragmentManager().beginTransaction();
+      for (Fragment page : getSupportFragmentManager().getFragments()) {
+        if (!page.isAdded()) continue;
+        gatedPages.add(page);
+        hold.setMaxLifecycle(page, androidx.lifecycle.Lifecycle.State.CREATED);
+      }
+      if (!gatedPages.isEmpty()) hold.commitNow();
     }
+    pendingMainState = savedInstanceState;
+    beginEntryCheck();
+  }
 
+  private void beginEntryCheck() {
+    HarnessController controller = HarnessController.get(this);
+    controller.restoreRunningWebSession(
+        () -> {
+          if (!mainReady
+              && !leavingUi
+              && !isFinishing()
+              && !isDestroyed()
+              && getLifecycle()
+                  .getCurrentState()
+                  .isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED))
+            checkEntry(
+                pendingMainState,
+                new ConfigStore(this),
+                controller,
+                com.deepseekharness.app.BuildConfig.DEBUG
+                    && getIntent().getBooleanExtra("skip_extract", false));
+        });
+  }
+
+  private void showEntryCheck() {
+    // FragmentManager可能先于后台磁盘检查恢复页面。首次就保留真实容器，
+    // 后面只移除覆盖层，避免替换整个布局后恢复视图无法重新附着。
     setContentView(R.layout.activity_main);
-    findViewById(R.id.btn_tasks)
-        .setContentDescription(
-            com.deepseekharness.app.util.UiText.choose("后台任务", "Background tasks"));
-    findViewById(R.id.btn_tasks).setOnClickListener(v -> BackgroundTasksActivity.open(this));
+    var layout = new android.widget.LinearLayout(this);
+    layout.setOrientation(android.widget.LinearLayout.VERTICAL);
+    layout.setGravity(android.view.Gravity.CENTER);
+    layout.setBackgroundColor(getColor(R.color.surface));
+    layout.setClickable(true);
+    layout.setFocusable(true);
+    TextView status = new TextView(this);
+    status.setText(
+        com.deepseekharness.app.util.UiText.choose("正在检查运行环境…", "Checking the runtime…"));
+    layout.addView(status);
+    layout.addView(new android.widget.ProgressBar(this));
+    android.widget.Button diagnostics = new android.widget.Button(this);
+    diagnostics.setText(com.deepseekharness.app.util.UiText.choose("查看诊断", "View diagnostics"));
+    diagnostics.setOnClickListener(v -> startActivity(DiagnosticActivity.downloadLogs(this)));
+    layout.addView(diagnostics);
+    entryOverlay = layout;
+    addContentView(layout, new android.view.ViewGroup.LayoutParams(-1, -1));
+  }
+
+  private void checkEntry(
+      Bundle saved, ConfigStore config, HarnessController controller, boolean skipExtract) {
+    long generation = controller.getWebGeneration();
+    Intent admittedIntent = getIntent();
+    entryGate.submit(
+        ENTRY_IO,
+        this::runOnUiThread,
+        () -> {
+          boolean limited =
+              admittedIntent.getBooleanExtra("limited_entry", false)
+                  || config.allowsLimitedEntry(
+                      com.deepseekharness.app.core.EnvironmentAccess.limitedEntryKey(controller));
+          return !limited
+              && (com.deepseekharness.app.core.MaintenanceCoordinator.pending(controller)
+                  || !skipExtract
+                      && (!controller.isEnvironmentReady()
+                          || com.deepseekharness.app.core.EnvironmentAccess
+                              .requiresMaintenanceBeforeStart(controller)));
+        },
+        () ->
+            !isFinishing()
+                && !leavingUi
+                && !isDestroyed()
+                && admittedIntent == getIntent()
+                && getLifecycle()
+                    .getCurrentState()
+                    .isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)
+                && !getSupportFragmentManager().isStateSaved(),
+        (maintenance, failed) -> {
+          if (failed)
+            com.deepseekharness.app.core.DiagnosticLog.record(
+                this, "MAIN_ENVIRONMENT_CHECK", "UNAVAILABLE");
+          if (generation != controller.getWebGeneration()) {
+            checkEntry(saved, config, controller, skipExtract);
+            return;
+          }
+          boolean unresolved = controller.hasUnresolvedWebSession();
+          boolean restoring = controller.isRestoringWebSession();
+          android.util.Log.i(
+              "DSHA",
+              "MAIN_ENTRY_GATE maintenance="
+                  + maintenance
+                  + " failed="
+                  + failed
+                  + " unresolved="
+                  + unresolved
+                  + " restoring="
+                  + restoring
+                  + " restored="
+                  + (saved != null));
+          if (!failed && maintenance && !unresolved && !restoring) {
+            startActivity(new Intent(this, ExtractActivity.class));
+            finish();
+          } else {
+            // 原实例证据未知时留在Main提供诊断，不触发解压或静默更新原环境。
+            showMain(saved, config, controller);
+          }
+        });
+  }
+
+  private void showMain(
+      Bundle savedInstanceState, ConfigStore config, HarnessController controller) {
+    if (mainReady || isFinishing() || isDestroyed()) return;
+    mainReady = true;
+    if (entryOverlay != null && entryOverlay.getParent() instanceof android.view.ViewGroup parent)
+      parent.removeView(entryOverlay);
+    entryOverlay = null;
+    android.view.ViewGroup appBar = findViewById(R.id.app_bar);
+    var downloads = new androidx.appcompat.widget.AppCompatImageButton(this);
+    downloads.setImageResource(R.drawable.ic_ui_downloads);
+    downloads.setImageTintList(getColorStateList(R.color.text_secondary));
+    downloads.setContentDescription(
+        com.deepseekharness.app.util.UiText.choose("下载记录", "Downloads"));
+    android.util.TypedValue downloadsBackground = new android.util.TypedValue();
+    getTheme()
+        .resolveAttribute(
+            android.R.attr.selectableItemBackgroundBorderless, downloadsBackground, true);
+    downloads.setBackgroundResource(downloadsBackground.resourceId);
+    int downloadButtonSize = Math.round(44 * getResources().getDisplayMetrics().density);
+    int downloadButtonPadding = Math.round(11 * getResources().getDisplayMetrics().density);
+    downloads.setPadding(
+        downloadButtonPadding, downloadButtonPadding, downloadButtonPadding, downloadButtonPadding);
+    downloads.setOnClickListener(v -> FileTransfersActivity.open(this));
+    appBar.addView(
+        downloads,
+        appBar.indexOfChild(findViewById(R.id.btn_theme)),
+        new android.widget.LinearLayout.LayoutParams(downloadButtonSize, downloadButtonSize));
     TextView recovery = findViewById(R.id.environment_recovery_banner);
     recovery.setOnClickListener(
         v -> {
           if (com.deepseekharness.app.core.BackupTask.get(this).maintenanceBusy()
               || BackgroundTasksActivity.busy(this)) BackgroundTasksActivity.open(this);
+          else if (controller.config().isStartupRecoveryRequested()
+              || EnvironmentUiStatus.get(this).repairs)
+            startActivity(new Intent(this, StartupRecoveryActivity.class));
           else startActivity(new Intent(this, ExtractActivity.class).putExtra("review_only", true));
         });
     String pendingLink =
         getSharedPreferences("dsha-install-link", MODE_PRIVATE).getString("pending", "");
     if (!pendingLink.isEmpty()
+        && controller != null
+        && !controller.hasUnresolvedWebSession()
         && !com.deepseekharness.app.core.EnvironmentAccess.needsRecovery(controller)) {
       getSharedPreferences("dsha-install-link", MODE_PRIVATE).edit().remove("pending").apply();
       try {
@@ -148,15 +330,36 @@ public class MainActivity extends AppCompatActivity {
               }
             },
             false);
-    findViewById(R.id.btn_about).setOnClickListener(v -> AboutDialog.show(this));
+    android.view.ViewGroup quickEntries = findViewById(R.id.btn_about);
+    quickEntries.setVisibility(android.view.View.VISIBLE);
+    quickEntries.setContentDescription(com.deepseekharness.app.util.UiText.text("关于 DSHA"));
+    ((android.widget.ImageView) quickEntries.getChildAt(0)).setImageResource(R.drawable.ic_about);
+    quickEntries.setOnClickListener(v -> AboutDialog.show(this));
 
     BottomNavigationView nav = findViewById(R.id.bottom_nav);
+    shellRail = findViewById(R.id.shell_rail);
+    if (shellRail != null)
+      shellRail.setOnItemSelectedListener(
+          id -> {
+            // 左栏只转发点击，路由/门禁/终端动作仍由 bottom_nav 的唯一监听器执行。
+            nav.setSelectedItemId(id);
+            syncShellRail(nav.getSelectedItemId());
+          });
     nav.setOnItemSelectedListener(
         item -> {
+          if (item.getItemId() == R.id.nav_terminal) {
+            // 终端是导航动作：不切根页，也不把左栏/语境切到终端。
+            openTerminal();
+            return false; // 保留来源根页/子页及未保存草稿。
+          }
+          // 根页真正切换后再同步：终端动作仍停在原根页。
+          syncShellRail(item.getItemId());
           // 当前根页面再次点选时保留输入和滚动；从子页返回或外部打开插件仍执行导航。
           if (nav.getSelectedItemId() == item.getItemId()
               && getSupportFragmentManager().getBackStackEntryCount() == 0
               && getSupportFragmentManager().findFragmentById(R.id.fragment_container) != null
+              && !gatedPages.contains(
+                  getSupportFragmentManager().findFragmentById(R.id.fragment_container))
               && !(getSupportFragmentManager().findFragmentById(R.id.fragment_container)
                   instanceof EnvironmentRecoveryFragment)
               && !getIntent().getBooleanExtra("open_plugins", false)) return true;
@@ -169,9 +372,9 @@ public class MainActivity extends AppCompatActivity {
           if (id == R.id.nav_launch) {
             f = new LaunchFragment();
             if (pendingOpenWeb) {
-              pendingOpenWeb = false;
               Bundle args = new Bundle();
-              args.putBoolean(LaunchFragment.ARG_OPEN_WEB, true);
+              args.putBoolean(LaunchFragment.ARG_OPEN_WEB, pendingOpenWeb);
+              pendingOpenWeb = false;
               f.setArguments(args);
             }
             title.setText(R.string.app_name);
@@ -191,14 +394,7 @@ public class MainActivity extends AppCompatActivity {
             f = new SettingsFragment();
             title.setText(R.string.app_name);
           } else {
-            // 终端：默认挂真 PTY 页（vim/htop/tmux 能跑），可在 PTY 页切回简易版
-            f =
-                com.deepseekharness.app.core.EnvironmentAccess.needsRecovery(controller)
-                    ? new EnvironmentRecoveryFragment()
-                    : PtyTerminalFragment.preferred(this)
-                        ? new PtyTerminalFragment()
-                        : new TerminalFragment();
-            title.setText(R.string.app_name);
+            return false;
           }
           UiMotion.page(this, getSupportFragmentManager().beginTransaction())
               .replace(R.id.fragment_container, f)
@@ -209,15 +405,55 @@ public class MainActivity extends AppCompatActivity {
     // 通知点击进入：必须在 setSelectedItemId 之前登记 —— setSelectedItemId 会【同步】
     // 触发监听器创建 LaunchFragment，那时再置标记已经晚了（参数带不进去）。
     consumeOpenWeb(getIntent());
-    if (savedInstanceState == null) {
+    boolean unresolved = controller != null && controller.hasUnresolvedWebSession();
+    if (savedInstanceState == null || unresolved) {
       nav.setSelectedItemId(
-          getIntent().getBooleanExtra("open_plugins", false) ? R.id.nav_plugins : R.id.nav_launch);
+          !unresolved && getIntent().getBooleanExtra("open_plugins", false)
+              ? R.id.nav_plugins
+              : R.id.nav_launch);
     }
+    // 入口检查确认旧运行实例后，才把已保存的旧终端页迁到唯一新宿主。
+    Fragment restoredTerminal =
+        getSupportFragmentManager().findFragmentById(R.id.fragment_container);
+    if (!unresolved
+        && (restoredTerminal instanceof PtyTerminalFragment
+            || restoredTerminal instanceof TerminalFragment)) {
+      gatedPages.remove(restoredTerminal);
+      getSupportFragmentManager().beginTransaction().remove(restoredTerminal).commitNow();
+      nav.setSelectedItemId(R.id.nav_launch);
+      getIntent().putExtra("open_terminal", true);
+    }
+    // 保存态恢复或上方重定向都可能绕过监听器，这里再对齐一次左栏与语境。
+    syncShellRail(nav.getSelectedItemId());
+    releaseGatedPages(!unresolved);
     consumeTaskTarget(getIntent());
     // 只订阅后台检查；提示不切换导航，也不自动打开更新页或 Web。
     startupUpdates = com.deepseekharness.app.core.UpdateEngine.get(this);
     startupUpdates.state().observe(this, state -> showStartupUpdate());
     startupUpdates.checkOnStartup(config.isCheckUpdate());
+    scheduleFirstRunWeb();
+    recoveryHandler.removeCallbacks(refreshRecovery);
+    recoveryHandler.post(refreshRecovery);
+    maybePromptExternalRestore();
+  }
+
+  private void releaseGatedPages(boolean allowed) {
+    if (allowed && !gatedPages.isEmpty()) {
+      var resume = getSupportFragmentManager().beginTransaction();
+      for (Fragment page : gatedPages)
+        if (page.isAdded())
+          resume.setMaxLifecycle(page, androidx.lifecycle.Lifecycle.State.RESUMED);
+      resume.commitNow();
+    }
+    gatedPages.clear();
+  }
+
+  private void scheduleFirstRunWeb() {
+    findViewById(android.R.id.content)
+        .post(
+            () -> {
+              if (!isFinishing() && !isDestroyed()) FirstRunWebStart.schedule(this, getIntent());
+            });
   }
 
   private void showStartupUpdate() {
@@ -238,10 +474,13 @@ public class MainActivity extends AppCompatActivity {
                     com.deepseekharness.app.core.UpdateEngine.channelName(
                         startupUpdates.channel())),
                 com.google.android.material.snackbar.Snackbar.LENGTH_LONG)
-            .setAnchorView(R.id.bottom_nav)
             .setAction(
                 com.deepseekharness.app.util.UiText.text("查看更新"),
                 view -> startActivity(new Intent(this, UpdateActivity.class)));
+    // 平板形态的底栏是隐藏的：锚到隐藏视图会把提示顶出可视区，隐藏时交给内容区默认定位。
+    android.view.View navAnchor = findViewById(R.id.bottom_nav);
+    if (navAnchor != null && navAnchor.getVisibility() == android.view.View.VISIBLE)
+      updateNotice.setAnchorView(R.id.bottom_nav);
     updateNotice.addCallback(
         new com.google.android.material.snackbar.Snackbar.Callback() {
           @Override
@@ -264,6 +503,8 @@ public class MainActivity extends AppCompatActivity {
   @Override
   protected void onPostResume() {
     super.onPostResume();
+    if (mainReady && getIntent().getBooleanExtra(FirstRunWebStart.EXTRA, false))
+      scheduleFirstRunWeb();
     showStartupUpdate();
   }
 
@@ -275,6 +516,7 @@ public class MainActivity extends AppCompatActivity {
 
   @Override
   protected void onPause() {
+    if (!mainReady) entryGate.cancel();
     recoveryHandler.removeCallbacks(refreshRecovery);
     if (updateNotice != null) {
       updateNotice.dismiss();
@@ -286,7 +528,15 @@ public class MainActivity extends AppCompatActivity {
   @Override
   protected void onNewIntent(Intent intent) {
     super.onNewIntent(intent);
+    leavingUi = false;
     setIntent(intent);
+    BrowserTasks.entry("NEW_INTENT", intent);
+    if (resumeBackground(intent)) return;
+    if (!mainReady) {
+      entryGate.cancel();
+      beginEntryCheck();
+      return;
+    }
     BottomNavigationView nav = findViewById(R.id.bottom_nav);
     if (nav != null && intent.getBooleanExtra("open_plugins", false))
       nav.setSelectedItemId(R.id.nav_plugins);
@@ -296,6 +546,16 @@ public class MainActivity extends AppCompatActivity {
     }
     consumeOpenWeb(intent);
     consumeTaskTarget(intent);
+    if (findViewById(android.R.id.content) != null) scheduleFirstRunWeb();
+  }
+
+  private boolean resumeBackground(Intent intent) {
+    if (BrowserTasks.nativeDestination(intent)) {
+      intent.removeExtra(BrowserTasks.NATIVE_HOME);
+      BrowserTasks.nativeNavigation();
+      return false;
+    }
+    return BrowserTasks.resumeBackground(this, true);
   }
 
   private void renderThemeButton() {
@@ -344,12 +604,39 @@ public class MainActivity extends AppCompatActivity {
         .show();
   }
 
+  /** 所有本机终端入口共用门禁；不替换Main页面，也不把导航当新建命令。 */
+  public void openTerminal() {
+    if (!mainReady
+        || terminalPageInFlight
+        || isFinishing()
+        || isDestroyed()
+        || getSupportFragmentManager().isStateSaved()) return;
+    HarnessController controller = HarnessController.get(this);
+    if (com.deepseekharness.app.core.EnvironmentAccess.needsRecovery(controller)) {
+      startActivity(new Intent(this, StartupRecoveryActivity.class));
+      return;
+    }
+    // 打开页面、查看和切换已有会话不依赖插件列表；新建会话在页面内单独做维护/环境准入。
+    terminalPageInFlight = true;
+    try {
+      terminalPage.launch(new Intent(this, TerminalActivity.class));
+    } catch (RuntimeException error) {
+      terminalPageInFlight = false;
+      android.widget.Toast.makeText(
+              this,
+              com.deepseekharness.app.util.UiText.choose(
+                  "无法打开终端页面，会话未改变", "Could not open the terminal page; sessions were not changed"),
+              android.widget.Toast.LENGTH_LONG)
+          .show();
+    }
+  }
+
   private void consumeTaskTarget(Intent intent) {
     BottomNavigationView nav = findViewById(R.id.bottom_nav);
     if (nav == null) return;
     if (intent.getBooleanExtra("open_terminal", false)) {
       intent.removeExtra("open_terminal");
-      nav.setSelectedItemId(R.id.nav_terminal);
+      openTerminal();
     }
     if (intent.getBooleanExtra("open_install", false)) {
       intent.removeExtra("open_install");
@@ -386,6 +673,7 @@ public class MainActivity extends AppCompatActivity {
     // 直接把意图交给当前这个 LaunchFragment；没有就等下次创建。
     getSupportFragmentManager().executePendingTransactions();
     Fragment shown = getSupportFragmentManager().findFragmentById(R.id.fragment_container);
+    // 已恢复的启动页也消费同一次明确请求。
     if (shown instanceof LaunchFragment) {
       pendingOpenWeb = false;
       ((LaunchFragment) shown).requestAutoEnterWeb();
@@ -416,11 +704,61 @@ public class MainActivity extends AppCompatActivity {
     else if (shown instanceof TerminalFragment || shown instanceof PtyTerminalFragment)
       title.setText(R.string.app_name);
     else title.setText(R.string.app_name);
+    renderPageContext(shown);
+  }
+
+  /**
+   * 顶栏页面语境与平板左栏选中态：由 BottomNavigationView 的唯一选中事件统一驱动。
+   *
+   * <p>没有左栏（手机）时只更新语境；{@code app_context} 缺失时静默跳过。
+   */
+  private void syncShellRail(int selectedId) {
+    if (shellRail != null) shellRail.setSelectedItemId(selectedId);
+    TextView context = findViewById(R.id.app_context);
+    if (context == null) return;
+    if (selectedId == R.id.nav_plugins)
+      context.setText(
+          com.deepseekharness.app.util.UiText.choose("扩展你的工作方式", "Extend how you work"));
+    else if (selectedId == R.id.nav_settings)
+      context.setText(
+          com.deepseekharness.app.util.UiText.choose("偏好与管理", "Preferences & management"));
+    else if (selectedId == R.id.nav_terminal)
+      context.setText(com.deepseekharness.app.util.UiText.choose("本机终端", "Local terminal"));
+    else context.setText(com.deepseekharness.app.util.UiText.choose("本机环境", "Local environment"));
+  }
+
+  /**
+   * 语境跟随实际页面：保存态恢复或外部入口可能让底栏选中项与当前根页短暂不一致，
+   * 这里以当前根页为准，避免顶栏语境残留上一个页面。
+   */
+  private void renderPageContext(@Nullable Fragment shown) {
+    TextView context = findViewById(R.id.app_context);
+    if (context == null) return;
+    if (shown instanceof PluginFragment || shown instanceof EnvironmentRecoveryFragment)
+      context.setText(
+          com.deepseekharness.app.util.UiText.choose("扩展你的工作方式", "Extend how you work"));
+    else if (shown instanceof PtyTerminalFragment || shown instanceof TerminalFragment)
+      context.setText(com.deepseekharness.app.util.UiText.choose("本机终端", "Local terminal"));
+    else if (shown instanceof LaunchFragment || shown == null)
+      context.setText(com.deepseekharness.app.util.UiText.choose("本机环境", "Local environment"));
+    else
+      context.setText(
+          com.deepseekharness.app.util.UiText.choose("偏好与管理", "Preferences & management"));
   }
 
   @Override
   protected void onResume() {
     super.onResume();
+    if (discardedLauncherEntry) return;
+    leavingUi = false;
+    BrowserTasks.entry("RESUME", getIntent());
+    // 已核验的同代网页先恢复，避免入口检查完成后遗漏唯一一次 onResume。
+    if (BrowserTasks.resumeBackground(this)) return;
+    if (!mainReady && !isFinishing()) {
+      beginEntryCheck();
+      return;
+    }
+    BrowserTasks.rememberMain(this);
     if (!new ConfigStore(this)
         .getUiLanguage()
         .equals(com.deepseekharness.app.util.UiText.language())) LanguageController.apply(this);
@@ -452,13 +790,13 @@ public class MainActivity extends AppCompatActivity {
   private void maybePromptExternalRestore() {
     if (restoreProbeStarted || isFinishing() || isDestroyed()) return;
     HarnessController controller = HarnessController.get(this);
-    if (!controller.isEnvironmentReady()
-        || com.deepseekharness.app.core.BackupTask.get(this).busy()
-        || com.deepseekharness.app.backup.ExternalBackupScanner.hasUserData(
-            controller.proot().getRootfsDir())) return;
     restoreProbeStarted = true;
     new Thread(
             () -> {
+              if (!controller.isEnvironmentReady()
+                  || com.deepseekharness.app.core.BackupTask.get(this).busy()
+                  || com.deepseekharness.app.backup.ExternalBackupScanner.hasUserData(
+                      controller.proot().getRootfsDir())) return;
               com.deepseekharness.app.backup.ExternalBackupScanner.Scan scan =
                   com.deepseekharness.app.backup.ExternalBackupScanner.scan(this);
               boolean invisible =
@@ -590,21 +928,36 @@ public class MainActivity extends AppCompatActivity {
 
   private final android.os.Handler recoveryHandler =
       new android.os.Handler(android.os.Looper.getMainLooper());
+
+  /** Native plugin/settings work stays in front of a persistent startup failure. */
+  static boolean startupRecoveryDestination(int selectedItem, Fragment page) {
+    return selectedItem == R.id.nav_launch && (page == null || page instanceof LaunchFragment);
+  }
+
   private final Runnable refreshRecovery =
       new Runnable() {
         @Override
         public void run() {
           TextView banner = findViewById(R.id.environment_recovery_banner);
           if (banner == null || isFinishing()) return;
+          HarnessController controller = HarnessController.get(MainActivity.this);
+          boolean startupRecovery =
+              controller.config().isStartupRecoveryRequested()
+                  || EnvironmentUiStatus.get(MainActivity.this).repairs;
           boolean limited = EnvironmentUiStatus.get(MainActivity.this).recovery;
           boolean busy =
               com.deepseekharness.app.core.BackupTask.get(MainActivity.this).maintenanceBusy();
           banner.setVisibility(
-              limited || busy ? android.view.View.VISIBLE : android.view.View.GONE);
+              limited || busy || startupRecovery
+                  ? android.view.View.VISIBLE
+                  : android.view.View.GONE);
           banner.setText(
               busy
                   ? com.deepseekharness.app.util.UiText.text("环境维护进行中 · 点击查看进度")
-                  : com.deepseekharness.app.util.UiText.text("受限模式：环境需要恢复 · 点击处理"));
+                  : limited
+                      ? com.deepseekharness.app.util.UiText.text("受限模式：环境需要恢复 · 点击处理")
+                      : com.deepseekharness.app.util.UiText.choose(
+                          "启动未完成 · 点击查看恢复选项", "Startup did not complete · View recovery options"));
           com.deepseekharness.app.util.BackupTaskState.Snapshot task =
               com.deepseekharness.app.core.BackupTask.get(MainActivity.this).snapshot();
           if (busy && task.busy())
@@ -615,10 +968,7 @@ public class MainActivity extends AppCompatActivity {
                         ? com.deepseekharness.app.util.UiText.choose(
                             "等待确认恢复备份", "Backup restore awaiting confirmation")
                         : com.deepseekharness.app.util.StartupText.render(task.kind))));
-          HarnessController controller = HarnessController.get(MainActivity.this);
-          boolean startupRecovery =
-              controller.config().isStartupRecoveryRequested()
-                  || EnvironmentUiStatus.get(MainActivity.this).repairs;
+          BottomNavigationView nav = findViewById(R.id.bottom_nav);
           String key =
               controller.startupDiagnostics().recordId()
                   + ":"
@@ -628,8 +978,12 @@ public class MainActivity extends AppCompatActivity {
           if (startupRecovery
               && !limited
               && !busy
+              && !com.deepseekharness.app.core.MaintenanceCoordinator.isEnvironmentTaskBusy()
               && !controller.isStarting()
               && !controller.isStopping()
+              && startupRecoveryDestination(
+                  nav == null ? R.id.nav_launch : nav.getSelectedItemId(),
+                  getSupportFragmentManager().findFragmentById(R.id.fragment_container))
               && !key.equals(openedRecovery)
               && getLifecycle()
                   .getCurrentState()
@@ -644,28 +998,29 @@ public class MainActivity extends AppCompatActivity {
   @Override
   protected void onSaveInstanceState(Bundle state) {
     state.putString("opened_startup_recovery", openedRecovery);
+    state.putBoolean("terminal_page_in_flight", terminalPageInFlight);
     super.onSaveInstanceState(state);
   }
 
   @Override
   protected void onDestroy() {
-    // 主题切换/旋转只重建界面，不能把正在运行的终端一起关闭。
-    if (!isChangingConfigurations()) {
-      try {
-        PtyTerminalFragment.shutdown();
-      } catch (Throwable ignored) {
-      }
-      try {
-        TerminalFragment.shutdownShell();
-      } catch (Throwable ignored) {
-      }
-    }
+    entryGate.cancel();
+    // Main销毁只解绑页面。终端由进程级owner和独立FGS持有，
+    // 只能通过明确会话结束/环境维护核验退出，不能把Activity销毁当停止请求。
     super.onDestroy();
   }
 
   public static void start(Context ctx) {
-    ctx.startActivity(
-        new Intent(ctx, MainActivity.class)
-            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP));
+    BrowserTasks.openMain(ctx);
+  }
+
+  /** Stable notification/native-home entry; keeps the existing browser and native pages. */
+  public static Intent homeIntent(Context ctx) {
+    return BrowserTasks.homeIntent(ctx).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+  }
+
+  /** A specific native destination supplies its own open_* extra after this shared route. */
+  public static Intent navigationIntent(Context ctx) {
+    return BrowserTasks.navigationIntent(ctx).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
   }
 }

@@ -1,6 +1,6 @@
 {
   "name": "dsh-tool-vscreen",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "DSHA virtual display automation tools",
   "type": "module",
   "main": "lib/index.js",
@@ -14,6 +14,6 @@
     }
   },
   "peerDependencies": {
-    "@deepseek-ai/dsh-mcp-client": "0.2.0-rc.2"
+    "@deepseek-ai/dsh-mcp-client": "0.2.1-rc.3"
   }
 }

@@ -30,7 +30,8 @@ final class RuntimeLauncher {
         ports.record("DNS_PREPARE", error.getClass().getSimpleName());
       }
       List<String> argv = spec.runtime.baseArgv(rootfs, spec.hardlinks, spec.dataDomain);
-      bindPreloads(argv);
+      File preloads = context == null ? null : RuntimeLauncherAssets.prepare(context);
+      bindPreloads(argv, preloads);
       for (var bind : spec.binds) {
         argv.add("-b");
         argv.add(bind.host() + ":" + bind.guest());
@@ -40,7 +41,7 @@ final class RuntimeLauncher {
       argv.add(command);
       ProcessBuilder builder = new ProcessBuilder(argv).redirectErrorStream(true);
       if (!spec.isolated && !spec.pipedInput) Compat.redirectStdinDevNull(builder);
-      environment(builder, spec);
+      environment(builder, spec, preloads);
       if (spec.coldTrace)
         ports.record(
             "EXEC",
@@ -59,6 +60,11 @@ final class RuntimeLauncher {
   }
 
   void environment(ProcessBuilder builder, LaunchSpec spec) throws IOException {
+    environment(builder, spec, null);
+  }
+
+  private void environment(ProcessBuilder builder, LaunchSpec spec, File preparedPreloads)
+      throws IOException {
     spec.runtime.applyEnv(builder, base, lib, tmp);
     if ("proot".equals(spec.runtime.id()) && !spec.hardlinks) {
       File l2s = new File(rootfs, ".l2s");
@@ -74,7 +80,9 @@ final class RuntimeLauncher {
     builder.environment().put("DEBIAN_FRONTEND", "noninteractive");
     RuntimeTools.applyEnvironment(rootfs, builder.environment(), ports.settings());
     if (context != null) {
-      RuntimeLauncherAssets.prepare(context);
+      // builder() already checked the exact overlay it bound. Independent terminal/recovery
+      // callers still prepare here; no mutable filesystem proof survives a builder invocation.
+      if (preparedPreloads == null) RuntimeLauncherAssets.prepare(context);
       String bridge = "--require=" + RuntimeLauncherAssets.GUEST + "/bridge-token-compat.cjs";
       String previous = builder.environment().getOrDefault("NODE_OPTIONS", "");
       if (!java.util.Arrays.asList(previous.split("\\s+")).contains(bridge))
@@ -86,18 +94,50 @@ final class RuntimeLauncher {
       com.deepseekharness.app.util.ColdInstallPlan.applyEnvironment(
           builder.environment(), spec.coldMode);
     builder.environment().putAll(spec.environment);
+    // Classification evidence comes from this APK, never a guest-writable JSON
+    // or caller-supplied environment. Native backup independently reads the APK.
+    builder.environment().remove("DSHA_MANAGED_PACKAGE_PROOFS_SHA256");
+    if (context != null)
+      builder
+          .environment()
+          .put("DSHA_MANAGED_PACKAGE_PROOFS_SHA256", managedPackageProofAssetSha256(context));
+  }
+
+  static String managedPackageProofAssetSha256(Context context) throws IOException {
+    java.security.MessageDigest digest = com.deepseekharness.app.backup.BackupArchive.sha();
+    try (java.io.InputStream input = context.getAssets().open("managed-package-proofs.json")) {
+      byte[] buffer = new byte[8192];
+      int count, total = 0;
+      while ((count = input.read(buffer)) != -1) {
+        total += count;
+        if (total > 2 * 1024 * 1024) throw new IOException("PACKAGE_PROOFS_LIMIT");
+        digest.update(buffer, 0, count);
+      }
+    }
+    return com.deepseekharness.app.backup.BackupArchive.hex(digest.digest());
   }
 
   Process start(String command, LaunchSpec spec) throws IOException {
+    return start(command, spec, null);
+  }
+
+  Process start(String command, LaunchSpec spec, RuntimeCommandTiming timing) throws IOException {
     ProcessBuilder builder = builder(command, spec);
-    return spec.isolated
-        ? IsolatedInstallProcess.start(builder, tmp, context, spec.record)
-        : builder.start();
+    if (timing != null) timing.mark("launcher-prepare");
+    Process process =
+        spec.isolated
+            ? IsolatedInstallProcess.start(builder, tmp, context, spec.record)
+            : builder.start();
+    if (timing != null) timing.mark("process-create");
+    return process;
   }
 
   void bindPreloads(List<String> argv) throws IOException {
-    if (context == null) return;
-    File host = RuntimeLauncherAssets.prepare(context);
+    bindPreloads(argv, context == null ? null : RuntimeLauncherAssets.prepare(context));
+  }
+
+  private void bindPreloads(List<String> argv, File host) {
+    if (host == null) return;
     argv.add("-b");
     argv.add(host.getAbsolutePath() + ":" + RuntimeLauncherAssets.GUEST);
   }

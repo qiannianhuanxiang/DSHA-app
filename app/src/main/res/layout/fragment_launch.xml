@@ -1,74 +1,115 @@
 <?xml version='1.0' encoding='utf-8'?>
-<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android" xmlns:app="http://schemas.android.com/apk/res-auto" android:layout_width="match_parent" android:layout_height="match_parent">
-    <ScrollView android:layout_width="match_parent" android:layout_height="match_parent" android:fillViewport="true" android:background="@color/surface" android:id="@+id/launch_panel">
-        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:paddingLeft="18dp" android:paddingRight="18dp" android:paddingTop="14dp" android:paddingBottom="22dp">
-            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:id="@+id/launch_sections" android:orientation="vertical">
-                <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:id="@+id/launch_actions" android:orientation="vertical" android:background="@drawable/bg_card" android:padding="16dp">
-                    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal" android:gravity="center_vertical">
-                        <TextView android:layout_width="44dp" android:layout_height="44dp" android:id="@+id/launch_run_dot" android:importantForAccessibility="no" android:text="@string/ui_status_dot" android:textSize="12sp" android:textColor="@color/text_muted" android:includeFontPadding="false" android:gravity="center" android:background="@drawable/bg_card" />
-                        <LinearLayout android:layout_width="0dp" android:layout_height="wrap_content" android:orientation="vertical" android:layout_weight="1" android:layout_marginStart="14dp">
-                            <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:id="@+id/launch_run_state" android:accessibilityLiveRegion="polite" android:text="@string/ui2_stopped" android:textSize="20sp" android:textColor="@color/text" android:includeFontPadding="false" android:textStyle="bold" />
-                            <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:id="@+id/launch_subtitle" android:text="@string/ui2_launch_hint" android:textSize="12sp" android:textColor="@color/text_secondary" android:includeFontPadding="false" android:layout_marginTop="5dp" />
-                        </LinearLayout>
-                    </LinearLayout>
-                    <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:id="@+id/launch_status" android:text="" android:textSize="11sp" android:textColor="@color/text_muted" android:includeFontPadding="false" android:layout_marginTop="8dp" />
-                    <ProgressBar android:layout_width="match_parent" android:layout_height="3dp" android:id="@+id/launch_busy" style="?android:attr/progressBarStyleHorizontal" android:indeterminate="true" android:indeterminateTint="@color/primary" android:visibility="gone" />
-                    <androidx.appcompat.widget.AppCompatButton android:layout_width="match_parent" android:layout_height="wrap_content" android:id="@+id/launch_start" android:text="@string/ui2_start" android:textSize="13sp" android:textStyle="bold" android:textAllCaps="false" android:gravity="center" android:includeFontPadding="false" android:minHeight="48dp" android:minWidth="0dp" android:paddingLeft="12dp" android:paddingRight="12dp" android:paddingTop="10dp" android:paddingBottom="10dp" android:background="@drawable/bg_btn_primary" android:textColor="@color/button_primary_text" android:layout_marginTop="16dp" />
-                    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:id="@+id/launch_controls" android:orientation="horizontal" android:layout_marginTop="8dp" android:gravity="center_vertical">
-                        <androidx.appcompat.widget.AppCompatButton android:layout_width="0dp" android:layout_height="wrap_content" android:id="@+id/launch_open" android:text="@string/ui2_restart" android:textSize="13sp" android:textStyle="bold" android:textAllCaps="false" android:gravity="center" android:includeFontPadding="false" android:minHeight="48dp" android:minWidth="0dp" android:paddingLeft="12dp" android:paddingRight="12dp" android:paddingTop="10dp" android:paddingBottom="10dp" android:background="@drawable/bg_btn" android:textColor="@color/text" android:layout_weight="1" />
-                        <androidx.appcompat.widget.AppCompatButton android:layout_width="0dp" android:layout_height="wrap_content" android:id="@+id/launch_stop" android:text="@string/ui2_stop" android:textSize="13sp" android:textStyle="bold" android:textAllCaps="false" android:gravity="center" android:includeFontPadding="false" android:minHeight="48dp" android:minWidth="0dp" android:paddingLeft="12dp" android:paddingRight="12dp" android:paddingTop="10dp" android:paddingBottom="10dp" android:background="@drawable/bg_btn" android:textColor="@color/text" android:layout_weight="1" android:layout_marginStart="8dp" />
-                    </LinearLayout>
-                </LinearLayout>
-                <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal" android:layout_marginTop="12dp" android:gravity="center_vertical">
-                    <LinearLayout android:layout_width="0dp" android:layout_height="wrap_content" android:orientation="vertical" android:background="@drawable/bg_card" android:layout_weight="1" android:padding="14dp">
-                        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:id="@+id/launch_port" android:text="@string/ui_status_unavailable" android:textSize="19sp" android:textColor="@color/text" android:includeFontPadding="false" android:fontFamily="monospace" />
-                        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/ui2_port" android:textSize="12sp" android:textColor="@color/text_muted" android:includeFontPadding="false" android:layout_marginTop="8dp" />
-                    </LinearLayout>
-                    <LinearLayout android:layout_width="0dp" android:layout_height="wrap_content" android:orientation="vertical" android:background="@drawable/bg_card" android:layout_weight="1" android:padding="14dp" android:layout_marginStart="10dp">
-                        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:id="@+id/launch_environment" android:text="@string/ui_status_unavailable" android:textSize="19sp" android:textColor="@color/text" android:includeFontPadding="false" android:fontFamily="monospace" />
-                        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/ui2_environment" android:textSize="12sp" android:textColor="@color/text_muted" android:includeFontPadding="false" android:layout_marginTop="8dp" />
-                    </LinearLayout>
-                </LinearLayout>
-                <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/ui2_shortcuts" android:textSize="11sp" android:textColor="@color/text_muted" android:includeFontPadding="false" android:textStyle="bold" android:layout_marginTop="18dp" android:layout_marginBottom="8dp" />
-                <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:background="@drawable/bg_card">
-                    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:id="@+id/launch_models" android:orientation="horizontal" android:minHeight="64dp" android:padding="13dp" android:clickable="true" android:focusable="true" android:background="?attr/selectableItemBackground" android:gravity="center_vertical">
-                        <ImageView android:layout_width="32dp" android:layout_height="32dp" android:src="@drawable/ic_settings" android:background="@drawable/bg_logo" android:padding="8dp" android:contentDescription="@null" app:tint="@color/primary" />
-                        <LinearLayout android:layout_width="0dp" android:layout_height="wrap_content" android:orientation="vertical" android:layout_weight="1" android:layout_marginStart="12dp">
-                            <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/ui2_models" android:textSize="13sp" android:textColor="@color/text" android:includeFontPadding="false" android:textStyle="bold" />
-                            <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/ui2_models_sub" android:textSize="11sp" android:textColor="@color/text_secondary" android:includeFontPadding="false" android:layout_marginTop="4dp" />
-                        </LinearLayout>
-                        <ImageView android:layout_width="16dp" android:layout_height="16dp" android:src="@drawable/ic_ui2_chevron" android:contentDescription="@null" app:tint="@color/text_muted" />
-                    </LinearLayout>
-                    <View android:layout_width="match_parent" android:layout_height="1dp" android:background="@color/line" />
-                    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:id="@+id/launch_address" android:orientation="horizontal" android:minHeight="64dp" android:padding="13dp" android:clickable="true" android:focusable="true" android:background="?attr/selectableItemBackground" android:gravity="center_vertical">
-                        <ImageView android:layout_width="32dp" android:layout_height="32dp" android:src="@drawable/ic_ui_link" android:background="@drawable/bg_logo" android:padding="8dp" android:contentDescription="@null" app:tint="@color/primary" />
-                        <LinearLayout android:layout_width="0dp" android:layout_height="wrap_content" android:orientation="vertical" android:layout_weight="1" android:layout_marginStart="12dp">
-                            <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/ui2_address" android:textSize="13sp" android:textColor="@color/text" android:includeFontPadding="false" android:textStyle="bold" />
-                            <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/ui2_address_sub" android:textSize="11sp" android:textColor="@color/text_secondary" android:includeFontPadding="false" android:layout_marginTop="4dp" />
-                        </LinearLayout>
-                        <ImageView android:layout_width="16dp" android:layout_height="16dp" android:src="@drawable/ic_ui2_chevron" android:contentDescription="@null" app:tint="@color/text_muted" />
-                    </LinearLayout>
-                </LinearLayout>
-                <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:id="@+id/launch_log_panel" android:orientation="vertical" android:layout_marginTop="16dp">
-                    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal" android:gravity="center_vertical">
-                        <TextView android:layout_width="0dp" android:layout_height="wrap_content" android:text="@string/ui2_logs" android:textSize="12sp" android:textColor="@color/text_secondary" android:includeFontPadding="false" android:layout_weight="1" />
-                        <Button android:id="@+id/launch_download_logs" android:layout_width="wrap_content" android:layout_height="wrap_content" style="@style/Widget.DSHA.TextButton" android:text="@string/ui_m0046" />
-                    </LinearLayout>
-                    <com.deepseekharness.app.ui.LogScrollView android:layout_width="match_parent" android:layout_height="170dp" android:id="@+id/launch_log_scroll" android:fillViewport="true" android:background="@drawable/bg_ui2_console">
-                        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical">
-                            <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:id="@+id/lan_addr" android:text="" android:textSize="11sp" android:textColor="@color/primary" android:includeFontPadding="false" android:visibility="gone" android:textIsSelectable="true" />
-                            <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:id="@+id/launch_log" android:text="@string/ui_m0025" android:textSize="12sp" android:textColor="@color/ui2_log_text" android:includeFontPadding="false" android:fontFamily="monospace" android:textIsSelectable="true" android:padding="12dp" />
-                        </LinearLayout>
-                    </com.deepseekharness.app.ui.LogScrollView>
-                    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal" android:layout_marginTop="10dp" android:gravity="center_vertical">
-                        <androidx.appcompat.widget.AppCompatButton android:layout_width="0dp" android:layout_height="wrap_content" android:id="@+id/launch_safe" android:text="@string/ui_m0007" android:textSize="13sp" android:textStyle="bold" android:textAllCaps="false" android:gravity="center" android:includeFontPadding="false" android:minHeight="48dp" android:minWidth="0dp" android:paddingLeft="12dp" android:paddingRight="12dp" android:paddingTop="10dp" android:paddingBottom="10dp" android:background="@drawable/bg_btn" android:textColor="@color/text" android:layout_weight="1" />
-                        <androidx.appcompat.widget.AppCompatButton android:layout_width="0dp" android:layout_height="wrap_content" android:id="@+id/launch_recovery" android:text="@string/ui_m0011" android:textSize="13sp" android:textStyle="bold" android:textAllCaps="false" android:gravity="center" android:includeFontPadding="false" android:minHeight="48dp" android:minWidth="0dp" android:paddingLeft="12dp" android:paddingRight="12dp" android:paddingTop="10dp" android:paddingBottom="10dp" android:background="@drawable/bg_btn" android:textColor="@color/text" android:layout_weight="1" android:layout_marginStart="8dp" />
-                    </LinearLayout>
-                </LinearLayout>
-            </LinearLayout>
+<!--
+  启动主页（UI v5 试点）：语境 / 大标题 / 说明 → 活动条与真实状态 → 主操作 → 三格状态 →
+  快捷行 → 启动日志。所有状态文案与可见性由 LaunchFragment 按真实运行状态写入；
+  这里只做样式重排，保留 LaunchFragment 现用的全部 id。
+-->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android" xmlns:app="http://schemas.android.com/apk/res-auto" android:layout_width="match_parent" android:layout_height="match_parent" android:background="@color/shell_bg">
+
+  <ScrollView android:id="@+id/launch_panel" android:layout_width="match_parent" android:layout_height="match_parent" android:background="@color/shell_bg" android:fillViewport="true" android:overScrollMode="ifContentScrolls">
+
+    <LinearLayout android:id="@+id/launch_sections" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:paddingStart="@dimen/shell_launch_page_pad" android:paddingTop="@dimen/shell_launch_page_top" android:paddingEnd="@dimen/shell_launch_page_pad" android:paddingBottom="@dimen/shell_launch_page_bottom">
+
+      <!-- 顶部语境 + 大标题 + 说明 + 活动条；启动 / 停止 / 进入时复用同一块区域。 -->
+      <LinearLayout android:id="@+id/launch_actions" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical">
+
+        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:gravity="center_vertical" android:orientation="horizontal">
+          <TextView android:id="@+id/launch_run_dot" style="@style/ShellLaunchDot" android:layout_width="wrap_content" android:layout_height="wrap_content" android:importantForAccessibility="no" android:text="@string/ui_status_dot" />
+          <TextView android:id="@+id/launch_eyebrow" style="@style/ShellLaunchEyebrow" android:layout_width="0dp" android:layout_height="wrap_content" android:layout_marginStart="7dp" android:layout_weight="1" />
         </LinearLayout>
-    </ScrollView>
-    <FrameLayout android:layout_width="match_parent" android:layout_height="match_parent" android:id="@+id/launch_web" android:visibility="gone">
-        <FrameLayout android:layout_width="match_parent" android:layout_height="match_parent" android:id="@+id/launch_web_box" />
-    </FrameLayout>
+
+        <TextView android:id="@+id/launch_run_state" style="@style/ShellLaunchTitle" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="12dp" android:accessibilityLiveRegion="polite" android:text="@string/ui2_stopped" />
+
+        <TextView android:id="@+id/launch_subtitle" style="@style/ShellLaunchDescription" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="8dp" android:text="@string/ui2_launch_hint" />
+
+        <com.deepseekharness.app.ui.ShellActivityTrack android:id="@+id/launch_activity" android:layout_width="match_parent" android:layout_height="@dimen/shell_launch_activity_height" android:layout_marginTop="18dp" android:importantForAccessibility="no" />
+
+        <TextView android:id="@+id/launch_status" style="@style/ShellLaunchMeta" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="10dp" android:accessibilityLiveRegion="polite" android:text="" android:visibility="gone" />
+
+        <androidx.appcompat.widget.AppCompatButton android:id="@+id/launch_start" style="@style/ShellLaunchPrimary" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="20dp" android:text="@string/ui2_start" />
+
+        <LinearLayout android:id="@+id/launch_controls" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="@dimen/shell_launch_control_gap" android:gravity="center_vertical" android:orientation="horizontal">
+          <androidx.appcompat.widget.AppCompatButton android:id="@+id/launch_open" style="@style/ShellLaunchSecondary" android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:text="@string/ui2_restart" />
+          <androidx.appcompat.widget.AppCompatButton android:id="@+id/launch_stop" style="@style/ShellLaunchSecondary" android:layout_width="0dp" android:layout_height="wrap_content" android:layout_marginStart="@dimen/shell_launch_control_gap" android:layout_weight="1" android:text="@string/ui2_stop" />
+        </LinearLayout>
+      </LinearLayout>
+
+      <!-- 三格真实状态：运行环境 / 工作台 / 本机端口。 -->
+      <LinearLayout android:id="@+id/launch_metrics" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="@dimen/shell_launch_section_gap" android:orientation="horizontal">
+
+        <LinearLayout style="@style/ShellLaunchMetric" android:layout_width="0dp" android:layout_height="match_parent" android:layout_weight="1">
+          <ImageView android:layout_width="@dimen/shell_launch_icon" android:layout_height="@dimen/shell_launch_icon" android:layout_marginBottom="9dp" android:contentDescription="@null" android:importantForAccessibility="no" android:src="@drawable/ic_ui2_box" app:tint="@color/shell_accent" />
+          <TextView android:id="@+id/launch_environment" style="@style/ShellLaunchMetricValue" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/ui_status_unavailable" />
+          <TextView style="@style/ShellLaunchMetricLabel" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/ui2_environment" />
+        </LinearLayout>
+
+        <LinearLayout style="@style/ShellLaunchMetric" android:layout_width="0dp" android:layout_height="match_parent" android:layout_marginStart="@dimen/shell_launch_metric_gap" android:layout_weight="1">
+          <ImageView android:layout_width="@dimen/shell_launch_icon" android:layout_height="@dimen/shell_launch_icon" android:layout_marginBottom="9dp" android:contentDescription="@null" android:importantForAccessibility="no" android:src="@drawable/ic_terminal" app:tint="@color/shell_accent" />
+          <TextView android:id="@+id/launch_workbench" style="@style/ShellLaunchMetricValue" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/ui_status_unavailable" />
+          <TextView style="@style/ShellLaunchMetricLabel" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/ui2_workspace" />
+        </LinearLayout>
+
+        <LinearLayout style="@style/ShellLaunchMetric" android:layout_width="0dp" android:layout_height="match_parent" android:layout_marginStart="@dimen/shell_launch_metric_gap" android:layout_weight="1">
+          <ImageView android:layout_width="@dimen/shell_launch_icon" android:layout_height="@dimen/shell_launch_icon" android:layout_marginBottom="9dp" android:contentDescription="@null" android:importantForAccessibility="no" android:src="@drawable/ic_ui_link" app:tint="@color/shell_accent" />
+          <TextView android:id="@+id/launch_port" style="@style/ShellLaunchMetricValue" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/ui_status_unavailable" />
+          <TextView style="@style/ShellLaunchMetricLabel" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/ui2_port" />
+        </LinearLayout>
+      </LinearLayout>
+
+      <!-- 快捷行：打开本机终端 / 运行环境 / 访问地址。 -->
+      <TextView android:id="@+id/launch_shortcuts_title" style="@style/ShellLaunchSectionTitle" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="@dimen/shell_launch_section_gap" android:layout_marginBottom="10dp" android:text="@string/ui2_shortcuts" />
+
+      <LinearLayout android:id="@+id/launch_shortcuts" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:background="@drawable/bg_shell_launch_card">
+
+        <TextView android:id="@+id/launch_terminal_row" style="@style/ShellLaunchRow" android:layout_width="match_parent" android:layout_height="wrap_content" android:drawableStart="@drawable/ic_terminal" android:drawableEnd="@drawable/ic_ui2_chevron" android:drawablePadding="12dp" android:text="" />
+
+        <View android:layout_width="match_parent" android:layout_height="1dp" android:layout_marginStart="16dp" android:background="@color/shell_line" />
+
+        <TextView android:id="@+id/launch_environment_row" style="@style/ShellLaunchRow" android:layout_width="match_parent" android:layout_height="wrap_content" android:drawableStart="@drawable/ic_ui2_box" android:drawableEnd="@drawable/ic_ui2_chevron" android:drawablePadding="12dp" android:text="" />
+
+        <View android:layout_width="match_parent" android:layout_height="1dp" android:layout_marginStart="16dp" android:background="@color/shell_line" />
+
+        <LinearLayout android:id="@+id/launch_address" android:layout_width="match_parent" android:layout_height="wrap_content" android:background="?attr/selectableItemBackground" android:clickable="true" android:focusable="true" android:gravity="center_vertical" android:minHeight="@dimen/shell_launch_row_height" android:orientation="horizontal" android:paddingStart="16dp" android:paddingTop="10dp" android:paddingEnd="16dp" android:paddingBottom="10dp">
+          <ImageView android:layout_width="32dp" android:layout_height="32dp" android:background="@drawable/bg_logo" android:contentDescription="@null" android:padding="8dp" android:src="@drawable/ic_ui_link" app:tint="@color/shell_accent" />
+          <LinearLayout android:layout_width="0dp" android:layout_height="wrap_content" android:layout_marginStart="12dp" android:layout_weight="1" android:orientation="vertical">
+            <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:includeFontPadding="false" android:text="@string/ui2_address" android:textColor="@color/shell_text" android:textSize="14sp" />
+            <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="3dp" android:includeFontPadding="false" android:text="@string/ui2_address_sub" android:textColor="@color/shell_text_muted" android:textSize="11sp" />
+          </LinearLayout>
+          <ImageView android:layout_width="16dp" android:layout_height="16dp" android:contentDescription="@null" android:src="@drawable/ic_ui2_chevron" app:tint="@color/shell_text_muted" />
+        </LinearLayout>
+
+      </LinearLayout>
+
+      <!-- 日志面板：复制 / 导出 / 跟随最新，以及原有安全启动与恢复入口。 -->
+      <LinearLayout android:id="@+id/launch_log_panel" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="@dimen/shell_launch_section_gap" android:orientation="vertical">
+
+        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:gravity="center_vertical" android:orientation="horizontal">
+          <TextView style="@style/ShellLaunchSectionTitle" android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:text="@string/ui2_logs" />
+          <Button android:id="@+id/launch_copy_logs" style="@style/ShellLaunchPillButton" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="" />
+          <Button android:id="@+id/launch_download_logs" style="@style/ShellLaunchPillButton" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginStart="8dp" android:text="@string/ui_m0046" />
+        </LinearLayout>
+
+        <com.deepseekharness.app.ui.LogScrollView android:id="@+id/launch_log_scroll" android:layout_width="match_parent" android:layout_height="@dimen/shell_launch_log_height" android:layout_marginTop="10dp" android:background="@drawable/bg_shell_status" android:fillViewport="true">
+          <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:padding="12dp">
+            <TextView android:id="@+id/lan_addr" android:layout_width="match_parent" android:layout_height="wrap_content" android:includeFontPadding="false" android:text="" android:textColor="@color/shell_accent" android:textIsSelectable="true" android:textSize="11sp" android:visibility="gone" />
+            <TextView android:id="@+id/launch_log" style="@style/ShellLaunchLog" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/ui_m0025" />
+          </LinearLayout>
+        </com.deepseekharness.app.ui.LogScrollView>
+
+        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="8dp" android:gravity="center_vertical" android:orientation="horizontal">
+          <TextView android:id="@+id/launch_follow_logs" style="@style/ShellLaunchPill" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="" />
+          <TextView android:id="@+id/launch_latest_button" style="@style/ShellLaunchLatest" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginStart="8dp" android:text="" android:visibility="gone" />
+        </LinearLayout>
+
+        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="12dp" android:gravity="center_vertical" android:orientation="horizontal">
+          <androidx.appcompat.widget.AppCompatButton android:id="@+id/launch_safe" style="@style/ShellLaunchSecondary" android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:text="@string/ui_m0007" />
+          <androidx.appcompat.widget.AppCompatButton android:id="@+id/launch_recovery" style="@style/ShellLaunchSecondary" android:layout_width="0dp" android:layout_height="wrap_content" android:layout_marginStart="@dimen/shell_launch_control_gap" android:layout_weight="1" android:text="@string/ui_m0011" />
+        </LinearLayout>
+      </LinearLayout>
+    </LinearLayout>
+  </ScrollView>
+
+  <FrameLayout android:id="@+id/launch_web" android:layout_width="match_parent" android:layout_height="match_parent" android:visibility="gone">
+    <FrameLayout android:id="@+id/launch_web_box" android:layout_width="match_parent" android:layout_height="match_parent" />
+  </FrameLayout>
 </FrameLayout>

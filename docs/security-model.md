@@ -27,7 +27,15 @@
 
 Root、Shizuku、ADB 在发送前选择实际通道；设备命令由原生与特权执行侧策略检查。短信、虚拟屏、截图/读屏、录音和存储仍依赖对应原生授权与 Android 实际权限；未知命令的确认不能替代设备身份核验。结果未知时不得换通道重放。
 
-设备写操作仅允许策略认可的共享存储子路径及 `/data/local/tmp/`，阻止共享根、DCIM、Pictures、Android/data、Android/obb 及其祖先写入；这只是受管设备命令的边界，不是同 UID 终端/插件的文件防火墙。短信默认关闭，只能通过独立可撤销授权查询当前 Android 用户的严格 `content query`，不能写内容提供者或直接读取 telephony 私有树。
+设备写操作仅允许策略认可的共享存储子路径及 `/data/local/tmp/`，阻止共享根、DCIM、Pictures、Android/data、Android/obb 及其祖先写入；这只是受管设备命令的边界，不是同 UID 终端/插件的文件防火墙。短信查询默认关闭，要求独立可撤销授权，仅接受当前 Android 用户的严格 `content query`，不允许provider写入；文件读取侧拒绝已识别的telephony路径及canonical目标。
+
+**已知覆盖缺口**：2026-10-22对 `140c7ba` 的核查发现，递归READ只核验顶层命令参数和canonical路径，未核验遍历过程中子链接指向的目标。`grep -R`等跟随链接的读取不能据此获得“整个telephony树不可达”的保证；这仍是待修实现问题。隔离策略检查证明派发前缺少该项核验，未读取真实手机短信，也未证明某ROM能被实际利用。FILE适配器的NOFOLLOW不替代READ守卫，具体入口与修复要求见[权限架构](device-permissions-architecture.md)第6.2节。
+
+**不受限制的设备 shell（build211 起，默认关闭）**：用户在设置 → 设备能力授权显式开启并确认后，`/device/execute?unrestricted=1`（guest 命令 `dsha-su`）把命令原样交给已授权的 root 或 Shizuku 的 `sh -c`，允许管道、脚本及 input/screencap/am/settings put 等白名单外命令。它只放宽命令白名单，不提升身份：没有 root/Shizuku 时不可用；ADB 通道不提供该模式；分区、SELinux、系统属性写入、挂载、重启与刷机在 App 侧和特权进程内（`DeviceShellPolicy.inspectUnrestricted`）各拒绝一次。该授权与短信、全局屏幕放行互相独立，开关变化即失效前序缓存，关闭后立即阻止新命令；它不从备份恢复。开启后 DSHA 环境内的助手与插件可以改动系统设置和读取其他应用数据，这是用户明确接受的风险，不应被描述为“仍受白名单保护”。
+
+**以 DSHA 身份发 Intent（build211 起）**：`/app/intent`（guest 命令 `dsha-am`）只支持显式目标的 `start` 与带包名的 `broadcast`，由 App 进程以自身身份 startActivity/sendBroadcast，不需要 root；授权沿用 `/app/launch` 的屏幕确认与敏感应用策略，`-d` 只接受 http(s)/geo/tel/mailto/market，不开放 service、file: 与无包名隐式启动。
+
+su的metadata发现、管理器授权和UID 0执行是不同事实；DSHA未在APK内实现Root管理器。上游固定源码与兼容性限制见[来源依据](references-and-provenance.md)第5.1节。Root管理器的身份授权不替代DSHA自身命令、短信或虚拟屏策略，也不把同UID任意插件代码变成强沙箱。
 
 无障碍可接收其他应用窗口事件；配对事件扫描只在用户开启的短暂窗口处理设置页。主动读屏和截图是独立能力，截图可保存到私有 Pictures/DSHA 并通过内容 URI 返回，不能声称完全不落盘。录音只接受当前本机页面的纯音频请求，摄像头和屏幕音频拒绝。
 
@@ -51,4 +59,4 @@ Root、Shizuku、ADB 在发送前选择实际通道；设备命令由原生与�
 
 ## 交付与验证限度
 
-正式包继续使用 com.dsh.client、E7E3 历史证书及 v1/v2/v3。构建不缺省发布口令，不替换为其它证书。本轮按用户要求不操作手机；软件测试、APK/ELF/签名核验和手机覆盖安装是不同证据。当前结果以 README 指向的本轮审计及交付报告为准，不能继承旧报告的通过范围。
+正式包继续使用 dsh.android.client、E7E3 历史证书及 v1/v2/v3。构建不缺省发布口令，不替换为其它证书。F13及包名改版原记录未操作手机；本轮已授权性能真机验收，实际执行结果仍须另绑最终APK。软件测试、APK/ELF/签名核验和手机覆盖安装是不同证据。当前结果以 README 指向的本轮审计及交付报告为准，不能继承旧报告的通过范围。
