@@ -122,11 +122,19 @@ public final class AssistantSessionController implements AutoCloseable {
   }
 
   public void expand() {
-    // Fence synchronously before a focusable window/IME or recognizer can appear.
+    // Expanding does not fence the screen. This window is created with
+    // FLAG_NOT_FOCUSABLE and is never an IME target, so growing it cannot steal
+    // focus from the app under observation; the focusable paths (editor, voice)
+    // raise their own ASSISTANT_IME / ASSISTANT_VOICE pauses.
+    //
+    // Fencing here was self-defeating: expand() set expanded=true, then
+    // hideForScreen() refused to run because expanded was true, and the window
+    // had already been removed, so collapse() - the only writer of
+    // Presence.setPanelExpanded(false) - could never be reached. The pause then
+    // outlived every begin() because stillHeld() reported the panel as expanded.
     if (!expanded) {
       expanded = true;
       com.deepseekharness.app.control.PhoneControlCoordinator.Presence.setPanelExpanded(true);
-      pause("ASSISTANT_EXPANDED");
     }
     changed();
   }
