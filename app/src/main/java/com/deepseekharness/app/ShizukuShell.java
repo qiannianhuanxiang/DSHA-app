@@ -280,6 +280,45 @@ public final class ShizukuShell {
     }
   }
 
+  /** 不受白名单限制的执行；调用方已核对用户开关，Shizuku 进程内仍复核硬禁止项。 */
+  public static String execUnrestricted(String command) {
+    if (!awaitReady(context, 8000))
+      return "[SHIZUKU_SERVICE_NOT_READY] " + status() + "\n[EXIT=124]";
+    IShellService current = service;
+    try {
+      return current.execUnrestricted(command);
+    } catch (Throwable e) {
+      fail(e);
+      return com.deepseekharness.app.util.UiText.format(
+          "[EXECUTION_UNKNOWN] 设备命令结果未确认，不会自动重试：%s\n[EXIT=125]", failure);
+    }
+  }
+
+  /** No Binder call is attempted when readiness is unavailable. */
+  public static com.deepseekharness.app.device.DeviceTransportResult execVirtualScreenTyped(
+      String command) {
+    if (!awaitReady(context, 8000))
+      return com.deepseekharness.app.device.DeviceTransportResult.notSent(
+          "shizuku",
+          "SHIZUKU_SERVICE_NOT_READY",
+          "[SHIZUKU_SERVICE_NOT_READY] " + status() + "\n[EXIT=124]");
+    IShellService current = service;
+    try {
+      return com.deepseekharness.app.device.DeviceTransportResult.fromLegacy(
+          "shizuku",
+          current.execVirtualScreen(command),
+          com.deepseekharness.app.device.DeviceTransportIdentity.unknown());
+    } catch (Throwable error) {
+      fail(error);
+      return com.deepseekharness.app.device.DeviceTransportResult.unknown(
+          "shizuku",
+          "SHIZUKU_EXECUTION_UNKNOWN",
+          "[EXECUTION_UNKNOWN] VSCREEN_RESULT_UNKNOWN\n[EXIT=125]",
+          false,
+          com.deepseekharness.app.device.DeviceTransportIdentity.unknown());
+    }
+  }
+
   /** Dedicated native-only operation; the generic Binder exec still rejects app_process. */
   public static String execVirtualScreen(String command) {
     if (!awaitReady(context, 8000))

@@ -4,7 +4,7 @@ package com.deepseekharness.app.util;
 public final class WebUploadSessionBudget {
   public static final int MAX_BATCH_FILES = 20;
   public static final int MAX_SESSION_FILES = 40;
-  public static final long MAX_SESSION_BYTES = 512L * 1024L * 1024L;
+  public static final long MAX_SESSION_BYTES = 10L * 1024L * 1024L * 1024L;
 
   private enum State {
     COPYING,
@@ -109,6 +109,20 @@ public final class WebUploadSessionBudget {
       reservedBytes -= reservation.bytes;
       reservation.state = State.ROLLED_BACK;
     }
+  }
+
+  /** 无法删除的失败副本仍占配额；关闭页面后也不把残留字节记成已释放。 */
+  public synchronized void retainFailedCopy(Reservation reservation) {
+    requireOwned(reservation);
+    if (reservation.state == State.COMMITTED) return;
+    if (reservation.state != State.COPYING && reservation.state != State.READY)
+      throw new IllegalStateException("UPLOAD_RESERVATION_STATE");
+    if (reservation.state == State.COPYING) copiesInFlight--;
+    reservedFiles -= reservation.files;
+    committedFiles += reservation.files;
+    reservedBytes -= reservation.bytes;
+    committedBytes += reservation.bytes;
+    reservation.state = State.COMMITTED;
   }
 
   /** Prevent new writes/commits; in-flight copies observe closure at their next chunk boundary. */

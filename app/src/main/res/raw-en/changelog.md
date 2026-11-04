@@ -1,9 +1,8 @@
-# DSHA 0.2.8 / build157
+# DSHA 0.2.1-rc.3-bxroot.16-dsh0.2.1-rc.3 / build218
 
-Retains build156 features and fixes, DSH 0.2.0-rc.2, base environment 10, the original application ID and historical E7E3 signing certificate.
-
-- Qualifies and pins the current rc2 patch set for recovery so identical signed DSH archive bytes are stored once in the APK, removing approximately 122.7 MB of duplicate content.
-- Recovery retains its independent lock, extraction directory, HOME and controlled repair tools; it does not depend on the installed main environment or user plugins.
-- Main environment contents, base version and runtime identity remain unchanged. Future main runtime updates do not automatically update the recovery pin.
-
-See the build157 verification report for actual APK sizes, software checks and device acceptance. No GitHub publication or website deployment was performed.
+- Fixed `begin` failing permanently for screen control (the `ASSISTANT_EXPANDED` deadlock): expanding the assistant panel no longer pauses screen control. That panel window is not focusable and never becomes the IME target, so the fence was unnecessary; worse, it deadlocked — expanding set `expanded`, which made screen reading fail with `ASSISTANT_LOCAL_RESUME_REQUIRED`, and once the window was removed the panel could not be collapsed, so the pause never cleared.
+- Also removed the second pause from the same source raised when the overlay geometry is published (`ASSISTANT_PANEL_EXPANDED`), and the expansion flag left behind when the window is destroyed.
+- The editor and voice paths still pause screen control on their own (`ASSISTANT_IME`, `ASSISTANT_VOICE`); those are unaffected.
+- Upgrading from an older build cannot get stuck: `collapse()` still releases legacy expansion pauses.
+- Otherwise identical to build214: bxroot runtime, Termux path compatibility, startup and extraction speedups, native call commands.
+- Not verified on a device this round. If `SCREEN_CONTROL_PAUSED` still appears, `adb logcat -s DSHA` prints `checkBegin refused: paused reason=...`.

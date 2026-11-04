@@ -94,6 +94,40 @@ public final class DeviceShellPolicy {
         Kind.DENY, Collections.emptyList(), Collections.emptyList(), "[POLICY_BLOCKED] " + reason);
   }
 
+  /**
+   * 不受白名单限制的检查：只留硬禁止项（分区、SELinux、系统属性写入、挂载、刷机）。
+   *
+   * <p>供用户在设备能力授权里显式开启“不受限制的设备 shell”后使用。返回 READ 之外
+   * 仍用 FILE 之外的普通类别，调用方按 EXEC 直接交给特权通道；这里不做路径白名单，
+   * 也不解析 argv（命令原样交给 root/Shizuku/ADB 的 shell）。
+   */
+  public static Plan inspectUnrestricted(String command) {
+    if (command == null || command.trim().isEmpty())
+      return deny(com.deepseekharness.app.util.UiText.text("命令为空"));
+    List<String> words;
+    try {
+      words = split(command);
+    } catch (IllegalArgumentException error) {
+      // 管道、重定向、变量展开在 split 里是被拒的；不受限模式要允许它们，
+      // 所以退回按空白切词，只用于硬禁止项匹配。
+      words = new ArrayList<>();
+      for (String word : command.trim().split("\\s+")) if (!word.isEmpty()) words.add(word);
+    }
+    String name = words.get(0);
+    int slash = name.lastIndexOf('/');
+    if (slash >= 0) name = name.substring(slash + 1);
+    if (name.equals("toybox") && words.size() > 1) {
+      name = words.get(1);
+      slash = name.lastIndexOf('/');
+      if (slash >= 0) name = name.substring(slash + 1);
+    }
+    if (BLOCK.contains(name) || name.startsWith("mkfs.") || name.startsWith("fsck."))
+      return deny(
+          com.deepseekharness.app.util.UiText.format(
+              "禁止设备分区、SELinux、系统属性、挂载或刷机操作：%s（不受限 shell 也不放行）", name));
+    return plan(Kind.READ, words, Collections.emptyList());
+  }
+
   public static Plan inspect(String command) {
     final List<String> args;
     try {
@@ -257,11 +291,63 @@ public final class DeviceShellPolicy {
         || !args.get(3).equals("com.deepseekharness.app.vscreen.VirtualScreenCore")
         || !args.get(4).equals("--launch")
         || !args.get(5).equals("--port")
-        || !args.get(6).matches("8[0-9]{3}")
+        || !args.get(6).equals("0")
         || !args.get(7).equals("--package")
         || !args.get(8).equals(expectedPackage))
       return deny(com.deepseekharness.app.util.UiText.text("虚拟屏启动参数无法核验"));
     return plan(Kind.VIRTUAL_SCREEN, args, Collections.emptyList());
+  }
+
+  /** 只读退出核验只能绑定调用方持有的出生身份，不能通过此入口发信号。 */
+  public static Plan inspectVirtualScreenProbe(
+      String command, String installedApkPath, String expectedPackage) {
+    final List<String> args;
+    try {
+      args = split(command);
+    } catch (IllegalArgumentException error) {
+      return deny(error.getMessage());
+    }
+    if (args.size() != 9
+        || !"app_process".equals(executable(args.get(0)))
+        || !canonicalApkPath(installedApkPath)
+        || !SelfPackageIdentity.validName(expectedPackage)
+        || !args.get(1).equals("-Djava.class.path=" + installedApkPath)
+        || !args.get(2).equals("/system/bin")
+        || !args.get(3).equals("com.deepseekharness.app.vscreen.VirtualScreenCore")
+        || !args.get(4).equals("--probe-exit")
+        || !args.get(5).equals("--identity")
+        || !validVirtualScreenIdentity(args.get(6))
+        || !args.get(7).equals("--package")
+        || !args.get(8).equals(expectedPackage)) return deny("VSCREEN_PROBE_IDENTITY_UNVERIFIED");
+    args.set(0, "app_process");
+    return plan(Kind.VIRTUAL_SCREEN, args, Collections.emptyList());
+  }
+
+  public static Plan inspectManagedVirtualScreen(
+      String command, String installedApkPath, String expectedPackage) {
+    Plan start = inspectVirtualScreenLaunch(command, installedApkPath, expectedPackage);
+    return start.allowed()
+        ? start
+        : inspectVirtualScreenProbe(command, installedApkPath, expectedPackage);
+  }
+
+  private static boolean validVirtualScreenIdentity(String value) {
+    if (value == null || value.length() > 160) return false;
+    String[] fields = value.split(":", -1);
+    if (fields.length != 5) return false;
+    try {
+      if (!fields[0].matches("[1-9][0-9]{0,9}")
+          || Long.parseLong(fields[0]) <= 1
+          || Long.parseLong(fields[0]) > Integer.MAX_VALUE
+          || !fields[1].matches("[1-9][0-9]{0,18}")
+          || Long.parseLong(fields[1]) <= 0
+          || !fields[2].matches("0|[1-9][0-9]{0,9}")
+          || Long.parseLong(fields[2]) > Integer.MAX_VALUE) return false;
+      String uuid = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+      return fields[3].matches(uuid) && fields[4].matches(uuid);
+    } catch (NumberFormatException invalid) {
+      return false;
+    }
   }
 
   /** Android package-manager path syntax, kept pure so all transports share the same rule. */

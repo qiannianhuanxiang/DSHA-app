@@ -4,31 +4,56 @@
 
 
     <color name="primary">#1E50D0</color>
-    <color name="primary_dark">#1D4EC7</color>
+    <color name="primary_dark">#1A46B8</color>
     <color name="accent_on">#FFFFFF</color>
-    <color name="surface">#FFFFFF</color>
-    <color name="card">#F6F7F9</color>
-    <color name="raised">#EDF0F5</color>
-    <color name="line">#DFE4ED</color>
-    <color name="text">#152033</color>
-    <color name="text_secondary">#5C6A80</color>
-    <color name="text_muted">#5B6578</color>
-    <color name="ok">#207348</color>
-    <color name="warn">#825900</color>
-    <color name="err">#AD3D45</color>
-    <color name="preview">#F2F4F8</color>
+    <!-- 2026-10-27 UI v5：通用层级色与 shell_ui.xml 对齐，旧页面不再保留第二套灰蓝。
+         surface=画布，card=卡片/控件，raised=选中与凹槽。 -->
+    <color name="surface">#F3F6FB</color>
+    <color name="card">#FCFDFF</color>
+    <color name="raised">#E7EDF6</color>
+    <color name="line">#131D3A60</color>
+    <color name="text">#18273F</color>
+    <color name="text_secondary">#50617A</color>
+    <color name="text_muted">#61728D</color>
+    <color name="ok">#287453</color>
+    <color name="warn">#8C600D</color>
+    <color name="err">#AF404B</color>
+    <color name="preview">#E7EDF6</color>
     <!-- Termux 的默认 ANSI 前景色是白色；终端背景必须固定为深色，不能复用
          会在浅色主题下变亮的 preview，否则就会出现浅灰底白字。 -->
-    <color name="terminal_surface">#0A0D12</color>
+    <color name="terminal_surface">#000000</color>
+    <color name="terminal_foreground">#E4E8F0</color>
     <color name="terminal_outline">#263041</color>
-    <color name="logo_top">#E9F0FF</color>
+    <!-- 终端外壳跟随应用三向态：浅色为白/浅蓝灰，夜间为近黑/浅蓝；输出区仍固定黑底。
+         外壳颜色只从这些 token 取，Java 与 drawable 不再写死色值。 -->
+    <color name="terminal_panel">#FFFFFF</color>
+    <color name="terminal_panel_text">#152033</color>
+    <color name="terminal_panel_text_strong">#0D1727</color>
+    <color name="terminal_muted">#59657A</color>
+    <color name="terminal_faint">#7A879C</color>
+    <color name="terminal_line">#DFE6F0</color>
+    <color name="terminal_line_strong">#C6D2E4</color>
+    <color name="terminal_accent">#1E50D0</color>
+    <color name="terminal_accent_bg">#E8EFFF</color>
+    <color name="terminal_accent_soft_2">#DBE7FF</color>
+    <color name="terminal_accent_line">#B9CCF4</color>
+    <color name="terminal_on_accent">#FFFFFF</color>
+    <color name="terminal_raised">#EAEFF7</color>
+    <color name="terminal_warning">#7A5300</color>
+    <color name="terminal_warning_soft">#FCF3DE</color>
+    <color name="terminal_danger">#A93B43</color>
+    <color name="terminal_danger_soft">#FBEBEC</color>
+    <color name="terminal_ripple">#1F1E50D0</color>
+    <color name="terminal_scrim">#8C09101E</color>
+    <color name="terminal_panel_card">#F7F9FD</color>
+    <color name="logo_top">#E8EFFF</color>
 
     <!-- 按压涟漪：主色低透明度，浅色底上淡淡一层 -->
-    <color name="ripple">#1A3D6FD4</color>
-    <color name="primary_ripple">#1F000000</color>
+    <color name="ripple">#1F1E50D0</color>
+    <color name="primary_ripple">#1FFFFFFF</color>
     <color name="error_on">#FFFFFF</color>
     <!-- 禁用态：按钮变灰 + 文字降到可读下限（不可点却外观照旧最让人困惑） -->
-    <color name="disabled">#E9ECF2</color>
+    <color name="disabled">#E7EDF6</color>
     <!-- 状态色的浅底（用于状态条/标签背景，不刺眼） -->
     <color name="err_bg">#14C45A5A</color>
 </resources>

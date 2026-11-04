@@ -1,0 +1,5 @@
+# DSHA 0.2.1-rc.3-bxroot.13-dsh0.2.1-rc.3 / build215
+
+- Correction : le contrôle d'écran renvoyait encore `SCREEN_CONTROL_PAUSED` après « Reprendre », car la reprise n'effaçait pas l'indicateur d'extension de l'assistant et le panneau republie sa géométrie à chaque changement de mise en page, remettant le contrôle en pause. La reprise replie désormais la session active de l'assistant pour effacer les deux indicateurs ensemble ; la pause volontaire lors de l'extension reste inchangée.
+- Conserve du build214 : le runtime bxroot, la compatibilité des chemins Termux, l'accélération du démarrage et de l'extraction, les commandes d'appels natifs, dsh-web-mobile 3.2.2, DSH rc.3, l'accès local et LAN, et dix langues.
+- Cette compilation ne contient que ce correctif et n'a pas été vérifiée sur appareil : touchez « Reprendre le contrôle d'écran de l'assistant » dans Paramètres → Autorisations de l'appareil → Contrôle d'écran, puis appelez `/app/ui/task-begin` pour confirmer que `SCREEN_CONTROL_PAUSED` ne revient pas.

@@ -1,5 +1,6 @@
 // Gecko 页面世界报告只传入现有同源只读诊断通道。
 if (window.top === window) {
+  const languages = ['zh','zh-Hant','en','ru','ja','ko','ar','pt','la','fr'];
   window.__dshaStartupPort = browser.runtime.connectNative('dsha');
   let observationNonce='',pendingStartup=[];
   const sendStartup=report=>{
@@ -16,7 +17,7 @@ if (window.top === window) {
       }
       return;
     }
-    if (message?.type !== 'language' || !['zh','en'].includes(message.language)) return;
+    if (message?.type !== 'language' || !languages.includes(message.language)) return;
     if(typeof message.observationNonce==='string'&&/^[a-f0-9]{32}$/.test(message.observationNonce)){
       observationNonce=message.observationNonce;const buffered=pendingStartup;pendingStartup=[];
       buffered.forEach(sendStartup);
@@ -25,7 +26,8 @@ if (window.top === window) {
       const host = document.head || document.documentElement;
       if (!host) return false;
       const script = document.createElement('script');
-      script.textContent = "window.__DSHA_LANGUAGE__=" + JSON.stringify(message.language) + ";window.dispatchEvent(new CustomEvent('dsha-language'));";
+      script.textContent = (observationNonce ? "window.__DSHA_NATIVE_OAUTH__=true;" : "")
+        + "window.__DSHA_LANGUAGE__=" + JSON.stringify(message.language) + ";window.dispatchEvent(new CustomEvent('dsha-language'));";
       host.appendChild(script);script.remove();return true;
     };
     if (!inject()) {
@@ -34,7 +36,7 @@ if (window.top === window) {
     }
   });
   window.addEventListener('dsha-language-selected', event => {
-    if (event.detail === 'zh' || event.detail === 'en') window.__dshaStartupPort.postMessage({type:'language-selected',language:event.detail});
+    if (languages.includes(event.detail)) window.__dshaStartupPort.postMessage({type:'language-selected',language:event.detail});
   });
   window.addEventListener('dsha-startup', event => {
     if (typeof event.detail !== 'string' || event.detail.length > 9000) return;

@@ -27,7 +27,12 @@ public final class WebPortPolicy {
 
   /** 0 交给 dsh/操作系统在真正监听时分配，不预先挑号再赌端口仍空闲。 */
   public static Choice choose(int preferred, int previous, Probe probe) throws IOException {
-    if (preferred < 1 || preferred > 65535) throw new IllegalArgumentException("Invalid Web port");
+    if (preferred < 0 || preferred > 65535) throw new IllegalArgumentException("Invalid Web port");
+    if (preferred == 0) {
+      if (previous > 0 && previous <= 65535 && !reserved(previous) && probe.available(previous))
+        return new Choice(0, previous);
+      return new Choice(0, 0);
+    }
     if (!reserved(preferred) && probe.available(preferred)) return new Choice(preferred, preferred);
     if (previous > 0
         && previous <= 65535
@@ -37,8 +42,26 @@ public final class WebPortPolicy {
     return new Choice(preferred, 0);
   }
 
+  /** Retry only a proven bind race of this launcher, before authentication and once. */
+  public static boolean retryBindRace(
+      int listen,
+      boolean alreadyRetried,
+      boolean authenticated,
+      int conflict,
+      boolean guestExited) {
+    return listen > 0 && !alreadyRetried && !authenticated && conflict == listen && guestExited;
+  }
+
+  public static boolean onlyBindConflict(java.util.Map<String, String> issues, int listen) {
+    if (listen <= 0 || issues == null || issues.isEmpty()) return false;
+    for (java.util.Map.Entry<String, String> issue : issues.entrySet()) {
+      if (!issue.getKey().isEmpty() || conflictPort(issue.getValue()) != listen) return false;
+    }
+    return true;
+  }
+
   public static boolean reserved(int port) {
-    return port == 3081 || port == 3090;
+    return LanPortPolicy.reserved(port) || BridgePortPolicy.reserved(port);
   }
 
   public static boolean available(int port) throws IOException {
@@ -55,12 +78,11 @@ public final class WebPortPolicy {
   }
 
   public static String authentication(String output, int listen) {
-    if (listen != 0) return DshAuthUrl.findAny(output, listen);
     // 动态端口只能来自本轮进程的完整官方启动行，不宽松扫描插件日志内的 URL。
     DshAuthUrl.Parsed parsed = DshAuthUrl.fromStartupOutput(output);
     if (parsed == null) return null;
     int port = URI.create(parsed.authUrl).getPort();
-    return reserved(port) ? null : parsed.authUrl;
+    return reserved(port) || listen > 0 && port != listen ? null : parsed.authUrl;
   }
 
   public static int conflictPort(String detail) {

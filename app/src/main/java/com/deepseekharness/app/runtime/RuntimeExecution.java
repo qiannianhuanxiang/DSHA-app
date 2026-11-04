@@ -52,7 +52,11 @@ final class RuntimeExecution {
   }
 
   ContainerRuntime runtime() {
+    ContainerRuntime frozen = ports.frozenRuntime();
+    if (frozen != null && (!forceProot || "proot".equals(frozen.id()))) return frozen;
     RuntimeHostPorts.Settings settings = ports.settings();
+    if (!forceProot && "bxroot".equals(settings.runtimeMode))
+      return requireSelected(new BxrootRuntime(context));
     try {
       if (!forceProot && android.os.Build.VERSION.SDK_INT >= 26 && settings.proroot) {
         ContainerRuntime selected =
@@ -69,6 +73,22 @@ final class RuntimeExecution {
       ports.record("RUNTIME_SELECTION_FALLBACK", SensitiveData.redact(String.valueOf(failure)));
     }
     return proot();
+  }
+
+  /** 显式 bxroot 失败必须暴露；不能以 proot 的成功冒充实验引擎。 */
+  static ContainerRuntime requireSelected(ContainerRuntime selected) {
+    try {
+      if (!selected.available()) throw new IOException(selected.unavailableReason());
+      selected.prepare();
+      return selected;
+    } catch (Exception failure) {
+      throw new IllegalStateException(
+          "BXROOT_RUNTIME_UNAVAILABLE: " + SensitiveData.redact(String.valueOf(failure)), failure);
+    }
+  }
+
+  static boolean requiresGuestSession(String runtimeMode) {
+    return "proroot".equals(runtimeMode) || "bxroot".equals(runtimeMode);
   }
 
   ContainerRuntime proot() {
@@ -173,10 +193,10 @@ final class RuntimeExecution {
       ContainerRuntime runtime = selected == null ? runtime() : selected;
       boolean links = hardlinks();
       prepareTools();
-      if (!"proroot".equals(runtime.id()))
+      if (!requiresGuestSession(runtime.id()))
         return start(command, launch(runtime).hardlinks(links).build());
       if (IsolatedInstallProcess.bundledLauncher(context) == null)
-        throw new IOException("BOUNDED_PROROOT_SESSION_UNAVAILABLE");
+        throw new IOException("BOUNDED_GUEST_SESSION_UNAVAILABLE");
       nativeFiles();
       BoundedGuestSessions.Operation record = BoundedGuestSessions.begin(context.getFilesDir());
       try {
@@ -190,9 +210,15 @@ final class RuntimeExecution {
   }
 
   Process install(String command, boolean pipedInput) throws IOException {
+    return install(command, pipedInput, null);
+  }
+
+  private Process install(String command, boolean pipedInput, RuntimeCommandTiming timing)
+      throws IOException {
     try (RuntimeHostPorts.Scope ignored = ports.open()) {
       nativeFiles();
-      return start(command, launch(proot()).pipedInput(pipedInput).build());
+      if (timing != null) timing.mark("native-files");
+      return launcher.start(command, launch(proot()).pipedInput(pipedInput).build(), timing);
     }
   }
 
@@ -239,14 +265,42 @@ final class RuntimeExecution {
   BoundedProcessRunner.Result collect(
       String command, long timeoutMs, boolean proot, ContainerRuntime selected)
       throws IOException, InterruptedException {
+    return collect(command, timeoutMs, proot, selected, null);
+  }
+
+  BoundedProcessRunner.Result collectCasLinks(java.util.function.Consumer<String> timing)
+      throws IOException, InterruptedException {
+    // #209：link() 被 ROM 拒绝的设备上，实体化旧 pnpm CAS 链接退化为逐文件全量
+    // 复制（实测一例 420MB），固定 120 秒会在复制中段 SIGKILL，把事务留在
+    // pending、卡死在下一次启动。脚本本身带进度回调和取消票据，这里的超时
+    // 只兜底真正的挂死，不再按快设备的正常耗时定值。
+    return collect(
+        "python3 -u /root/.dsh/materialize-cas-links.py",
+        900_000,
+        true,
+        null,
+        new RuntimeCommandTiming(timing));
+  }
+
+  private BoundedProcessRunner.Result collect(
+      String command,
+      long timeoutMs,
+      boolean proot,
+      ContainerRuntime selected,
+      RuntimeCommandTiming timing)
+      throws IOException, InterruptedException {
     RuntimeWorkPort.Work work = RuntimeWorkPort.begin("容器命令");
     Process process = null;
     Throwable original = null;
     try {
-      process = proot ? install(command, false) : bounded(command, selected);
-      return BoundedProcessRunner.collect(process, timeoutMs, 256 * 1024, Compat::destroy);
+      process = proot ? install(command, false, timing) : bounded(command, selected);
+      BoundedProcessRunner.Result result =
+          BoundedProcessRunner.collect(process, timeoutMs, 256 * 1024, Compat::destroy);
+      if (timing != null) timing.mark("process-collect");
+      return result;
     } catch (IOException | InterruptedException | RuntimeException | Error failure) {
       original = failure;
+      if (timing != null) timing.mark("command-failed");
       throw failure;
     } finally {
       Process ending = process;
@@ -258,7 +312,11 @@ final class RuntimeExecution {
           ending instanceof IsolatedInstallProcess
               ? ((IsolatedInstallProcess) ending)::markRecordUncertain
               : null;
-      BoundedGuestLifetime.finish(ending, close, uncertain, work, original);
+      try {
+        BoundedGuestLifetime.finish(ending, close, uncertain, work, original);
+      } finally {
+        if (timing != null) timing.mark("exit-finalize");
+      }
     }
   }
 

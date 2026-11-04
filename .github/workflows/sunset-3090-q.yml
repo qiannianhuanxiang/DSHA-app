@@ -1,0 +1,540 @@
+name: Sunset-3090-Q test package
+
+# 个人测试分支：push 只测试和构建 Standard；显式 dispatch 才在完整成功后发布历史。
+# 不运行 Low，不使用正式 E7E3 身份；历史预发布不代表设备验收。
+# 2026-02-26 GitHub Actions 非压缩 artifact：APK 用 archive:false 原样上传。
+# Node 20 已退出：所有 action 使用 Node 24 兼容版本并按 SHA 固定。
+on:
+  push:
+    branches: [Sunset-3090-Q]
+  workflow_dispatch:
+    inputs:
+      asset_bundle_url:
+        description: Immutable HTTPS fixed input bundle from tools/ci-assets.py
+        required: false
+        type: string
+      asset_bundle_sha256:
+        description: Fixed SHA-256 for that input bundle
+        required: false
+        type: string
+      asset_archive_format:
+        description: Archive layout for an explicit URL and SHA pair
+        required: false
+        type: choice
+        default: bundle
+        options: [bundle, source-archive]
+      publish_history:
+        description: Publish plugin history after all Standard checks pass (test identity only)
+        required: false
+        type: boolean
+        default: false
+      history_base:
+        description: Existing baseline tag or full commit SHA (required when publishing; excluded from history)
+        required: false
+        type: string
+      history_base_sha:
+        description: Full 40-character commit SHA of history_base (required when publishing)
+        required: false
+        type: string
+permissions:
+  contents: read
+concurrency:
+  # 发布运行独立排队；后续 push 不得在创建 tag 后取消该运行。
+  group: sunset-3090-q-${{ github.event_name == 'workflow_dispatch' && inputs.publish_history && github.run_id || github.ref }}
+  cancel-in-progress: ${{ !(github.event_name == 'workflow_dispatch' && inputs.publish_history) }}
+env:
+  SUNSET_TEST_STORE_PASSWORD: sunset-test-only
+jobs:
+  source:
+    name: Source-only checks and regressions
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    outputs:
+      asset_url: ${{ steps.inputs.outputs.url }}
+      asset_sha: ${{ steps.inputs.outputs.sha256 }}
+      asset_format: ${{ steps.inputs.outputs.format }}
+      apk_name: ${{ steps.artifacts.outputs.apk }}
+      evidence_name: ${{ steps.artifacts.outputs.evidence }}
+      tests_name: ${{ steps.artifacts.outputs.tests }}
+      commit: ${{ steps.artifacts.outputs.commit }}
+      run_id: ${{ steps.artifacts.outputs.run_id }}
+      run_attempt: ${{ steps.artifacts.outputs.run_attempt }}
+      history_base_sha: ${{ steps.history.outputs.history_base_sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set and validate short artifact names
+        id: artifacts
+        run: |
+          python3 - <<'PY'
+          import os, re
+          sha = os.environ["GITHUB_SHA"]
+          if not re.fullmatch(r"[a-f0-9]{40}", sha):
+              raise SystemExit("Invalid source commit")
+          names = {
+              "apk": f"dsha-sunset-{sha[:8]}.apk",
+              "evidence": "sunset-evidence",
+              "source": "sunset-source",
+              "tests": "sunset-tests",
+          }
+          for name in names.values():
+              if not re.fullmatch(r"[a-z0-9][a-z0-9.-]{0,31}", name):
+                  raise SystemExit("Artifact names must use at most 32 ASCII characters")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write("".join(f"{key}={name}\n" for key, name in names.items()))
+              output.write(f"commit={sha}\nrun_id={os.environ['GITHUB_RUN_ID']}\nrun_attempt={os.environ['GITHUB_RUN_ATTEMPT']}\n")
+          PY
+      - name: Validate explicit history baseline and current commit
+        id: history
+        if: github.event_name == 'workflow_dispatch' && inputs.publish_history
+        env:
+          SUNSET_REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
+          HISTORY_BASE: ${{ inputs.history_base }}
+          HISTORY_BASE_SHA: ${{ inputs.history_base_sha }}
+        run: |
+          python3 tools/sunset-plugin-release.py preflight \
+            --base "$HISTORY_BASE" --base-sha "$HISTORY_BASE_SHA" --github-output
+      - name: Resolve a complete fixed input pair
+        id: inputs
+        env:
+          SUNSET_DISPATCH_URL: ${{ github.event.inputs.asset_bundle_url }}
+          SUNSET_DISPATCH_SHA: ${{ github.event.inputs.asset_bundle_sha256 }}
+          SUNSET_DISPATCH_FORMAT: ${{ github.event.inputs.asset_archive_format }}
+          SUNSET_REPOSITORY_URL: ${{ vars.SUNSET_ASSET_BUNDLE_URL }}
+          SUNSET_REPOSITORY_SHA: ${{ vars.SUNSET_ASSET_BUNDLE_SHA256 }}
+          SUNSET_REPOSITORY_FORMAT: ${{ vars.SUNSET_ASSET_ARCHIVE_FORMAT }}
+        run: python3 tools/sunset-ci-inputs.py --github-output
+      - name: Verify toolchain against source configuration
+        id: toolchain
+        run: python3 tools/ci-toolchain.py --github-output
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: ${{ steps.toolchain.outputs.java }}
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ steps.toolchain.outputs.node }}
+      - name: Verify checked-in contracts
+        run: |
+          python3 tools/prepare-runtime-tools.py --check
+          python3 tools/verify-runtime-descriptor-source.py
+          python3 tools/generate-third-party-notices.py --check
+          python3 tools/check-third-party-notices.py
+          python3 tools/generate-builtin-plugins.py --verify
+          python3 tools/generate-credential-paths.py --check
+          python3 tools/prepare-semver-reference.py
+          python3 tools/run-host-tests.py --check-manifest
+          python3 tools/check-source-hygiene.py
+          python3 tools/check-ui-i18n.py
+          python3 tools/generate-changelog.py --check
+          python3 tools/check-document-links.py
+      - name: Branch regression without fixed-input dependencies
+        # 完整 fast 套件里的 asset-deployment/mobile-upstream 需要离线输入包或
+        # 上游夹具；本分支只门禁与设备桥/consent/shell 直接相关的宿主回归。
+        run: |
+          python3 tools/run-host-tests.py --stage fast --jdk "$JAVA_HOME" \
+            --only test-native-consent-transport.mjs \
+            --only test-bridge-token-compat.mjs \
+            --only test-bridge-token-transport.py \
+            --only test-destructive-guard.mjs \
+            --only test-destructive-full-access.mjs \
+            --only test-vscreen-anchored.mjs \
+            --only test-device-shell-policy.py \
+            --only test-credential-paths.py \
+            --only test-runtime-descriptor-inputs.py \
+            --only test-runtime-descriptor-source.py \
+            --only test-plugin-capabilities.py \
+            --only test-plugin-transactions.py \
+            --only test-plugin-delete-nofollow.py \
+            --only test-architecture-boundaries.py \
+            --only test-bridge-port.mjs \
+            --only test-bridge-port.py \
+            --only test-ci-assets.py \
+            --only test-ci-package.py \
+            --only test-host-test-runner.py \
+            --only test-release-evidence.py \
+            --only test-dsh-runtime-packaging.py \
+            --only test-sunset-ci-inputs.py \
+            --only test-sunset-plugin-release.py \
+            --only test-generate-changelog.py \
+            --only test-ui-language-catalog.py
+      # 固定输入仅用于后续完整 Standard 检查；源码模式不准备 managed runtime 测试夹具。
+      - name: Restore pinned compilation inputs
+        env:
+          INPUT_URL: ${{ steps.inputs.outputs.url }}
+          INPUT_SHA: ${{ steps.inputs.outputs.sha256 }}
+          INPUT_FORMAT: ${{ steps.inputs.outputs.format }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          args=(--url "$INPUT_URL" --sha256 "$INPUT_SHA")
+          if [ "$INPUT_FORMAT" = source-archive ]; then args+=(--source-archive); fi
+          python3 tools/ci-assets.py "${args[@]}"
+      - name: Source-only Standard unit tests (missing fixtures reported separately)
+        run: |
+          platform=$(python3 tools/ci-toolchain.py --field androidPlatform)
+          buildtools=$(python3 tools/ci-toolchain.py --field buildTools)
+          sdk_root="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          sdkmanager_bin="$sdk_root/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$sdkmanager_bin" ]; then
+            sdkmanager_bin=$(find "$sdk_root" -path '*/cmdline-tools/*/bin/sdkmanager' | head -1)
+          fi
+          test -x "$sdkmanager_bin"
+          "$sdkmanager_bin" "platforms;$platform" "build-tools;$buildtools"
+          chmod +x gradlew
+          ./gradlew :app:testStandardDebugUnitTest -Pdsha.sourceOnlyTests=true -x :app:prepareStandardAssets -x :app:prepareRecoveryAssets --no-daemon --max-workers=2
+      - name: Verify complete Java formatting gate
+        run: python3 tools/format-java-tree.py --check
+      - name: Report source-only test scope
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+          lines = ["### Source-only unit tests",
+                   "This source-only job is not a complete fixed-input run. Explicitly missing external fixtures may skip; existing inputs remain validated. Standard-inapplicable tests are reported separately."]
+          for flavor in ("Standard",):
+              reports = list(Path(f"app/build/test-results/test{flavor}DebugUnitTest").glob("TEST-*.xml"))
+              if not reports:
+                  lines.append(f"- {flavor}: no JUnit reports; execution not established.")
+                  continue
+              suites = [ET.parse(report).getroot() for report in reports]
+              counts = {key: sum(int(suite.get(key, "0")) for suite in suites)
+                        for key in ("tests", "failures", "errors", "skipped")}
+              lines.append(f"- {flavor}: " + ", ".join(f"{key}={value}" for key, value in counts.items()))
+              for suite in suites:
+                  for case in suite.findall("testcase"):
+                      skipped = case.find("skipped")
+                      if skipped is not None:
+                          reason = skipped.get("message") or (skipped.text or "declared test assumption").splitlines()[0]
+                          lines.append(f"  - skipped: {case.get('classname')}.{case.get('name')}: {reason}")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write("\n".join(lines) + "\n")
+          PY
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: ${{ steps.artifacts.outputs.source }}
+          path: |
+            app/build/host-tests
+            app/build/test-results
+          if-no-files-found: error
+          retention-days: 14
+  apk:
+    name: Signed SunsetRNE test APK
+    needs: source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    outputs:
+      commit: ${{ steps.sign.outputs.commit }}
+      run_id: ${{ steps.sign.outputs.run_id }}
+      run_attempt: ${{ steps.sign.outputs.run_attempt }}
+      apk_artifact_id: ${{ steps.upload_apk.outputs.artifact-id }}
+      evidence_artifact_id: ${{ steps.upload_evidence.outputs.artifact-id }}
+    env:
+      SUNSET_TEST_KEYSTORE_B64: ${{ secrets.SUNSET_TEST_KEYSTORE_B64 }}
+      ASSET_URL: ${{ needs.source.outputs.asset_url }}
+      ASSET_SHA: ${{ needs.source.outputs.asset_sha }}
+      ASSET_FORMAT: ${{ needs.source.outputs.asset_format }}
+      APK_NAME: ${{ needs.source.outputs.apk_name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Verify toolchain against source configuration
+        id: toolchain
+        run: python3 tools/ci-toolchain.py --github-output
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: ${{ steps.toolchain.outputs.java }}
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ steps.toolchain.outputs.node }}
+      - name: Restore exact fixed build inputs
+        env:
+          INPUT_URL: ${{ env.ASSET_URL }}
+          INPUT_SHA: ${{ env.ASSET_SHA }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          args=(--url "$INPUT_URL" --sha256 "$INPUT_SHA")
+          if [ "$ASSET_FORMAT" = source-archive ]; then args+=(--source-archive); fi
+          python3 tools/ci-assets.py "${args[@]}"
+      - name: Install Android SDK and NDK
+        run: |
+          platform=$(python3 tools/ci-toolchain.py --field androidPlatform)
+          buildtools=$(python3 tools/ci-toolchain.py --field buildTools)
+          ndk=$(python3 tools/ci-toolchain.py --field ndk)
+          sdk_root="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          sdkmanager_bin="$sdk_root/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$sdkmanager_bin" ]; then
+            sdkmanager_bin=$(find "$sdk_root" -path '*/cmdline-tools/*/bin/sdkmanager' | head -1)
+          fi
+          test -x "$sdkmanager_bin"
+          "$sdkmanager_bin" "platforms;$platform" "build-tools;$buildtools" "ndk;$ndk"
+      # 输入 bundle 的字节先按源码 pin 核验；再从当前 npm lock 重建 DSH，避免旧 recipe 元数据阻塞本分支补丁。
+      - name: Rebuild current managed DSH runtime from the dependency lock
+        run: |
+          python3 tools/prepare-dsh-runtime.py
+          python3 tools/prepare-backup-assets.py --write
+          python3 tools/prepare-runtime-descriptor.py --write
+          python3 tools/verify-runtime-descriptor-source.py
+      - name: Prepare current verified runtime fixture
+        run: python3 tools/prepare-test-runtime.py
+      - name: Prepare pinned plugin browser fixture
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/dsha-plugin-browsers
+        run: |
+          npm ci --prefix tools/ci-browser --ignore-scripts --no-audit --no-fund
+          node tools/ci-browser/node_modules/playwright/cli.js install --with-deps chromium
+      - name: Verify runtime patch upgrades and managed recovery consent
+        # 使用已验证 raw/managed，覆盖真实 Java 补丁升级与应急 ToolRuntime 授权。
+        run: |
+          python3 tools/run-host-tests.py --stage runtime --jdk "$JAVA_HOME" \
+            --playwright "$GITHUB_WORKSPACE/tools/ci-browser/node_modules/playwright" \
+            --browsers-path "$RUNNER_TEMP/dsha-plugin-browsers" \
+            --output app/build/host-tests/sunset-patch-chains \
+            --only test-plugin-management-patch-chain.py \
+            --only test-language-patch-chain.py \
+            --only test-ui-language.mjs \
+            --only test-prompt-language.mjs \
+            --only test-app-activity.mjs \
+            --only test-plugin-runtime-evidence.mjs \
+            --only test-plugin-discovery.py \
+            --only test-plugin-review.py \
+            --only test-plugin-management-probe.mjs \
+            --only test-session-interaction-patch-upgrade.py \
+            --only test-preset-pending-patch-upgrade.py \
+            --only test-recovery-native-consent.mjs \
+            --only test-mobile-server-compression-carrier.mjs
+      - name: Complete Standard unit tests with fixed inputs
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:testStandardDebugUnitTest -Pdsha.sunsetTest=true -Pdsha.sourceOnlyTests=false --no-daemon --max-workers=2
+      - name: Verify all seven Standard external-fixture tests executed
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+          required = {
+              "com.deepseekharness.app.runtime.AdbWheelBundleTest": ["realBundleRebuildsOnlyOmittedEntriesAndPreservesRestoredWheel"],
+              "com.deepseekharness.app.runtime.RuntimeToolsRegistryAndroidTest": [
+                  "completeProductionChainAppliesAllSpecializedStagesAndIsRepeatable",
+                  "lanRetirementRejectsModuleDriftAndPreservesOriginalBytes",
+                  "lanRetirementRejectsUnknownVersionAndContractDrift",
+                  "oldLanExactReplacementAndIdempotenceRemainStrict",
+                  "previousRuntimeGenerationCannotReceiveCurrentOverlayInPlace",
+              ],
+              "com.deepseekharness.app.util.ManagedPatchRegistryIntegrationTest": [
+                  "everyActiveModuleRepairsAsAWholeAndRetiredUiNeverRuns",
+              ],
+          }
+          allowed_skips = {
+              ("com.deepseekharness.app.vscreen.VirtualScreenLowBoundaryTest",
+               "lowFlavorRemainsUnsupportedEvenOnAModernAndroidVersion"),
+          }
+          result = {"mode": "full", "flavors": {}}
+          for flavor in ("Standard",):
+              reports = list(Path(f"app/build/test-results/test{flavor}DebugUnitTest").glob("TEST-*.xml"))
+              if not reports:
+                  raise SystemExit(f"Missing JUnit reports: {flavor}")
+              suites = [ET.parse(report).getroot() for report in reports]
+              counts = {key: sum(int(suite.get(key, "0")) for suite in suites)
+                        for key in ("tests", "failures", "errors", "skipped")}
+              if not counts["tests"] or counts["failures"] or counts["errors"]:
+                  raise SystemExit(f"Full unit tests failed: {flavor} {counts}")
+              cases_all = [case for suite in suites for case in suite.findall("testcase")]
+              skipped = [(case.get("classname"), case.get("name")) for case in cases_all
+                         if case.find("skipped") is not None]
+              if counts["tests"] != len(cases_all) or counts["skipped"] != len(skipped):
+                  raise SystemExit(f"JUnit report counts disagree: {flavor}")
+              if set(skipped) - allowed_skips:
+                  raise SystemExit(f"Unexpected full-input skips: {flavor} {skipped}")
+              for owner, methods in required.items():
+                  for method in methods:
+                      cases = [case for case in cases_all
+                               if case.get("classname") == owner
+                               and case.get("name") == method]
+                      if len(cases) != 1 or any(cases[0].find(tag) is not None
+                                                for tag in ("skipped", "failure", "error")):
+                          raise SystemExit(f"Required fixture test did not pass: {flavor} {owner}.{method}")
+              counts["requiredFixtureTestsPassed"] = sum(map(len, required.values()))
+              result["flavors"][flavor] = counts
+          Path("out").mkdir(exist_ok=True)
+          Path("out/full-unit-tests.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write("### Full unit tests with fixed inputs\n")
+              for flavor, counts in result["flavors"].items():
+                  summary.write(f"- {flavor}: " + ", ".join(f"{key}={value}" for key, value in counts.items()) + "\n")
+          PY
+      - name: Lint Standard release
+        run: ./gradlew :app:lintStandardRelease -Pdsha.sunsetTest=true -Pdsha.unsignedPackage=true --no-daemon --max-workers=2
+      - name: Build unsigned Sunset test package
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:assembleStandardRelease -Pdsha.sunsetTest=true -Pdsha.unsignedPackage=true --no-daemon
+      - name: Restore cached test-only signing key
+        if: env.SUNSET_TEST_KEYSTORE_B64 == ''
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: sunset-test.jks
+          key: sunset-test-keystore-v1
+      - name: Prepare test-only signing key
+        run: |
+          mkdir -p out
+          if [ -n "$SUNSET_TEST_KEYSTORE_B64" ]; then
+            printf '%s' "$SUNSET_TEST_KEYSTORE_B64" | base64 -d > sunset-test.jks
+          fi
+          if [ ! -f sunset-test.jks ]; then
+            keytool -genkeypair -keystore sunset-test.jks -storetype PKCS12 -alias sunset-test \
+              -keyalg RSA -keysize 3072 -validity 3650 \
+              -dname "CN=DSHA Sunset Test (NOT FOR RELEASE), OU=Sunset-3090-Q, O=SunsetRNE, C=CN" \
+              -storepass "$SUNSET_TEST_STORE_PASSWORD" -keypass "$SUNSET_TEST_STORE_PASSWORD"
+          fi
+          keytool -exportcert -rfc -keystore sunset-test.jks -alias sunset-test \
+            -storepass "$SUNSET_TEST_STORE_PASSWORD" > out/sunset-test-cert.pem
+      - name: Sign with test key and verify identity
+        id: sign
+        run: |
+          buildtools=$(python3 tools/ci-toolchain.py --field buildTools)
+          sdk_root="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          apksigner="$sdk_root/build-tools/$buildtools/apksigner"
+          aapt2="$sdk_root/build-tools/$buildtools/aapt2"
+          unsigned=$(find app/build/outputs/apk/standard/release -name '*-unsigned.apk' | head -1)
+          test -n "$unsigned"
+          version=$(python3 -c "import json;print(json.load(open('app/build/outputs/apk/standard/release/output-metadata.json'))['elements'][0]['versionName'])")
+          apk="out/$APK_NAME"
+          "$apksigner" sign --ks sunset-test.jks --ks-key-alias sunset-test \
+            --ks-pass "pass:$SUNSET_TEST_STORE_PASSWORD" \
+            --key-pass "pass:$SUNSET_TEST_STORE_PASSWORD" --out "$apk" "$unsigned"
+          package=$("$aapt2" dump badging "$apk" | sed -n "s/^package: name='\([^']*\)'.*/\1/p")
+          test "$package" = "dsh.android.client.SunsetRNE"
+          "$aapt2" dump badging "$apk" | grep -q "versionName='.*-SunsetTest'"
+          if "$aapt2" dump badging "$apk" | grep -q 'application-debuggable'; then exit 1; fi
+          "$apksigner" verify --verbose --print-certs "$apk" > out/apk-signature.txt
+          "$aapt2" dump badging "$apk" > out/apk-badging.txt
+          cert=$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' out/apk-signature.txt | head -1)
+          test -n "$cert"
+          test "$cert" != "e7e3a31a75946f2669194c972b3dd0c9aea3fc7c50a8b885d2dee710b22a53f5"
+          python3 tools/verify-dsh-upgrade-apk.py "$apk" > out/apk-runtime-verification.txt
+          python3 tools/verify-recovery-apk.py "$apk" > out/apk-recovery-verification.txt
+          (cd out && sha256sum *.apk sunset-test-cert.pem > SHA256SUMS)
+          python3 - <<PY
+          import json, os
+          value = {
+            "schema": 1,
+            "kind": "sunset-3090-q-test-apk",
+            "flavors": ["standard"],
+            "commit": os.environ["GITHUB_SHA"],
+            "runNumber": os.environ["GITHUB_RUN_NUMBER"],
+            "runId": os.environ["GITHUB_RUN_ID"],
+            "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"],
+            "inputArchiveFormat": os.environ["ASSET_FORMAT"],
+            "packageName": "dsh.android.client.SunsetRNE",
+            "versionName": "$version",
+            "apkFile": os.environ["APK_NAME"],
+            "certificateSha256": "$cert",
+            "assetBundleSha256": os.environ["ASSET_SHA"],
+            "runtimeId": json.load(open("app/src/main/assets/runtime-descriptor.json", encoding="utf-8"))["runtimeId"],
+            "rebuiltRuntimeSha256": json.load(open("app/src/main/assets/dsh-runtime.inputs.json", encoding="utf-8"))["archive_sha256"],
+            "unitTests": json.load(open("out/full-unit-tests.json", encoding="utf-8")),
+            "note": "TEST ONLY - NOT FOR RELEASE",
+          }
+          open("out/build-info.json", "w", encoding="utf-8").write(json.dumps(value, ensure_ascii=False, indent=2) + "\\n")
+          PY
+          cat out/build-info.json
+          printf 'apk=%s\n' "$apk" >> "$GITHUB_OUTPUT"
+          printf 'commit=%s\nrun_id=%s\nrun_attempt=%s\n' "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+      # archive:false 只接受单文件，且 artifact 名使用实际文件名而忽略 name 参数。
+      - name: Upload signed APK without archiving
+        id: upload_apk
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          archive: false
+          retention-days: 14
+          if-no-files-found: error
+          path: ${{ steps.sign.outputs.apk }}
+      - name: Upload APK verification evidence
+        id: upload_evidence
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ needs.source.outputs.evidence_name }}
+          archive: true
+          retention-days: 14
+          if-no-files-found: error
+          path: |
+            out/SHA256SUMS
+            out/sunset-test-cert.pem
+            out/build-info.json
+            out/apk-signature.txt
+            out/apk-badging.txt
+            out/apk-runtime-verification.txt
+            out/apk-recovery-verification.txt
+            out/full-unit-tests.json
+      - name: Publish short download links
+        env:
+          APK_URL: ${{ steps.upload_apk.outputs.artifact-url }}
+          EVIDENCE_URL: ${{ steps.upload_evidence.outputs.artifact-url }}
+        run: |
+          python3 - <<'PY'
+          import os
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write(f"### 下载\n\n[下载 APK：{os.environ['APK_NAME']}]({os.environ['APK_URL']})\n\n")
+              summary.write(f"[校验与构建记录]({os.environ['EVIDENCE_URL']})\n")
+          PY
+      - name: Upload full unit and host test reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ needs.source.outputs.tests_name }}
+          path: |
+            app/build/test-results
+            app/build/host-tests/sunset-patch-chains
+            app/build/reports/lint-results-standardRelease.*
+          if-no-files-found: warn
+          retention-days: 14
+  publish:
+    name: Publish commit-bound plugin history
+    needs: [source, apk]
+    if: >-
+      github.event_name == 'workflow_dispatch' && inputs.publish_history &&
+      github.repository == 'ym2025szz/DSHA-prerelase' && github.event.repository.private &&
+      github.ref == 'refs/heads/Sunset-3090-Q' &&
+      needs.source.result == 'success' && needs.apk.result == 'success'
+    permissions:
+      contents: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      # 只接受本次 run/attempt 的 source + apk 成功回执，不查询 latest green。
+      # 若单独重跑失败 job 导致 attempt 不一致，应 Re-run all jobs，不能复用旧回执。
+      - name: Create unique tag and history prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SUNSET_REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
+          SUNSET_NEEDS: ${{ toJSON(needs) }}
+          HISTORY_BASE: ${{ inputs.history_base }}
+          HISTORY_BASE_SHA: ${{ inputs.history_base_sha }}
+        run: |
+          python3 tools/sunset-plugin-release.py publish \
+            --base "$HISTORY_BASE" --base-sha "$HISTORY_BASE_SHA" \
+            --output "$RUNNER_TEMP/sunset-plugin-history-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+      # 即使远端写入结果未知，也保留完整本次历史；不自动覆盖 tag/Release。
+      - name: Retain generated history and publication input
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sunset-plugin-history
+          path: ${{ runner.temp }}/sunset-plugin-history-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 14

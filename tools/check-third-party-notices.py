@@ -17,6 +17,34 @@ REQUIRED_LICENSES = ['proot-COPYING.txt', 'GPL-3.0.txt', 'LGPL-3.0.txt', 'MPL-2.
                      'Shizuku-MIT.txt', 'Termux-terminal-Apache-2.0.txt', 'snakeyaml-LICENSE.txt']
 
 
+BXROOT_LICENSES = ('bxroot-MIT.txt', 'bxroot-glibc-COPYRIGHT.txt', 'LGPL-2.1.txt',
+                   'bxroot-GCC-COPYRIGHT.txt', 'GCC-RUNTIME-LIBRARY-EXCEPTION-3.1.txt')
+REQUIRED_LICENSES.extend(BXROOT_LICENSES)
+
+
+def verify_bxroot_license_sources(root=ROOT):
+    evidence = json.loads((root / 'tools/bxroot-license-sources.json').read_text(encoding='utf-8'))
+    if evidence.get('schema') != 1 or not isinstance(evidence.get('licenses'), list):
+        raise ValueError('BXROOT_LICENSE_SOURCE_SCHEMA')
+    expected = {'app/src/main/assets/licenses/' + name for name in BXROOT_LICENSES}
+    seen = set()
+    for row in evidence['licenses']:
+        if not isinstance(row, dict):
+            raise ValueError('BXROOT_LICENSE_SOURCE_ROW')
+        target = row.get('target')
+        if not isinstance(target, str) or target not in expected or target in seen:
+            raise ValueError('BXROOT_LICENSE_SOURCE_PATH')
+        seen.add(target)
+        digest, size = row.get('sha256'), row.get('bytes')
+        if not isinstance(digest, str) or re.fullmatch(r'[0-9a-f]{64}', digest) is None or type(size) is not int or size < 100:
+            raise ValueError('BXROOT_LICENSE_SOURCE_DIGEST')
+        data = (root / target).read_bytes()
+        if len(data) != size or hashlib.sha256(data).hexdigest() != digest:
+            raise ValueError('BXROOT_LICENSE_CHANGED: ' + target)
+    if seen != expected:
+        raise ValueError('BXROOT_LICENSE_SOURCE_MISSING')
+
+
 def verify_licenses(root=ROOT):
     for name in REQUIRED_LICENSES:
         path = root / 'app/src/main/assets/licenses' / name
@@ -32,6 +60,7 @@ def verify_licenses(root=ROOT):
     if {row['target'] for row in evidence['licenses']} != {
             'app/src/main/assets/licenses/LGPL-3.0.txt', 'app/src/main/assets/licenses/MPL-2.0.txt'}:
         raise ValueError('THIRD_PARTY_LICENSE_SOURCE_MISSING')
+    verify_bxroot_license_sources(root)
 
 
 def verify_native_members(root=ROOT):

@@ -162,6 +162,9 @@ public interface ContainerRuntime {
 
   /** coderredlab/proroot，LD_PRELOAD 路径翻译，零 ptrace。 */
   class Proroot implements ContainerRuntime {
+    private static final String COMPAT_PROXY = "libdsha-proroot-compat.so";
+    private static final String COMPAT_ENTRY = "libdsha-proroot-linker.so";
+
     /** 五个 .so 都得在同一目录，启动器靠 /proc/self/exe 的 dirname 找同伴。 */
     public static final String[] LIBS = {
       "libproroot.so",
@@ -212,7 +215,9 @@ public interface ContainerRuntime {
         File f = new File(dir, n);
         if (!f.isFile() || f.length() == 0) return false;
       }
-      return true;
+      File proxy = new File(dir, COMPAT_PROXY);
+      File entry = new File(dir, COMPAT_ENTRY);
+      return proxy.isFile() && proxy.length() > 0 && entry.isFile() && entry.length() > 0;
     }
 
     @Override
@@ -222,6 +227,10 @@ public interface ContainerRuntime {
         File f = new File(dir, n);
         if (!f.isFile() || f.length() == 0) missing.add(n);
       }
+      File proxy = new File(dir, COMPAT_PROXY);
+      if (!proxy.isFile() || proxy.length() == 0) missing.add(COMPAT_PROXY);
+      File entry = new File(dir, COMPAT_ENTRY);
+      if (!entry.isFile() || entry.length() == 0) missing.add(COMPAT_ENTRY);
       if (missing.isEmpty()) return "";
       return com.deepseekharness.app.util.UiText.format(
           "缺 %s 个运行时文件（%s 等）", missing.size(), missing.get(0));
@@ -266,12 +275,19 @@ public interface ContainerRuntime {
     }
 
     @Override
-    public void applyEnv(ProcessBuilder pb, File baseDir, File libDir, File tmpDir) {
+    public void applyEnv(ProcessBuilder pb, File baseDir, File libDir, File tmpDir)
+        throws java.io.IOException {
+      File proxy = new File(dir, COMPAT_PROXY);
+      if (!proxy.isFile() || proxy.length() == 0)
+        throw new java.io.IOException("PROROOT_COMPAT_PROXY_MISSING");
+      File entry = new File(dir, COMPAT_ENTRY);
+      if (!entry.isFile() || entry.length() == 0)
+        throw new java.io.IOException("PROROOT_COMPAT_ENTRY_MISSING");
       pb.environment().put("PROROOT_TMP_DIR", tmpDir.getAbsolutePath());
+      // Keep the original runtime a direct preload so its path hooks stay in lookup scope.
       pb.environment()
           .put("PROROOT_LIB_PATH", new File(dir, "libproroot-runtime.so").getAbsolutePath());
-      pb.environment()
-          .put("PROROOT_LINKER_PATH", new File(dir, "libproroot-linker.so").getAbsolutePath());
+      pb.environment().put("PROROOT_LINKER_PATH", entry.getAbsolutePath());
       if (staticLoader)
         pb.environment()
             .put(
@@ -288,6 +304,12 @@ public interface ContainerRuntime {
               com.deepseekharness.app.util.UiText.format("proroot 运行时缺 %s", n));
         }
       }
+      File proxy = new File(dir, COMPAT_PROXY);
+      if (!proxy.isFile() || proxy.length() == 0)
+        throw new java.io.IOException("PROROOT_COMPAT_PROXY_MISSING");
+      File entry = new File(dir, COMPAT_ENTRY);
+      if (!entry.isFile() || entry.length() == 0)
+        throw new java.io.IOException("PROROOT_COMPAT_ENTRY_MISSING");
       //noinspection ResultOfMethodCallIgnored
       shmDir().mkdirs();
     }

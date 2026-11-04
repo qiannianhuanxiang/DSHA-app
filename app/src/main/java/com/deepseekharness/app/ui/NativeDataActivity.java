@@ -283,7 +283,7 @@ public final class NativeDataActivity extends AppCompatActivity {
     button(
         t("恢复中断的数据提交", "Recover interrupted data commit"),
         () -> {
-          new DshaDialogBuilder(this)
+          new DshaDialogBuilder(this, true)
               .setTitle(t("恢复中断的数据提交", "Recover interrupted data commit"))
               .setMessage(
                   t(
@@ -479,7 +479,7 @@ public final class NativeDataActivity extends AppCompatActivity {
         selected.retainedKey = entry.key();
         chooseExport(true, selected);
       } else if ("restore-tree".equals(action)) {
-        new DshaDialogBuilder(this)
+        new DshaDialogBuilder(this, true)
             .setTitle(t("预检保留原件", "Inspect retained original"))
             .setMessage(
                 t(
@@ -605,7 +605,7 @@ public final class NativeDataActivity extends AppCompatActivity {
             : t(
                 "将停止 Web、终端和写入任务后建立快照，导出无需密码的 tar.gz 备份。",
                 "Web, terminals and write tasks stop before the snapshot. The tar.gz backup needs no password.");
-    new DshaDialogBuilder(this)
+    new DshaDialogBuilder(this, true)
         .setTitle(rescue ? t("救援导出", "Rescue export") : t("数据导出", "Data export"))
         .setMessage(message)
         .setPositiveButton(
@@ -851,6 +851,12 @@ public final class NativeDataActivity extends AppCompatActivity {
             t(
                 "\n这是未加密的 v5 备份；摘要能校验文件完整性，但不能提供保密或来源认证。",
                 "\nThis is an unencrypted v5 backup; the digest verifies file integrity but provides no confidentiality or sender authentication.");
+      if (preview.get("warnings") instanceof List
+          && ((List<?>) preview.get("warnings")).contains("LINK_METADATA_RETAINED"))
+        info +=
+            t(
+                "\n部分链接无法安全还原，不会创建；确认恢复后，链接信息会保存在应用私有恢复记录中。",
+                "\nSome links cannot be restored safely and will not be created. If you confirm, their metadata will be retained in the app's private restore record.");
       if (preview.get("warnings") instanceof List && !((List<?>) preview.get("warnings")).isEmpty())
         info +=
             t(
@@ -911,17 +917,17 @@ public final class NativeDataActivity extends AppCompatActivity {
                                     "Selected data saved. Profile settings are pending: open Retained copies and old trees to inspect each profile, select fields and verify readback. Plugins and code still require review.")
                                 + (value.result.contains("API_KEY")
                                     ? t(
-                                        "\n原生 API Key 未恢复，请到模型配置确认凭据。",
-                                        "\nThe native API key was not restored; verify credentials in Model configuration.")
+                                        "\n原生 API Key 未恢复，请在 Web UI 中确认模型凭据。",
+                                        "\nThe native API key was not restored; verify model credentials in Web UI.")
                                     : "")
                             : value.result.equals("DATA_RESTORED_API_KEY_MISSING")
                                 ? t(
-                                    "数据已恢复，但备份中的 API Key 无法读取；请到模型配置重新填写。",
-                                    "Data restored, but the selected API key could not be read. Enter it again in Model configuration.")
+                                    "数据已恢复，但备份中的 API Key 无法读取；请在 Web UI 中重新配置模型凭据。",
+                                    "Data restored, but the selected API key could not be read. Configure model credentials again in Web UI.")
                                 : value.result.equals("DATA_RESTORED_API_KEY_OMITTED")
                                     ? t(
-                                        "数据已恢复；本次备份未包含 API Key，请到模型配置填写。",
-                                        "Data restored; this backup did not include an API key. Enter it in Model configuration.")
+                                        "数据已恢复；本次备份未包含 API Key，请在 Web UI 中配置模型凭据。",
+                                        "Data restored; this backup did not include an API key. Configure model credentials in Web UI.")
                                     : value.result.equals("DATA_RESTORED_PLUGINS_QUARANTINED")
                                         ? t(
                                             "数据已恢复，插件、可执行配置与待确认的自定义数据已隔离保存，尚未启用。",
@@ -1012,8 +1018,13 @@ public final class NativeDataActivity extends AppCompatActivity {
                 "此备份格式尚不支持，当前数据未覆盖。",
                 "This backup format is unsupported. Current data was not overwritten.");
         break;
-      case "SOURCE_CHANGED":
       case "TARGET_CHANGED":
+        message =
+            t(
+                "目标在核验期间发生变化，操作已停止并保留原件。如果正在恢复，请先停止 Web、终端及其他写入任务，再重新选择备份并核对恢复预览。",
+                "The target changed during verification. The operation stopped and originals were retained. If restoring, stop Web, terminals and other writers, then select the backup again and review the new restore preview.");
+        break;
+      case "SOURCE_CHANGED":
       case "INPUT_CHANGED":
         message =
             t(

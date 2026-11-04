@@ -1,5 +1,106 @@
 # 更新记录
 
+## 0.2.1-rc.3-bxroot.12-dsh0.2.1-rc.3 / build214（2026-11-03）
+
+- **bxroot 运行时**：内置 bxroot v0.2.5 的 5 个原生库（`libbxroot.so`、`-runtime`、`-ulx`、`-host`、`-enter`）。默认仍是 proot；bxroot 在「配置 → 运行引擎」里显式选择。
+- **Termux 路径兼容**：写死 Termux 前缀的 shebang 脚本、`$PREFIX/...` 路径和 Termux home 在路径翻译层改写成 Ubuntu 布局。真机验证 shebang 脚本执行与 `pwd -P`。
+- **启动与解压**：延迟 `syncfs`（内核 ≥5.8 时单次 flush）、runtime-tools 准备结果持久化缓存、`NODE_COMPILE_CACHE` 指向 guest 内缓存目录、无旧版待审阅标记时跳过迁移进程。
+- **原生调用**：`bx-host`（进 Android bionic world）与 `libbxroot-enter.so`（回同一 guest 会话）。
+- 版本码 214；签名 `dsha-bxroot` v3，与上游 E7E3 不同，只能并排安装。
+
+## 0.2.1-rc.3-20261027.1149-dsh0.2.1-rc.3 / build204（源码合并）
+
+- 合并 Sunset build203 的 v5 页面、全屏终端与会话侧栏改进，保留手机与平板布局、附加键以及终端首次点击相关修复。
+- 保留 build198 对全局授权切换的修复，以及电脑工作区、扫码配对、连接器和中继的撤除；手机控制、本机与局域网访问保留。
+- 虚拟屏启动支持可选 generation 的启动前状态核对；实际原生请求仍只带 coreInstance 和 package，状态预检不是原子代次围栏。
+- 统一状态栏安全区并保留十种语言。内置 dsh-web-mobile 3.2.2、DSH rc.3；本轮只做源码合并，手机验收继续暂停。
+- 下列 build202、build203 或其他历史包的测试、安装和设备记录只属于其各自构建，不能作为 build204 验收。合并范围以最终源码与后续实际验证为准。
+
+<!-- build202-sunset-history -->
+## 0.2.1-rc.3 · build202（2026-10-26，Sunset 独立测试分支历史）
+
+- 界面：把 v5 交互原型的外壳原生化——顶栏品牌/页面语境、手机悬浮胶囊导航、平板 80dp 左侧导航栏、启动主页的语境/大标题/活动条/三格状态/快捷行与日志复制/跟随/导出；插件与设置沿用现有真实功能，不使用原型模拟数据。
+- 终端：合入 `Sunset-zhongdua-G` 的全屏终端宿主与会话保护，点击「终端」拉起独立全屏 `TerminalActivity`，返回只关闭页面、不结束会话；侧栏三向态、手机 7+7 / 平板 8+8 附加键与横屏三列两行压缩随构建合入。
+- 版本码 202；测试身份 `dsh.android.client.SunsetRNE`，本机测试证书签名（非 E7E3）；内置 `dsh-web-mobile` 保持 3.2.2。范围与验证/APK 摘要见本轮报告。
+- 2026-10-27 后续：把 v5 页面组件层铺到设置、插件、运行配置、安装与环境、设备授权、数据与备份、更新、诊断、欢迎/首启、关于与恢复页；新增 `shell_page.xml` 与 `bg_shell_*`，旧内页跟随通用层级色。终端修复侧栏新建/结束会话与“回到输入”首击被触摸焦点吞掉的问题，并移除侧栏白天/黑夜/系统主题分段。APK SHA-256 `a72d0251…ec45`，详见 [替换报告](docs/releases/v0.2.1-rc.3-build202-ui-replacement-20261027.md)。
+
+<!-- build198-sunset-history -->
+## 0.2.1-rc.3 · build198（2026-10-26，Sunset 独立测试分支历史）
+
+- 版本码更新为 198；Sunset 独立测试包 applicationId 改为 `dsh.android.client.SunsetRNE2`，正式包 `dsh.android.client` 不变，可与正式版及旧 SunsetRNE 测试版共存。
+- 终端悬浮球和工作台“菜单”改为打开会话侧栏：极简/窄工作台用抽屉，≥840dp 工作台内联常驻；侧栏集中新建、切换、重命名、结束核验、返回、显示设置、键盘、粘贴、输入焦点和说明。
+- CI run 40248037705 / commit 7eaf914 成功产出 Standard 测试 APK：2519 项测试 0 失败/0 错误/1 允许跳过；APK SHA-256 `dad7d25983f1f7a783d130c0bcad08ad9f53cca7c77fa3d5079b614bd2c231d1`，测试证书非 E7E3。未安装、未操作手机、未做设备验收。
+- 后续（2026-10-26）：终端底部附加键改为手机 7+7 / 平板 8+8 两套可自定义布局，显示设置或长按进入编辑；单行自动缩字、固定 48dp 行高，保存只刷新当前 PTY。侧栏三向态与图标化 HTML 预览同步更新。CI run 40282161255 / commit 1ad0290 成功：2545 项测试 0 失败/0 错误/1 允许跳过；APK SHA-256 `ace50b5828a37d8cf173ff7a44c019a51a5fe69759ea400c5032b1fa842a181b`，临时证书 `57855eb3…b049`（非 E7E3）。未安装、未操作手机；原生主题尚未落地。
+
+## 0.2.1-rc.3-20261025.2100-dsh0.2.1-rc.3 / build198（历史软件候选）
+
+合并Sunset19提交；修复授权切换隐藏暂停；撤除整套电脑连接；统一顶部安全区及解耦活动采样等待。Standard软件检查通过，7项Windows链接权限限制已用POSIX补验；用户暂停手机验收，设备仍197。完整范围见 `docs/releases/v0.2.1-rc.3-build198-20261025.md`；不把候选当作已发布或已验收。
+
+<!-- build197-current -->
+## 0.2.1-rc.3 · build197（2026-10-25）
+
+- 统一最近任务与主页返回，补齐LAN状态/地址，手机控制接入当前对话。
+- 内置十语、系统语言匹配、阿语RTL和自适应主提示，保留用户内容与自定义提示。
+- 修复IME观察取消模型、过时poll和权限/进程恢复后的空白主页。
+- Standard505项、Release Lint与精确APK检查通过；Android13实际覆盖、模型工具确认/结束、返回复用和正常停止范围见[本轮报告](docs/releases/v0.2.1-rc.3-build197-20261025.md)。仅私有交付、不跑Low。
+
+## 0.2.1-rc.2 · build190 / 插件速度维护2100（2026-10-22）
+
+- 插件页使用独立轻量能力查询，来源证明以两个有界worker执行；保留完整校验、实际加载状态和结果顺序。
+- 修正新增worker与旧策略补丁重入冲突，补生产Java升级及精确APK检查；2020失败候选不交付。
+- PR119已有画中画修复继续保留并补22项实际布局/策略回归；默认仍关闭。
+- 44类每版332项、17宿主及APK7通过；手机有效开关反馈到确认约3.10–3.39秒，整页结果波动，详细范围与未修像素缺口见[本轮记录](docs/releases/v0.2.1-rc.2-build190-ui-performance-20261022.md)。仅私有维护交付。
+
+## 0.2.1-rc.2 · build190 / UI与息屏维护（2026-10-22）
+
+- 修复插件配置写锁/HMR反转；合并受控开关后的重复列表读取，列表不再等待未使用的预设诊断，保持实际加载状态与外部变更刷新。
+- 会话改为单击切换；消除侧栏背景按压闪屏与插件/预设等待提示挤动布局，旧预设V1升级通过真实补丁链恢复。
+- 可见启动同步申请前台保护，等待真实提升，补齐超时、停止、安全恢复及服务损失的精确代次收尾；电池设置入口不再发起缺权限的直接豁免请求。
+- `0.2.1-rc.2-20261022.1817-dsh0.2.1-rc.2` / code190 / `dsh.android.client`；两版关联42类各310项零失败/错误/跳过，14项宿主和APK门禁通过，Lint警告248/161保留。保留原失败与逐次修正，最终手机及限制见[本轮报告](docs/releases/v0.2.1-rc.2-build190-ui-performance-20261022.md)和[English](docs/en/releases/v0.2.1-rc.2-build190-ui-performance-20261022.md)。仅私有维护交付，公开发布继续暂停。
+
+## 0.2.1-rc.2 · build190 / F13（2026-10-21）
+
+- 真实目录控制器独立组合，保留后端/Gateway、Config/name与named类行为，不删除工作区、会话或附件。[操作与边界](docs/plugins.md)。
+- FileUploads以精确注册对象退休，避免比较Cordis包装后的回调；保留重复拒绝、旧disposer围栏、上传接收和Session回执。[运行机制](docs/runtime-data-plugin-architecture.md)。
+- 区分LIVE/UNKNOWN/EXITED；UNKNOWN保留同DOM/Gecko会话与原生状态面板，不授ready。仅同record/代次/实例/URL/端口通过kernel→HTTP→kernel后创建新registration，旧票不复活，不重发对话或后台启动。[启动与恢复](docs/startup-and-diagnostics.md)。
+
+- Standard选定150类/952项JUnit（3跳过），Low选定150类/952项（76跳过），两版零失败/错误；Release Lint零错误、Standard/Low警告249/162，八项实际APK检查通过。原始失败/纠正/预期负控分别保留，不称一次连续全绿；无设备/ADB、真实账号/模型和新长时验收。[F13记录](docs/releases/v0.2.1-rc.2-build190-fix13-20261021.md) · [English](docs/en/releases/v0.2.1-rc.2-build190-fix13-20261021.md)。
+
+下方旧条目的“当前/本轮”按其原时点阅读；已发布F12原记录和URL不改，F11未上传。
+
+## 0.2.1-rc.2 · build190 / F12（2026-10-21）
+
+- 修复插件全依赖同步扫描导致列表与DSH通道阻塞；改为真实bundle筛选、完整异步来源证明、短启停读回及独立刷新，保留事务与未知退出屏障。
+- 修复严格恢复既有Web后LAN cookie未发布，以及首次说明响应丢失/Host晚保存/明确revision冲突的处理；未保存不假报成功。
+- 保留自动Web端口；说明本机端口复用、origin变化及同WebServer OAuth临时回调路由，不把ADB端口与Web端口混用。
+- 补齐分发文档与完整现行英文版。148类/939项每flavor，零失败/错误；Lint零错误，八项实际APK检查通过；无本轮真机/真实账号/新长时验收。见[F12记录](docs/releases/v0.2.1-rc.2-build190-fix12-20261021.md)和[English](docs/en/releases/v0.2.1-rc.2-build190-fix12-20261021.md)。
+
+## 0.2.1-rc.2 · build190 / F11（2026-10-21，当前私有维护版本）
+
+- 当前诊断版本 `0.2.1-rc.2-20261021.1157-dsh0.2.1-rc.2` /190；DSH0.2.1-rc.2、移动UI3.2.1、Ubuntu base10、默认proot/可选proroot及正式包名/E7E3保持。最终软件及精确APK结果见下；附件摘要与远端状态由关联Release及独立外部回执核验。
+- 修订LAN后端端口、业务拒绝、回调路径和网络变化连接收尾；适配官方账号授权在内嵌浏览器的异步导航及首次说明Host确认。宿主恢复只识别同一活跃Web，不启动或重放业务；未知证据保留停止屏障及原生工作台。
+- 插件按APK受管proof和实际完整内容区分签名、受管、用户/未验证来源；不再凭npm scope、前缀或安装目录漏备用户包。普通失败临时候选与UNKNOWN保留现场分开说明。
+- 补齐21篇实际新Markdown和具体操作/权限/失败文档；源码分发清单2135成员/135MD，Java adoption1023。完整源码ZIP继续直接展开固定输入；最终冻结范围以回执为准。
+- 本轮暂停设备、ADB、真实账号/模型对话和四/八小时验收；Star快照1827属于原仓库。详见[F11范围与实际结果](docs/releases/v0.2.1-rc.2-build190-fix11-20261021.md)。
+- 最终增量构建两版各143类/881项，零失败/错误；Standard/Low跳过3/76。两版Lint零错误、249/162警告，八项实际APK检查通过；原始失败、复核负控及宿主端口占用限制见F11记录。
+
+## 0.2.1-rc.2 · build190 / F10（2026-10-21，已发布历史）
+
+- 以build170为基座迁入后续全局授权、虚拟屏等功能，内置DSH0.2.1-rc.2；按本轮用户决定恢复默认proot，同时保留显式proroot选择。此项覆盖下方DSHA v1.1.6的历史默认，不是宣称proroot上游版本为v1.1.6；当前vendor锁v1.2.8。详见[运行引擎与迁移](docs/runtime-engines.md)。
+- 键盘动画减少逐帧整页重排，移动插件3.2.1固定main10e58ce；新增直接保存Download/DSHA的一键无密码备份，先安全停止DSH/任务，不自动重启，外置工作区内容另备。
+- 新增项目框架、设备权限、运行环境/数据/插件、引擎、端口、DNS、虚拟屏架构和ADR、官方资料与来源索引；当前配置、历史性能/默认及未运行范围分开。
+- 默认Web端口自动选择；备用只在本机记忆、不跨设备迁移。auto/ipv4对Node做特定lookup兼容，ipv4另加glibc no-aaaa，详见[端口](docs/ports-and-networking.md)与[DNS](docs/dns-configuration.md)。
+- 软件双版各785项零失败/错误（Standard3、Low76跳过）、两版Release Lint零错误且有警告，正式Standard APK七项实际核验通过。F10当时未验手机；准确包与源码归属见[F10历史发布记录](docs/releases/v0.2.1-rc.2-build190-prerelease-20261020.md)。
+
+
+## 0.2.0-rc2 正式版 · build170（2026-10-09）
+
+- 由贡献者 [@ym2025szz](https://github.com/ym2025szz) 发布正式 Release / Latest；内置 DSH 0.2.0-rc.2、移动 UI 3.0.5，沿用包名和 E7E3 历史签名。对比上一正式版及下载见[发布说明](docs/releases/v0.2.0-rc2-notes.md)。
+- 累积插件自动启用与开放依赖安装、无密码 tar.gz 导出、“数据与备份”入口整理、首次安装并行解压与离线工具准备；保留旧备份和数据兼容读取。
+- 修复附件直接文档选择、多选与图片草稿保存/恢复、ADB 私有路径及冷目录准备、聊天 shell 的 /tmp；增加网页原生分享/保存、虚拟屏指引、LAN 错误说明与日志显示整理。
+- 两版各45项关联检查与 Release Lint、Android13 正式包非破坏性验收通过；历史冷安装42.412秒未达30秒，未扩大无线配对、原vivo16或旧Android/16KiB验收范围。详见[build170](docs/releases/v0.2.21-build170-20261009.md)。
+- 发布页仅上传两 APK 和各自校验文件；更新现有中英文主页与 Star History，历史 Release、标签、赞助和致谢信息保留。
+
 ## 0.2.7-20261003.1944-dsh0.2.0-rc.2 / 156（2026-10-03，本地修订）
 
 - 重新核对全部236个审计编号，补修旧台账遗漏的凭据导出、特权文件竞态、取消传播、原子记录发布、CI回执和测试夹具问题；逐项事实与实际检查见[本轮交付报告](docs/releases/v0.2.7-build156-20261003.md)。
@@ -445,6 +546,8 @@ assets 脚本真编译），发布时证书指纹不匹配直接中止 —— �
 | 深色模式按钮浅蓝底浅字看不清 | Material3 把 `<Button>` 膨胀成 MaterialButton 并用 `colorPrimary` 填充，**忽略 `android:background`**，对比度只有约 1.3:1 |
 
 ### 🚀 v1.1.6 起：默认 proroot 运行时，启动快 5~6 倍
+
+> 历史归属：本节是DSHA v1.1.6当时的默认、旧基准和回退设计，不描述当前build190，也不是proroot上游版本号。当前默认proot、proroot显式可选；当前加载器、shim、缺失的--kill-on-exit及退出监督见[运行引擎专页](docs/runtime-engines.md)。下方原历史正文保留。
 
 传统 proot 基于 ptrace，**每个系统调用要两次上下文切换**；
 [proroot](https://github.com/coderredlab/proroot) 改用 LD_PRELOAD + 二进制补丁做

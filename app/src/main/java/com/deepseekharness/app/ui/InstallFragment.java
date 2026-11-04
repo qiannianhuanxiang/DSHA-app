@@ -97,6 +97,11 @@ public class InstallFragment extends Fragment {
     view.findViewById(R.id.install_environment_recovery)
         .setOnClickListener(
             v -> startActivity(new Intent(requireContext(), StartupRecoveryActivity.class)));
+    ((TextView) view.findViewById(R.id.install_storage_help))
+        .setText(com.deepseekharness.app.util.UiText.text("首次安装测速"));
+    view.findViewById(R.id.install_storage_help)
+        .setOnClickListener(
+            v -> startActivity(new Intent(requireContext(), ColdSetupSpeedActivity.class)));
 
     view.findViewById(R.id.install_btn).setOnClickListener(v -> start(false, 0));
     view.findViewById(R.id.install_repair).setOnClickListener(v -> start(true, 0));
@@ -108,13 +113,6 @@ public class InstallFragment extends Fragment {
             });
     view.findViewById(R.id.install_copy).setOnClickListener(v -> copyLog());
     view.findViewById(R.id.install_uninstall).setOnClickListener(v -> confirmMaintenance());
-    view.findViewById(R.id.install_factory_reset)
-        .setOnClickListener(
-            v ->
-                startActivity(
-                    new Intent(requireContext(), ExtractActivity.class)
-                        .putExtra("review_only", true)
-                        .putExtra("request_factory_reset", true)));
     for (int i = 0; i < STEP_IDS.length; i++) {
       final int step = i + 1;
       view.findViewById(STEP_IDS[i]).setOnClickListener(v -> showStep(step));
@@ -176,7 +174,7 @@ public class InstallFragment extends Fragment {
                 com.deepseekharness.app.util.MaintenanceErrorText.render(state.details[step - 1]))
             .setNeutralButton(com.deepseekharness.app.util.UiText.text("关闭"), null);
     if (!state.busy()
-        && !MaintenanceCoordinator.isEnvironmentTaskBusy()
+        && !MaintenanceCoordinator.isExclusiveWorkBlocked()
         && !BackupTask.get(requireContext()).pendingMaintenance()) {
       dialog
           .setPositiveButton(
@@ -191,7 +189,7 @@ public class InstallFragment extends Fragment {
     View view = getView();
     if (view == null || repository == null) return;
     InstallTask.Snapshot state = repository.snapshot();
-    boolean environmentBusy = MaintenanceCoordinator.isEnvironmentTaskBusy();
+    boolean environmentBusy = MaintenanceCoordinator.isExclusiveWorkBlocked();
     BackupTask maintenanceTask = BackupTask.get(requireContext());
     boolean pending = maintenanceTask.pendingMaintenanceForUi();
     String renderKey =
@@ -215,7 +213,7 @@ public class InstallFragment extends Fragment {
             state.busy()
                 ? state.phase
                 : environmentBusy
-                    ? "环境任务进行中：" + EnvironmentTaskGate.activeKind()
+                    ? "环境任务进行中：" + MaintenanceCoordinator.activeEnvironmentDescription()
                     : pending
                         ? com.deepseekharness.app.util.UiText.text("上次环境维护尚未完成，请先恢复原环境")
                         : state.outcome == InstallTask.Outcome.IDLE
@@ -291,7 +289,6 @@ public class InstallFragment extends Fragment {
             ? com.deepseekharness.app.util.UiText.text("恢复中断维护")
             : com.deepseekharness.app.util.UiText.text("备份并重建环境"));
     maintenance.setEnabled(!state.busy() && !environmentBusy);
-    view.findViewById(R.id.install_factory_reset).setEnabled(!state.busy() && !environmentBusy);
     Button cancel = view.findViewById(R.id.install_cancel);
     cancel.setVisibility(state.busy() ? View.VISIBLE : View.GONE);
     cancel.setEnabled(!state.cancelRequested);
@@ -355,7 +352,7 @@ public class InstallFragment extends Fragment {
       return;
     }
     boolean recovery = maintenance.pendingMaintenance();
-    new com.deepseekharness.app.ui.DshaDialogBuilder(requireContext())
+    new com.deepseekharness.app.ui.DshaDialogBuilder(requireContext(), true)
         .setTitle(
             recovery
                 ? com.deepseekharness.app.util.UiText.text("恢复中断维护？")

@@ -107,6 +107,75 @@ public class NativeEnvironmentRebuildTest {
   }
 
   @Test
+  public void captureParentLinkIsIdentifiedWithoutChangingOriginalData() throws Exception {
+    File files = temp.newFolder();
+    fixture(files);
+    var task = EnvironmentRebuildTransaction.create(FS, files, null);
+    File home = new File(files, "linux/ubuntu/root");
+    BackupFileSystem guarded =
+        new JvmBackupFileSystem() {
+          @Override
+          public List<String> list(File path) throws IOException {
+            if (path.equals(home)) throw new IOException("PARENT_LINK");
+            return super.list(path);
+          }
+        };
+    IOException error =
+        assertThrows(
+            IOException.class,
+            () ->
+                new MaintenanceDataSnapshot(
+                        guarded, files, task.directory(), new File(files, "public"))
+                    .capture("/root/project", "test", new BackupControl(null)));
+    assertEquals("REBUILD_CAPTURE_PARENT_LINK", error.getMessage());
+    assertEquals("PARENT_LINK", error.getCause().getMessage());
+    assertEquals("conversation", Files.readString(new File(home, ".dsh/sessions/a").toPath()));
+    assertFalse(new File(task.directory(), "previous-linux").exists());
+  }
+
+  @Test
+  public void restoreRejectsLinkedParentAndRollbackRetainsOriginal() throws Exception {
+    File files = temp.newFolder();
+    fixture(files);
+    var task = prepared(files);
+    task.begin();
+    File newRoot = new File(files, "linux/ubuntu"),
+        linked = new File(newRoot, "root/.dsh/sessions");
+    Files.createDirectories(newRoot.toPath());
+    BackupFileSystem guarded =
+        new JvmBackupFileSystem() {
+          boolean replaced;
+
+          @Override
+          public void parents(File root, String relative) throws IOException {
+            // 模拟逐段 NOFOLLOW 在恢复一个文件前发现父级被替换。
+            if (relative.equals("root/.dsh/sessions/a")) replaced = true;
+            super.parents(root, relative);
+          }
+
+          @Override
+          public Node stat(File path) throws IOException {
+            if (replaced && path.equals(linked))
+              return new Node("LINK", "replacement", 0, 0, 0, 0777);
+            return super.stat(path);
+          }
+        };
+    IOException error =
+        assertThrows(
+            IOException.class,
+            () ->
+                new MaintenanceDataSnapshot(
+                        guarded, files, task.directory(), new File(files, "public"))
+                    .restore(newRoot, new BackupControl(null)));
+    assertEquals("REBUILD_RESTORE_PARENT_LINK", error.getMessage());
+    assertEquals("PARENT_LINK", error.getCause().getMessage());
+    assertFalse(new File(linked, "a").exists());
+    task.rollback();
+    assertEquals(
+        "conversation", Files.readString(new File(newRoot, "root/.dsh/sessions/a").toPath()));
+  }
+
+  @Test
   public void staticVersionSuccessCannotCommitAndCommittedDataIsNeverRewound() throws Exception {
     File files = temp.newFolder();
     fixture(files);

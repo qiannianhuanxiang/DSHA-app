@@ -11,6 +11,7 @@ import com.deepseekharness.app.util.ProcessTermination;
 import com.deepseekharness.app.util.ProcessIdentity;
 import com.deepseekharness.app.util.RuntimeInstanceRegistry;
 import com.deepseekharness.app.util.RecoveryArchiveSource;
+import com.deepseekharness.app.util.RecoveryDescriptorLimits;
 import com.deepseekharness.app.util.ShellQuote;
 import com.deepseekharness.app.util.WebPidIdentity;
 import com.deepseekharness.app.util.UiText;
@@ -55,6 +56,20 @@ public final class RecoveryRuntime {
     "language-patch.json",
     "web-integration/language.js"
   };
+  private static final String POLICY_ROOT =
+      "usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/dsha-destructive-policy/";
+  private static final String[] DEPENDENCY_ASSETS = {
+    "destructive-policy/package.json", "destructive-policy/index.js",
+    "destructive-policy/destructive.js", "destructive-policy/workdir.js",
+    "recovery-native-consent.cjs"
+  };
+  private static final String[] DEPENDENCY_PATHS = {
+    POLICY_ROOT + "package.json",
+    POLICY_ROOT + "index.js",
+    POLICY_ROOT + "destructive.js",
+    POLICY_ROOT + "workdir.js",
+    "run/dsha-launcher/native-consent.cjs"
+  };
   private final Context context;
   private final File files;
   private final JSONObject descriptor;
@@ -77,10 +92,15 @@ public final class RecoveryRuntime {
     try {
       descriptor =
           new JSONObject(
-              new String(asset("recovery-runtime.json", 8 * 1024 * 1024), StandardCharsets.UTF_8));
+              new String(
+                  asset("recovery-runtime.json", RecoveryDescriptorLimits.MAX_BYTES),
+                  StandardCharsets.UTF_8));
       runtimeId = descriptor.getString("id");
       if (descriptor.getInt("schema") != 1 || !runtimeId.matches("[a-f0-9]{64}"))
         throw new IOException("RECOVERY_DESCRIPTOR_INVALID");
+      RecoveryDescriptorLimits.counts(
+          descriptor.getJSONArray("files").length(),
+          descriptor.has("links") ? descriptor.getJSONArray("links").length() : 0);
     } catch (JSONException error) {
       throw new IOException("RECOVERY_DESCRIPTOR_INVALID", error);
     }
@@ -164,6 +184,7 @@ public final class RecoveryRuntime {
         }
       }
       applyBrowserOverlay(candidate);
+      installCapsuleDependencies(candidate);
       verifyRoot(candidate);
       check();
       RecoveryStoragePlan.prepared(fs, staging, runtimeId, instanceId);
@@ -253,8 +274,8 @@ public final class RecoveryRuntime {
     if (!root.isDirectory()) throw new IOException("RECOVERY_ROOT_MISSING");
     try {
       JSONArray proof = descriptor.getJSONArray("files");
-      if (proof.length() < 6 || proof.length() > 100_000)
-        throw new IOException("RECOVERY_FILE_PROOF_MISSING");
+      RecoveryDescriptorLimits.counts(
+          proof.length(), descriptor.has("links") ? descriptor.getJSONArray("links").length() : 0);
       for (int i = 0; i < proof.length(); i++) {
         check();
         JSONObject row = proof.getJSONObject(i);
@@ -286,6 +307,7 @@ public final class RecoveryRuntime {
       if ((Os.stat(bash.getAbsolutePath()).st_mode & 0111) == 0)
         throw new IOException("RECOVERY_BASH_MODE");
       inside(root, "usr/local/bin/node");
+      verifyCapsuleDependencies(root);
     } catch (JSONException | ErrnoException error) {
       throw new IOException("RECOVERY_FILE_PROOF_FAILED", error);
     }
@@ -299,7 +321,11 @@ public final class RecoveryRuntime {
         throw new IOException("RECOVERY_OVERLAY_INPUT_COUNT");
       for (String name : OVERLAY_INPUTS)
         verifyDigest(
-            new ByteArrayInputStream(asset(name, 1024 * 1024)), inputHashes.getString(name));
+            new ByteArrayInputStream(
+                asset(
+                    name,
+                    name.equals("web-integration/language.js") ? 8 * 1024 * 1024 : 1024 * 1024)),
+            inputHashes.getString(name));
       JSONArray rows = descriptor.getJSONArray("overlays");
       if (rows.length() != OVERLAY_PATHS.length) throw new IOException("RECOVERY_OVERLAY_COUNT");
       for (int i = 0; i < OVERLAY_PATHS.length; i++) {
@@ -324,6 +350,66 @@ public final class RecoveryRuntime {
       }
     } catch (JSONException error) {
       throw new IOException("RECOVERY_OVERLAY_INVALID", error);
+    }
+  }
+
+  /** Mandatory imports are signed capsule bytes, never borrowed from the formal environment. */
+  private JSONArray capsuleDependencies() throws IOException {
+    try {
+      JSONArray rows = descriptor.getJSONArray("capsuleDependencies");
+      if (rows.length() != DEPENDENCY_ASSETS.length)
+        throw new IOException("RECOVERY_DEPENDENCY_COUNT");
+      for (int i = 0; i < DEPENDENCY_ASSETS.length; i++) {
+        JSONObject row = rows.getJSONObject(i);
+        if (!DEPENDENCY_ASSETS[i].equals(row.getString("asset"))
+            || !DEPENDENCY_PATHS[i].equals(row.getString("path"))
+            || row.getLong("bytes") < 1
+            || row.getLong("bytes") > 1024 * 1024
+            || !row.getString("sha256").matches("[a-f0-9]{64}"))
+          throw new IOException("RECOVERY_DEPENDENCY_PROOF");
+      }
+      return rows;
+    } catch (JSONException invalid) {
+      throw new IOException("RECOVERY_DEPENDENCY_PROOF", invalid);
+    }
+  }
+
+  private void installCapsuleDependencies(File root) throws IOException {
+    JSONArray rows = capsuleDependencies();
+    try {
+      for (int i = 0; i < rows.length(); i++) {
+        check();
+        JSONObject row = rows.getJSONObject(i);
+        String[] components = DEPENDENCY_PATHS[i].split("/");
+        File parent = root;
+        for (int part = 0; part < components.length - 1; part++)
+          parent = directory(parent, components[part]);
+        File target = new File(parent, components[components.length - 1]);
+        if (exists(target)) throw new IOException("RECOVERY_DEPENDENCY_COLLISION");
+        byte[] bytes = asset(DEPENDENCY_ASSETS[i], (int) row.getLong("bytes"));
+        if (bytes.length != row.getLong("bytes")) throw new IOException("RECOVERY_DEPENDENCY_SIZE");
+        verifyDigest(new ByteArrayInputStream(bytes), row.getString("sha256"));
+        writeAtomic(target, bytes);
+      }
+    } catch (JSONException invalid) {
+      throw new IOException("RECOVERY_DEPENDENCY_PROOF", invalid);
+    }
+  }
+
+  private void verifyCapsuleDependencies(File root) throws IOException {
+    JSONArray rows = capsuleDependencies();
+    try {
+      for (int i = 0; i < rows.length(); i++) {
+        File target = inside(root, DEPENDENCY_PATHS[i]);
+        rejectLink(target);
+        if (!target.isFile() || target.length() != rows.getJSONObject(i).getLong("bytes"))
+          throw new IOException("RECOVERY_DEPENDENCY_MISSING");
+        try (InputStream input = new FileInputStream(target)) {
+          verifyDigest(input, rows.getJSONObject(i).getString("sha256"));
+        }
+      }
+    } catch (JSONException invalid) {
+      throw new IOException("RECOVERY_DEPENDENCY_PROOF", invalid);
     }
   }
 
@@ -374,7 +460,7 @@ public final class RecoveryRuntime {
     try {
       verifyDigest(new ByteArrayInputStream(source), descriptor.getString("agentSha256"));
       write(new File(agent, "recovery-agent.js"), source);
-      // rc2 的 dsh_plugin_packages 在每轮模型请求前读取活动插件的 name/version；
+      // 独立锁定运行时的 dsh_plugin_packages 在每轮模型请求前读取活动插件的 name/version；
       // 缺少 version 会在 HTTP 前抛 REQUEST_EXTENSION，令空白应急对话无法工作。
       write(
           new File(agent, "package.json"),
@@ -472,6 +558,7 @@ public final class RecoveryRuntime {
     env.put("PATH", "/usr/local/bin:/usr/bin:/bin");
     env.put("HOME", "/root");
     env.put("DSH_HOME", "/root/.dsh");
+    env.put("DSHA_UI_LANGUAGE", UiText.language());
     env.put("LANG", "C.UTF-8");
     env.put("TMPDIR", "/tmp");
     env.put("BROWSER", "true");
@@ -829,15 +916,7 @@ public final class RecoveryRuntime {
   }
 
   private static String safeRelative(String path) throws IOException {
-    if (path == null
-        || path.isEmpty()
-        || path.startsWith("/")
-        || path.contains("\\")
-        || path.contains("\0")) throw new IOException("RECOVERY_PATH_INVALID");
-    for (String component : path.split("/", -1))
-      if (component.isEmpty() || component.equals(".") || component.equals(".."))
-        throw new IOException("RECOVERY_PATH_INVALID");
-    return path;
+    return RecoveryDescriptorLimits.path(path);
   }
 
   private static File inside(File root, String path) throws IOException {

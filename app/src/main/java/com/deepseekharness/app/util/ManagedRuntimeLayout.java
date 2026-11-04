@@ -10,6 +10,27 @@ public final class ManagedRuntimeLayout {
   public static final String ROOT = GuestPaths.ROOT_RELATIVE + "/";
   public static final String DSH = "usr/local/lib/node_modules/@deepseek-ai/dsh";
 
+  /** 原生能力命令（dsha-native.py 的入口）：Termux:API 风格包装与 dsha-am / dsha-su。 */
+  public static final String[] NATIVE_COMMANDS = {
+    "termux-clipboard-get",
+    "termux-clipboard-set",
+    "termux-notification",
+    "termux-toast",
+    "termux-vibrate",
+    "termux-torch",
+    "termux-open-url",
+    "termux-share",
+    "termux-location",
+    "termux-sensor",
+    "termux-battery-status",
+    "termux-dialog",
+    "termux-wake-lock",
+    "termux-wake-unlock",
+    "termux-info",
+    "dsha-am",
+    "dsha-su"
+  };
+
   public static List<String> paths() {
     List<String> out = new ArrayList<>();
     out.add(DSH);
@@ -18,6 +39,9 @@ public final class ManagedRuntimeLayout {
     out.add("usr/local/share/dsha/dns-compat.cjs");
     out.add("usr/local/share/dsha/managed-assets-v2");
     out.add("etc/profile.d/dsha-runtime-env.sh");
+    out.add("usr/local/lib/dsha-pnpm");
+    out.add("root/.dsha-pnpm-version");
+    out.add("root/dsh-bin/pnpm");
     out.add("root/dsha-builtin.txt");
     out.add("root/dsha-app-integration");
     for (String name : BuiltinPlugins.DEFAULT_BUILTINS)
@@ -28,6 +52,7 @@ public final class ManagedRuntimeLayout {
           "plugin-lifecycle.py",
           "plugin-dependencies.py",
           "plugin-transactions.py",
+          "materialize-cas-links.py",
           "backup-plugin-graph.py",
           "rc1-migration.py",
           "rc1-settings-migration.cjs",
@@ -41,11 +66,13 @@ public final class ManagedRuntimeLayout {
           "script-version",
           "builtin-plugins.json",
           "runtime-tools.json",
-          "bridge-token-compat.cjs"
+          "bridge-token-compat.cjs",
+          "dsha-native.py"
         }) out.add("root/.dsh/" + name);
     for (String name :
-        new String[] {"npm", "npx", "dsha-plugin", "adb-shell", "install-ubuntu-tools"})
+        new String[] {"dsh", "npm", "npx", "dsha-plugin", "adb-shell", "install-ubuntu-tools"})
       out.add("root/dsh-bin/" + name);
+    for (String name : NATIVE_COMMANDS) out.add("root/dsh-bin/" + name);
     return out;
   }
 

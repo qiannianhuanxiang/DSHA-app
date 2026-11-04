@@ -43,8 +43,15 @@ public final class DeviceAppPolicy {
             java.util.regex.Pattern.compile("^package:([A-Za-z0-9_.]+) uid:([0-9]+(?:,[0-9]+)*)$")
                 .matcher(line.trim());
         if (!m.matches() || !m.group(1).matches("[A-Za-z][A-Za-z0-9_]*(?:\\.[A-Za-z0-9_]+)*"))
+          // #210 附带诊断：把解析失败的原始行（脱敏、截断）带进错误，让用户反馈
+          // 能定位 ROM 的实际输出格式。诊断详情是数据，不随界面语言变化。
           throw new IllegalArgumentException(
-              com.deepseekharness.app.util.UiText.text("应用清单格式无法确认"));
+              com.deepseekharness.app.util.UiText.text("应用清单格式无法确认")
+                  + "（"
+                  + com.deepseekharness.app.util.UiText.text(system ? "[系统应用]\n" : "[用户应用]\n").trim()
+                  + "，首条意外行："
+                  + unexpected(line)
+                  + "）");
         Set<Integer> uids = new LinkedHashSet<>();
         for (String value : m.group(2).split(",")) uids.add(Integer.parseInt(value));
         App old = apps.get(m.group(1));
@@ -57,6 +64,13 @@ public final class DeviceAppPolicy {
             || app.name.equals(selfPackage)
             || app.name.equals("moe.shizuku.privileged.api")) protectedUids.addAll(uids);
       }
+    }
+
+    /** #210 附带诊断：把清单解析失败的原始行（脱敏、截断）带进错误，让用户反馈能定位 ROM 的实际输出格式。 */
+    private static String unexpected(String line) {
+      String trimmed = line.trim();
+      if (trimmed.length() > 80) trimmed = trimmed.substring(0, 80) + "…";
+      return "[" + SensitiveData.redact(trimmed) + "]";
     }
 
     public String grouped() {

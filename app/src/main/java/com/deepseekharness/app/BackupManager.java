@@ -63,7 +63,7 @@ public final class BackupManager {
 
   /** 主线程与安装入口的只读门控；调用方仍需原子取得 EnvironmentTaskGate.Lease 才能开始工作。 */
   public static boolean isEnvironmentTaskBusy() {
-    return com.deepseekharness.app.core.MaintenanceCoordinator.isEnvironmentTaskBusy();
+    return com.deepseekharness.app.core.MaintenanceCoordinator.isExclusiveWorkBlocked();
   }
 
   /** 与普通停止共用 PID 身份与同 UID 进程核验，未知读取错误仍阻止维护。 */

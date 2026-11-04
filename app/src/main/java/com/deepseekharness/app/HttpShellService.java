@@ -11,6 +11,9 @@ import com.deepseekharness.app.util.BridgeLifecycle;
 import com.deepseekharness.app.util.BridgeQuestions;
 import com.deepseekharness.app.util.BoundedUiCall;
 import com.deepseekharness.app.util.BridgeRoutes;
+import com.deepseekharness.app.util.ScreenActionResult;
+import com.deepseekharness.app.util.VirtualScreenRoutes;
+import com.deepseekharness.app.util.VirtualScreenWindowPolicy;
 
 import android.app.Notification;
 import android.app.NotificationChannel;
@@ -45,6 +48,10 @@ import java.util.concurrent.TimeUnit;
 public final class HttpShellService {
 
   public static final int PORT = 3090;
+
+  /** 已发布的 IPv4 监听端口；未就绪时为 0。 */
+  private volatile int bridgePort;
+
   private static final String CONFIRM_CHANNEL = "dsh_confirm_channel";
   private static final int CONFIRM_NOTIF_ID = Constants.NOTIF_SHELL_CONFIRM;
 
@@ -112,11 +119,31 @@ public final class HttpShellService {
 
   private static final class PendingConfirmation {
     final com.deepseekharness.app.util.BridgeConfirmations.Request request;
+    final boolean screen;
+    final com.deepseekharness.app.util.ScreenTarget target;
+    final RequestScope scope;
+    final com.deepseekharness.app.control.ControlTaskAuthority.Lease taskLease;
+    com.deepseekharness.app.control.ScreenControlConfirmation.Prompt taskPrompt;
     volatile PendingIntent allow, deny;
     androidx.appcompat.app.AlertDialog dialog;
+    boolean resolving, targetChanged;
+    int promptWindow = -1;
 
     PendingConfirmation(com.deepseekharness.app.util.BridgeConfirmations.Request request) {
+      this(request, false, null, null, null);
+    }
+
+    PendingConfirmation(
+        com.deepseekharness.app.util.BridgeConfirmations.Request request,
+        boolean screen,
+        com.deepseekharness.app.util.ScreenTarget target,
+        RequestScope scope,
+        com.deepseekharness.app.control.ControlTaskAuthority.Lease taskLease) {
       this.request = request;
+      this.screen = screen;
+      this.target = target;
+      this.scope = scope;
+      this.taskLease = taskLease;
     }
   }
 
@@ -124,6 +151,29 @@ public final class HttpShellService {
   private volatile boolean running;
   private volatile BridgeRun activeRun;
   private final ThreadLocal<BridgeRun> requestRun = new ThreadLocal<>();
+
+  private static final class RequestScope {
+    final BridgeRun run;
+    final long screenRevision;
+    final long consentRevision;
+    final long webGeneration;
+    final String requestId;
+    volatile boolean canceled;
+    volatile com.deepseekharness.app.capabilities.CapabilityRequest capability;
+
+    RequestScope(
+        BridgeRun run,
+        long screenRevision,
+        String requestId,
+        long consentRevision,
+        long webGeneration) {
+      this.run = run;
+      this.screenRevision = screenRevision;
+      this.requestId = requestId;
+      this.consentRevision = consentRevision;
+      this.webGeneration = webGeneration;
+    }
+  }
 
   private interface RouteHandler {
     String handle(HttpShellService service, BridgeRequest request) throws Exception;
@@ -135,6 +185,7 @@ public final class HttpShellService {
     final com.deepseekharness.app.util.HttpProtocol.Head head;
     final java.io.InputStream input;
     final Socket socket;
+    final RequestScope scope;
 
     BridgeRequest(
         String path,
@@ -143,7 +194,9 @@ public final class HttpShellService {
         boolean post,
         com.deepseekharness.app.util.HttpProtocol.Head head,
         java.io.InputStream input,
-        Socket socket) {
+        Socket socket,
+        RequestScope scope) {
+      this.scope = scope;
       this.path = path;
       this.route = route;
       this.query = queryOf(path);
@@ -176,26 +229,26 @@ public final class HttpShellService {
     routes.put(
         BridgeRoutes.Route.DEVICE_EXECUTE,
         (s, r) ->
-            s.deviceExecute(
-                r.command, "1".equals(r.param("su", "0")), "1".equals(r.param("adb", "0"))));
+            "1".equals(r.param("unrestricted", "0"))
+                ? s.deviceExecuteUnrestricted(r.command, "1".equals(r.param("su", "0")))
+                : s.deviceExecute(
+                    r.command, "1".equals(r.param("su", "0")), "1".equals(r.param("adb", "0"))));
+    routes.put(BridgeRoutes.Route.CONSENT_POLICY, (s, r) -> s.consentPolicy(r.scope));
     routes.put(BridgeRoutes.Route.NOTIFY, (s, r) -> s.appNotify(r.path));
+    routes.put(
+        BridgeRoutes.Route.TASK_CONTEXT, (s, r) -> s.appTask("context", r.param("payload", "")));
+    routes.put(BridgeRoutes.Route.TASK_EVENT, (s, r) -> s.appTask("event", r.param("payload", "")));
+    routes.put(BridgeRoutes.Route.TASK_CLAIM, (s, r) -> s.appTask("claim", r.param("payload", "")));
+    routes.put(BridgeRoutes.Route.TASK_ACK, (s, r) -> s.appTask("ack", r.param("payload", "")));
     routes.put(BridgeRoutes.Route.TOAST, (s, r) -> s.appToast(r.path));
     routes.put(BridgeRoutes.Route.READ_FILE, (s, r) -> s.appReadFile(r.path));
     routes.put(BridgeRoutes.Route.HEALTH, (s, r) -> "OK");
-    routes.put(BridgeRoutes.Route.UI, (s, r) -> s.appUi(r.path));
-    routes.put(
-        BridgeRoutes.Route.VSCREEN,
-        (s, r) ->
-            s.appVscreen(
-                r.post
-                    ? com.deepseekharness.app.util.VscreenBridgeRequest.json(
-                        r.route,
-                        com.deepseekharness.app.util.VscreenBridgeRequest.readPost(
-                            r.head, r.input, r.socket))
-                    : com.deepseekharness.app.util.VscreenBridgeRequest.query(r.route, r.query)));
+    routes.put(BridgeRoutes.Route.UI, (s, r) -> s.appUi(r.path, r.scope));
+    routes.put(BridgeRoutes.Route.VSCREEN, (s, r) -> s.handleVscreen(r));
     routes.put(BridgeRoutes.Route.DEVICE, (s, r) -> s.appDevice());
     routes.put(BridgeRoutes.Route.APPS, (s, r) -> s.appList(r.path));
-    routes.put(BridgeRoutes.Route.LAUNCH, (s, r) -> s.appLaunch(r.path));
+    routes.put(BridgeRoutes.Route.LAUNCH, (s, r) -> s.appLaunch(r.path, r.scope));
+    routes.put(BridgeRoutes.Route.INTENT, (s, r) -> s.appIntent(r.command, r.scope));
     routes.put(BridgeRoutes.Route.CLIP, (s, r) -> s.appClip(r.path));
     routes.put(BridgeRoutes.Route.SHARE, (s, r) -> s.appShare(r.path));
     routes.put(BridgeRoutes.Route.OPEN, (s, r) -> s.appOpen(r.path));
@@ -227,6 +280,7 @@ public final class HttpShellService {
   /** 每一轮监听独立持有 socket/线程池，迟到的旧线程只能清理自己的资源。 */
   private static final class BridgeRun {
     final long generation;
+    final String runId = java.util.UUID.randomUUID().toString();
     volatile ServerSocket server, server6;
     final java.util.Set<Socket> clients =
         java.util.Collections.newSetFromMap(new java.util.concurrent.ConcurrentHashMap<>());
@@ -241,6 +295,19 @@ public final class HttpShellService {
               Thread t = new Thread(r, "http-shell");
               t.setDaemon(true);
               return t;
+            });
+
+    final java.util.concurrent.ExecutorService cancellationPool =
+        new java.util.concurrent.ThreadPoolExecutor(
+            4,
+            4,
+            0,
+            TimeUnit.MILLISECONDS,
+            new java.util.concurrent.ArrayBlockingQueue<>(20),
+            task -> {
+              Thread thread = new Thread(task, "bridge-screen-peer");
+              thread.setDaemon(true);
+              return thread;
             });
 
     BridgeRun(long generation) {
@@ -297,6 +364,36 @@ public final class HttpShellService {
           && run.server != null
           && run.server.isBound()
           && !run.server.isClosed();
+    }
+  }
+
+  /** Actual bound port, or 0 when no IPv4 listener is ready. */
+  public static int port() {
+    synchronized (LIFECYCLE) {
+      HttpShellService current = instance;
+      return current == null || !current.running ? 0 : current.bridgePort;
+    }
+  }
+
+  /** Exact physical-screen bridge connection, or null when its listener is retired. */
+  public static String currentScreenConnection(Context context) {
+    HttpShellService current;
+    BridgeRun run;
+    synchronized (LIFECYCLE) {
+      if (!isReady()) return null;
+      current = instance;
+      run = current.activeRun;
+      if (!LIFECYCLE.isCurrent(run.generation)) return null;
+    }
+    // Harness and bridge lifecycle locks have independent callers. Never nest
+    // them merely to identify the ready connection.
+    String runtime = com.deepseekharness.app.core.ScreenRuntimeIdentity.epoch(context).instanceId;
+    synchronized (LIFECYCLE) {
+      if (!isReady()
+          || instance != current
+          || current.activeRun != run
+          || !LIFECYCLE.isCurrent(run.generation)) return null;
+      return run.runId + ":" + runtime;
     }
   }
 
@@ -405,17 +502,51 @@ public final class HttpShellService {
     return bindError;
   }
 
-  private void noteBindOk() {
+  private void noteBindOk(int port) {
     bindError = "";
-    writeBridgeStatus("ok port=" + PORT);
+    writeBridgeStatus("ok port=" + port);
   }
 
   private void noteBindError(String why) {
     String safe = safeDisplay(why);
     bindError = safe;
-    android.util.Log.e("DSHA", com.deepseekharness.app.util.UiText.format("3090 桥绑定失败：%s", safe));
+    android.util.Log.e("DSHA", com.deepseekharness.app.util.UiText.format("设备桥绑定失败：%s", safe));
     com.deepseekharness.app.core.DiagnosticLog.record(ctx, "BRIDGE_BIND", safe);
+    clearBridgePort();
     writeBridgeStatus("fail " + safe);
+  }
+
+  /** Guest-side discovery: a 0600 machine-state file, not a credential. */
+  private void writeBridgePort(int port) throws IOException {
+    try {
+      java.io.File tf = tokenFileIfPossible();
+      if (tf == null || tf.getParentFile() == null)
+        throw new IOException("BRIDGE_DATA_ROOT_UNAVAILABLE");
+      java.io.File file =
+          new java.io.File(
+              tf.getParentFile(), com.deepseekharness.app.util.CredentialPaths.BRIDGE_PORT);
+      com.deepseekharness.app.util.BridgeCredentialFiles.publishPort(
+          new com.deepseekharness.app.backup.AndroidBackupFileSystem(), file, port);
+    } catch (IOException | RuntimeException error) {
+      throw new IOException("BRIDGE_PORT_FILE_FAILED", error);
+    }
+  }
+
+  private void clearBridgePort() {
+    try {
+      java.io.File tf = tokenFileIfPossible();
+      if (tf == null || tf.getParentFile() == null) return;
+      java.io.File file =
+          new java.io.File(
+              tf.getParentFile(), com.deepseekharness.app.util.CredentialPaths.BRIDGE_PORT);
+      var fs = new com.deepseekharness.app.backup.AndroidBackupFileSystem();
+      if (fs.stat(file).type.equals("MISSING")) return;
+      if (!fs.stat(file).type.equals("FILE")) throw new IOException("BRIDGE_PORT_FILE_TYPE");
+      fs.delete(file);
+      fs.syncDirectory(file.getParentFile());
+    } catch (Throwable error) {
+      android.util.Log.w("DSHA", "BRIDGE_PORT_DELETE_FAILED: " + safeError(error));
+    }
   }
 
   /** 桥状态落到 rootfs 的 /root/.dsh/.bridge_status，容器里 cat 一下就知道桥为什么不通 */
@@ -466,27 +597,29 @@ public final class HttpShellService {
     try {
       synchronized (LIFECYCLE) {
         if (!LIFECYCLE.isCurrent(run.generation) || activeRun != run) return;
-        ensureToken();
-        run.server = new ServerSocket();
-      }
-      // IPv4 是主通道；失败时不得启动仅 IPv6 的假就绪服务。
-      run.server.setReuseAddress(true);
-      run.server.bind(
-          new java.net.InetSocketAddress(java.net.InetAddress.getByName("127.0.0.1"), PORT));
-      synchronized (LIFECYCLE) {
-        if (activeRun != run || !LIFECYCLE.publish(run.generation)) return;
+        if (ensureToken().isEmpty()) throw new IOException("BRIDGE_TOKEN_UNAVAILABLE");
+        // 绑定、状态发布与停止共用锁：旧启动线程不能在停止清理后补出一个孤立监听。
+        run.server =
+            com.deepseekharness.app.util.BridgePortPolicy.bind(
+                com.deepseekharness.app.util.BridgePortPolicy.candidates(ctx.getPackageName()));
+        int bound = run.server.getLocalPort();
+        // 端口文件写入与读回失败时关闭本轮监听；guest 不可发现的桥不能报 ready。
+        writeBridgePort(bound);
+        if (!LIFECYCLE.publish(run.generation)) return;
+        bridgePort = bound;
         running = true;
         instance = this;
-        noteBindOk();
+        noteBindOk(bound);
         Thread t6 = new Thread(() -> serveIpv6(run), "http-shell-accept6");
         t6.setDaemon(true);
         t6.start();
       }
       acceptLoop(run, run.server);
-    } catch (java.net.BindException error) {
+    } catch (com.deepseekharness.app.util.BridgePortPolicy.Exhausted error) {
       failure =
           com.deepseekharness.app.util.UiText.format(
-              "设备桥端口 3090 被占用，设备工具暂不可用；Web 可独立启动。关闭占用端口的其他实例后重试：%s", safeError(error));
+              "设备桥端口 %s 均被占用，设备工具暂不可用；Web 可独立启动。关闭占用端口的其他实例后重试：%s",
+              com.deepseekharness.app.util.BridgePortPolicy.rangeLabel(), safeError(error));
     } catch (IOException | RuntimeException error) {
       failure = safeError(error);
     } finally {
@@ -499,15 +632,16 @@ public final class HttpShellService {
       synchronized (LIFECYCLE) {
         if (!running || activeRun != run || !LIFECYCLE.isCurrent(run.generation)) return;
         run.server6 = new ServerSocket();
+        run.server6.setReuseAddress(true);
+        run.server6.bind(
+            new java.net.InetSocketAddress(java.net.InetAddress.getByName("::1"), bridgePort));
       }
-      run.server6.setReuseAddress(true);
-      run.server6.bind(new java.net.InetSocketAddress(java.net.InetAddress.getByName("::1"), PORT));
       acceptLoop(run, run.server6);
     } catch (IOException | RuntimeException error) {
       if (activeRun == run && running)
         android.util.Log.i(
             "DSHA",
-            com.deepseekharness.app.util.UiText.format("3090 的 IPv6 附加监听不可用：%s", safeError(error)));
+            com.deepseekharness.app.util.UiText.format("设备桥的 IPv6 附加监听不可用：%s", safeError(error)));
     } finally {
       closeSocket(run.server6);
     }
@@ -532,12 +666,19 @@ public final class HttpShellService {
           long headerDeadline =
               com.deepseekharness.app.util.HttpProtocol.deadline(
                   com.deepseekharness.app.util.HttpProtocol.BRIDGE.timeoutMs);
+          RequestScope scope =
+              new RequestScope(
+                  run,
+                  uiGrant.revision(),
+                  java.util.UUID.randomUUID().toString(),
+                  new com.deepseekharness.app.core.DeviceGrants(ctx).consentPolicy().revision(),
+                  HarnessController.get(ctx).getWebGeneration());
           run.clients.add(client);
           run.pool.execute(
               () -> {
                 requestRun.set(run);
                 try {
-                  handle(client, headerDeadline);
+                  handle(client, headerDeadline, scope);
                 } finally {
                   requestRun.remove();
                   run.clients.remove(client);
@@ -572,6 +713,7 @@ public final class HttpShellService {
       // 旧 accept 线程的 finally 可以迟到，但不能清空新实例的就绪状态。
       if (activeRun != run || !LIFECYCLE.isCurrent(run.generation)) return;
       running = false;
+      bridgePort = 0;
       try {
         revokeScreenGrant(ctx);
       } catch (RuntimeException error) {
@@ -583,10 +725,13 @@ public final class HttpShellService {
       for (Socket client : run.clients) closeSocket(client);
       run.clients.clear();
       run.pool.shutdownNow();
+      run.cancellationPool.shutdownNow();
       questions.stop();
       if (pendingConfirm != null) finishConfirmation(pendingConfirm);
-      if (failure == null) writeBridgeStatus("stopped");
-      else noteBindError(failure);
+      if (failure == null) {
+        clearBridgePort();
+        writeBridgeStatus("stopped");
+      } else noteBindError(failure);
       activeRun = null;
       if (tokenOwner == this) tokenOwner = null;
       if (fixtureTokenFile != null) {
@@ -648,7 +793,9 @@ public final class HttpShellService {
   }
 
   /** Parse a bounded request and authenticate its X-Token header before dispatch. */
-  private void handle(Socket client, long headerDeadline) {
+  private void handle(Socket client, long headerDeadline, RequestScope scope) {
+    com.deepseekharness.app.util.BridgeImageBudget.Lease imageLease = null;
+    com.deepseekharness.app.util.BridgeImageWriteDeadline imageDeadline = null;
     try (Socket c = client) {
       java.io.BufferedInputStream requestInput =
           new java.io.BufferedInputStream(c.getInputStream(), 8192);
@@ -689,10 +836,23 @@ public final class HttpShellService {
         if (!authed) {
           result = "[UNAUTHORIZED]";
         } else {
+          if (!post
+              && (selected == BridgeRoutes.Route.UI
+                  || selected == BridgeRoutes.Route.VSCREEN
+                  || selected == BridgeRoutes.Route.LAUNCH
+                  || selected == BridgeRoutes.Route.INTENT)) monitorScreenPeer(scope, requestInput);
           BridgeRequest bridgeRequest =
-              new BridgeRequest(path, route, cmd, post, request, requestInput, c);
+              new BridgeRequest(path, route, cmd, post, request, requestInput, c, scope);
+          boolean imageRequest =
+              selected == BridgeRoutes.Route.READ_FILE
+                  && "image".equals(getParam(queryOf(path), "format", "text"));
+          if (imageRequest)
+            imageLease = com.deepseekharness.app.util.BridgeImageBudget.tryAcquire();
           try {
-            result = dispatch(selected, bridgeRequest);
+            result =
+                imageRequest && imageLease == null
+                    ? "IMAGE_BUSY"
+                    : dispatch(selected, bridgeRequest);
           } catch (com.deepseekharness.app.util.HttpProtocol.Failure invalid) {
             if (selected != BridgeRoutes.Route.VSCREEN) throw invalid;
             writeBridgeProtocolError(c, invalid.status, invalid.getMessage());
@@ -706,6 +866,10 @@ public final class HttpShellService {
         // 关键：result 必须包引号 —— 旧实现输出 {"result":YES} 是非法 JSON，
         // 客户端（adb-shell.py 判 '"YES"' in body / agent 用 json 解析）全部失效：
         // 用户点「允许」也会被当成拒绝。
+        if (imageLease != null)
+          imageDeadline =
+              com.deepseekharness.app.util.BridgeImageWriteDeadline.arm(
+                  c, com.deepseekharness.app.util.BridgeImageWriteDeadline.RESPONSE_TIMEOUT_MILLIS);
         String body = "{\"result\":\"" + jsonEscape(result) + "\"}";
         byte[] bodyBytes = body.getBytes("UTF-8");
         String head =
@@ -720,7 +884,46 @@ public final class HttpShellService {
         c.getOutputStream().flush();
       }
     } catch (Exception ignored) {
+    } finally {
+      if (imageDeadline != null) imageDeadline.close();
+      if (imageLease != null) imageLease.close();
+      cancelScope(scope);
     }
+  }
+
+  private void cancelScope(RequestScope scope) {
+    if (scope == null) return;
+    scope.canceled = true;
+    var capability = scope.capability;
+    if (capability != null) DshaApp.from(ctx).capabilityBroker().cancel(capability);
+  }
+
+  /** The body is fully consumed before this observer becomes its sole reader. */
+  private void monitorScreenPeer(RequestScope scope, java.io.InputStream input) {
+    scope.run.cancellationPool.execute(
+        () -> {
+          try {
+            input.read();
+          } catch (IOException closed) {
+            /* EOF and close both withdraw the request. */
+          }
+          cancelScope(scope);
+        });
+  }
+
+  private String handleVscreen(BridgeRequest request) throws Exception {
+    var parsed =
+        request.post
+            ? com.deepseekharness.app.util.VscreenBridgeRequest.json(
+                request.route,
+                com.deepseekharness.app.util.VscreenBridgeRequest.readPost(
+                    request.head, request.input, request.socket))
+            : com.deepseekharness.app.util.VscreenBridgeRequest.query(request.route, request.query);
+    if (request.post) {
+      request.socket.setSoTimeout(0);
+      monitorScreenPeer(request.scope, request.input);
+    }
+    return appVscreen(parsed, request.scope);
   }
 
   private String dispatch(BridgeRoutes.Route route, BridgeRequest request) throws Exception {
@@ -728,6 +931,7 @@ public final class HttpShellService {
     if (route == BridgeRoutes.Route.UNKNOWN) return "[NO_CMD]";
     if ((route == BridgeRoutes.Route.CONFIRM || route == BridgeRoutes.Route.EXEC)
         && request.command.isEmpty()) return "[NO_CMD]";
+    if (!bridgeCurrent(request.scope)) return "[STOPPED] BRIDGE_RUN_CHANGED";
     RouteHandler handler = ROUTE_HANDLERS.get(route);
     if (handler == null) throw new IllegalStateException("Missing bridge handler: " + route);
     return handler.handle(this, request);
@@ -738,6 +942,35 @@ public final class HttpShellService {
         com.deepseekharness.app.util.DeviceShellPolicy.inspect(command);
     // 旧确认接口不发放写入或结束进程的放行信号。
     return plan.kind == com.deepseekharness.app.util.DeviceShellPolicy.Kind.READ ? "YES" : "NO";
+  }
+
+  private String consentPolicy(RequestScope scope) throws org.json.JSONException {
+    var controller = HarnessController.get(ctx);
+    var runtime = com.deepseekharness.app.core.ScreenRuntimeIdentity.epoch(ctx);
+    var snapshot = new com.deepseekharness.app.core.DeviceGrants(ctx).consentSnapshot();
+    boolean available =
+        bridgeCurrent(scope)
+            && runtime.generation > 0
+            && runtime.generation == controller.getWebGeneration()
+            && scope.webGeneration == runtime.generation
+            && controller.isWebRunning()
+            && !controller.isStarting()
+            && runtime.runningIdentity()
+            && !controller.isStopping()
+            && !controller.isUserStopped();
+    return new org.json.JSONObject(
+            com.deepseekharness.app.util.NativeConsentProjection.payload(
+                snapshot,
+                available,
+                DshaApp.from(ctx).installationId(),
+                scope.run.runId,
+                runtime.generation,
+                runtime.instanceId))
+        .toString();
+  }
+
+  private String appTask(String operation, String payload) throws Exception {
+    return AgentTaskNotifications.get(ctx).bridge(operation, payload);
   }
 
   private String execOutput(String command) throws org.json.JSONException {
@@ -780,6 +1013,39 @@ public final class HttpShellService {
   // ================= App 层交互端点（agent 通过 3090 桥调用） =================
 
   /** 在发送命令前选一次通道；只有明确返回 ADB 计划时客户端才可连接 ADB。 */
+  /**
+   * /device/execute?unrestricted=1：用户在设备能力授权里开启“不受限制的设备 shell”后，
+   * 命令原样交给已授权的 root / Shizuku 执行（支持管道、重定向、脚本）。
+   *
+   * <p>只放宽命令白名单，不放宽身份和硬禁止项：分区、SELinux、挂载、刷机仍由
+   * DeviceShellPolicy.inspectUnrestricted 拒绝；开关关闭时整条路径不可用。ADB 通道
+   * 不走这里 —— 客户端侧还有一层白名单执行器，这次不改它。
+   */
+  private String deviceExecuteUnrestricted(String command, boolean forceRoot) {
+    try {
+      if (!new com.deepseekharness.app.core.DeviceGrants(ctx).unrestrictedShellAllowed())
+        return completedExecution(
+            "policy",
+            com.deepseekharness.app.util.UiText.choose(
+                "[POLICY_BLOCKED] 不受限制的设备 shell 未开启：设置 → 设备能力授权中开启后可用\n[EXIT=126]",
+                "[POLICY_BLOCKED] Unrestricted device shell is off. Enable it in Settings → Device permissions\n[EXIT=126]"));
+      var plan = com.deepseekharness.app.util.DeviceShellPolicy.inspectUnrestricted(command);
+      if (!plan.allowed()) return completedExecution("policy", plan.reason + "\n[EXIT=126]");
+      if (RootShell.enabled(ctx) && RootShell.present())
+        return completedExecution("root", RootShell.execUnrestricted(ctx, command));
+      if (!forceRoot && ShizukuShell.hasPermission())
+        return completedExecution("shizuku", ShizukuShell.execUnrestricted(command));
+      return completedExecution(
+          "none",
+          com.deepseekharness.app.util.UiText.choose(
+              "[DEVICE_CHANNEL_UNAVAILABLE] 不受限 shell 需要已授权的 root 或 Shizuku（ADB 通道仍按白名单执行）\n[EXIT=124]",
+              "[DEVICE_CHANNEL_UNAVAILABLE] The unrestricted shell needs an authorized root or Shizuku channel (ADB keeps its allowlist)\n[EXIT=124]"));
+    } catch (Exception error) {
+      return completedExecution(
+          "unknown", "[EXECUTION_UNKNOWN] " + safeError(error) + "\n[EXIT=125]");
+    }
+  }
+
   private String deviceExecute(String command, boolean forceRoot, boolean forceAdb) {
     try {
       String planned = devicePlan(command, forceRoot);
@@ -820,7 +1086,7 @@ public final class HttpShellService {
       if (!source.equals(canonical))
         return completedExecution("policy", "[POLICY_BLOCKED] 无法核验 DSHA 安装包路径\n[EXIT=126]");
       var plan =
-          com.deepseekharness.app.util.DeviceShellPolicy.inspectVirtualScreenLaunch(
+          com.deepseekharness.app.util.DeviceShellPolicy.inspectManagedVirtualScreen(
               command, canonical, ctx.getPackageName());
       if (!plan.allowed()) return completedExecution("policy", plan.reason + "\n[EXIT=126]");
       if (!com.deepseekharness.app.vscreen.VirtualScreenManager.from(ctx)
@@ -981,17 +1247,12 @@ public final class HttpShellService {
    * {@link com.deepseekharness.app.ui.MainActivity} 收到后切到启动页并尝试进入 Web
    * （Web 未就绪时只切页，不报错）。
    *
-   * <p>用 {@code SINGLE_TOP + CLEAR_TOP} 复用已有任务，不新开一层；requestCode 与
+   * <p>用共享原生导航复用已有任务，保留浏览器页面；requestCode 与
    * 其它通知区分，避免 {@code FLAG_UPDATE_CURRENT} 让后建的通知覆盖前一个的 PendingIntent。
    */
   private PendingIntent agentNotificationIntent() {
     Intent intent =
-        new Intent(ctx, com.deepseekharness.app.ui.MainActivity.class)
-            .addFlags(
-                Intent.FLAG_ACTIVITY_NEW_TASK
-                    | Intent.FLAG_ACTIVITY_CLEAR_TOP
-                    | Intent.FLAG_ACTIVITY_SINGLE_TOP)
-            .putExtra("open_web", true);
+        com.deepseekharness.app.ui.MainActivity.navigationIntent(ctx).putExtra("open_web", true);
     return PendingIntent.getActivity(
         ctx,
         AGENT_NOTIF_REQUEST,
@@ -1012,8 +1273,169 @@ public final class HttpShellService {
       new com.deepseekharness.app.util.ScreenSessionGrant();
 
   public static void revokeScreenGrant(Context context) {
+    var coordinator = com.deepseekharness.app.control.PhoneControlCoordinator.get(context);
+    coordinator.stopLocal("LOCAL_DSH_STOPPED");
+    com.deepseekharness.app.screen.AccessibilityRepairOwner.cancel(
+        com.deepseekharness.app.util.AccessibilityRepairState.CancelCause.SCREEN_AUTHORITY_REVOKED);
+    revokeDisconnectedScreenGrant(context);
+  }
+
+  /** Revokes every old screen request without treating a planned platform unbind as user consent. */
+  public static void revokeDisconnectedScreenGrant(Context context) {
+    com.deepseekharness.app.control.PhoneControlCoordinator.get(context)
+        .stop("ACCESSIBILITY_DISCONNECTED");
+    DshaApp.from(context).capabilityBroker().revoke("screen");
+    DshaAccessibilityService.revokeRequests();
     uiGrant.revoke();
+    cancelScreenConfirmation();
     com.deepseekharness.app.vscreen.VirtualScreenManager.from(context).revoke();
+  }
+
+  public static void screenPolicyChanged(Context context) {
+    // Reconfiguration retires old work; only an explicit user pause blocks new tasks.
+    // stop preserves an existing user pause instead of replacing or clearing it.
+    com.deepseekharness.app.control.PhoneControlCoordinator.get(context)
+        .stop("SCREEN_POLICY_CHANGED");
+    com.deepseekharness.app.screen.AccessibilityRepairOwner.cancel(
+        com.deepseekharness.app.util.AccessibilityRepairState.CancelCause.POLICY_CHANGED);
+    DshaApp.from(context).capabilityBroker().revoke("screen");
+    DshaAccessibilityService.revokeRequests();
+    uiGrant.revoke();
+    cancelScreenConfirmation();
+    com.deepseekharness.app.vscreen.VirtualScreenManager.from(context).discardObservations();
+  }
+
+  /** A global consent change invalidates all domains before the new local mode is published. */
+  public static void globalConsentChanged(Context context) {
+    com.deepseekharness.app.control.PhoneControlCoordinator.get(context)
+        .stop("CONSENT_POLICY_CHANGED");
+    com.deepseekharness.app.ui.DshaDialogBuilder.invalidateSafetyConfirmations();
+    DshaApp.from(context).capabilityBroker().revokeAll();
+    com.deepseekharness.app.screen.AccessibilityRepairOwner.cancel(
+        com.deepseekharness.app.util.AccessibilityRepairState.CancelCause.POLICY_CHANGED);
+    DshaAccessibilityService.revokeRequests();
+    uiGrant.revoke();
+    DeviceBridgeService.adbIntentChanging();
+    synchronized (LIFECYCLE) {
+      HttpShellService service = instance;
+      if (service != null && service.pendingConfirm != null)
+        service.finishConfirmation(service.pendingConfirm);
+    }
+    com.deepseekharness.app.vscreen.VirtualScreenManager.from(context).revoke();
+  }
+
+  public static void smsPolicyChanged(Context context) {
+    DshaApp.from(context).capabilityBroker().revoke("sms");
+  }
+
+  public static boolean screenPaused() {
+    return uiGrant.paused();
+  }
+
+  public static void setScreenPaused(Context context, boolean paused) {
+    var coordinator = com.deepseekharness.app.control.PhoneControlCoordinator.get(context);
+    if (paused) coordinator.pause("LOCAL_USER_PAUSE");
+    else {
+      // An expanded assistant panel re-pauses on every geometry publish
+      // (AssistantWindow.publish -> OwnedScreenOverlay expansion listener ->
+      // pause("ASSISTANT_PANEL_EXPANDED")). Collapsing here keeps the resumed
+      // authority from being fenced again by that stale expansion flag.
+      var session = com.deepseekharness.app.assistant.AssistantSessionController.active();
+      if (session != null) session.collapse();
+      coordinator.resume();
+    }
+    com.deepseekharness.app.screen.AccessibilityRepairOwner.cancel(
+        com.deepseekharness.app.util.AccessibilityRepairState.CancelCause.PAUSE_CHANGED);
+    DshaApp.from(context).capabilityBroker().revoke("screen");
+    DshaAccessibilityService.revokeRequests();
+    com.deepseekharness.app.vscreen.VirtualScreenManager.from(context).discardObservations();
+    uiGrant.setPaused(paused);
+    cancelScreenConfirmation();
+    if (paused) com.deepseekharness.app.vscreen.VirtualScreenManager.from(context).revoke();
+  }
+
+  private static void cancelScreenConfirmation() {
+    synchronized (LIFECYCLE) {
+      HttpShellService service = instance;
+      if (service != null && service.pendingConfirm != null && service.pendingConfirm.screen)
+        service.finishConfirmation(service.pendingConfirm);
+    }
+  }
+
+  private boolean bridgeCurrent(RequestScope scope) {
+    synchronized (LIFECYCLE) {
+      return scope != null
+          && !scope.canceled
+          && scope.run != null
+          && running
+          && activeRun == scope.run
+          && scope.consentRevision
+              == new com.deepseekharness.app.core.DeviceGrants(ctx).consentPolicy().revision()
+          && LIFECYCLE.isCurrent(scope.run.generation);
+    }
+  }
+
+  private boolean screenBridgeCurrent(RequestScope scope) {
+    synchronized (LIFECYCLE) {
+      return scope != null
+          && !scope.canceled
+          && scope.run != null
+          && running
+          && activeRun == scope.run
+          && scope.consentRevision
+              == new com.deepseekharness.app.core.DeviceGrants(ctx).consentPolicy().revision()
+          && LIFECYCLE.isCurrent(scope.run.generation)
+          && scope.screenRevision == uiGrant.revision()
+          && scope.webGeneration == HarnessController.get(ctx).getWebGeneration();
+    }
+  }
+
+  private com.deepseekharness.app.capabilities.CapabilityRequest screenRequest(
+      RequestScope scope, String action, com.deepseekharness.app.util.ScreenTarget target) {
+    var broker = DshaApp.from(ctx).capabilityBroker();
+    com.deepseekharness.app.capabilities.TargetEvidence evidence =
+        target == null
+            ? () -> "application"
+            : new com.deepseekharness.app.capabilities.WindowTargetEvidence() {
+              public String kind() {
+                return "android-window";
+              }
+
+              public int displayId() {
+                return target.displayId;
+              }
+
+              public int windowId() {
+                return target.windowId;
+              }
+
+              public String packageName() {
+                return target.packageName;
+              }
+            };
+    return screenRequestEvidence(scope, action, evidence);
+  }
+
+  private com.deepseekharness.app.capabilities.CapabilityRequest screenRequestEvidence(
+      RequestScope scope,
+      String action,
+      com.deepseekharness.app.capabilities.TargetEvidence evidence) {
+    var broker = DshaApp.from(ctx).capabilityBroker();
+    var request =
+        new com.deepseekharness.app.capabilities.CapabilityRequest(
+            scope.requestId,
+            "screen",
+            action,
+            com.deepseekharness.app.core.ScreenRuntimeIdentity.epoch(ctx),
+            DshaApp.from(ctx).installationId(),
+            scope.run.runId,
+            evidence,
+            new com.deepseekharness.app.core.DeviceGrants(ctx).screenPolicy().revision,
+            broker.epoch("screen"),
+            android.os.SystemClock.elapsedRealtime() + 65000);
+    scope.capability = request;
+    if (scope.canceled) broker.cancel(request);
+    return request;
   }
 
   public static boolean hasScreenGrant(Context context) {
@@ -1028,36 +1450,79 @@ public final class HttpShellService {
     return com.deepseekharness.app.util.SensitiveAppPolicy.sensitive(pkg);
   }
 
-  /** @param action 给用户看的具体动作描述 —— 弹窗必须说清 AI 要干什么，
-   *               而不是笼统一句「操作屏幕」，否则用户等于盲签。 */
-  private boolean uiAuthorized(String action) {
-    return uiAuthorized(action, DshaAccessibilityService.currentPackage());
+  /** 屏幕授权的三态结果：桥要能区分「用户还没点允许」与「用户拒绝了」（issue #123）。 */
+  private enum ScreenAuthorization {
+    ALLOWED,
+    DENIED,
+    NO_ANSWER,
+    UNAVAILABLE
   }
 
-  private boolean uiAuthorized(String action, String pkg) {
+  private ScreenAuthorization screenAuthorization(
+      RequestScope scope,
+      String action,
+      String pkg,
+      com.deepseekharness.app.util.ScreenTarget target,
+      com.deepseekharness.app.capabilities.CapabilityRequest capability) {
     boolean sensitive = isSensitiveApp(pkg);
     var controller = com.deepseekharness.app.core.HarnessController.get(ctx);
+    var grants = new com.deepseekharness.app.core.DeviceGrants(ctx);
     long generation = controller.getWebGeneration(), revision = uiGrant.revision();
-    if (!sensitive && hasScreenGrant(ctx)) {
-      return true;
+    if (!screenBridgeCurrent(scope)
+        || uiGrant.paused()
+        || !controller.isWebRunning()
+        || controller.isStarting()
+        || controller.isStopping()
+        || controller.isUserStopped()
+        || generation <= 0) return ScreenAuthorization.UNAVAILABLE;
+    var policy = grants.effectiveScreenPolicy();
+    if (policy.allows(pkg)) {
+      boolean granted =
+          uiGrant.completeConfirmation(
+              true,
+              capability,
+              com.deepseekharness.app.core.ScreenRuntimeIdentity.epoch(ctx),
+              scope.run.runId,
+              revision,
+              policy.revision,
+              screenBridgeCurrent(scope)
+                  && controller.isWebRunning()
+                  && !controller.isStarting()
+                  && !controller.isStopping()
+                  && !controller.isUserStopped()
+                  && DshaApp.from(ctx).capabilityBroker().current(capability),
+              true);
+      return granted && DshaApp.from(ctx).capabilityBroker().authorize(capability)
+          ? ScreenAuthorization.ALLOWED
+          : ScreenAuthorization.UNAVAILABLE;
     }
     String where = pkg.isEmpty() ? com.deepseekharness.app.util.UiText.text("当前界面") : pkg;
     String why =
         sensitive
             ? com.deepseekharness.app.util.UiText.format(
-                "在【%s】里：%s  # 这类应用涉及支付或隐私，每次都需要你确认", where, action)
-            : com.deepseekharness.app.util.UiText.format(
-                "%s  # 本次 DSH 运行期间有效，可在设备能力授权中随时撤销", action);
-    boolean ok = requestUserConfirm(why);
+                "在【%s】里：%s  # 当前确认策略要求你确认，界面可能涉及支付或隐私", where, action)
+            : com.deepseekharness.app.util.UiText.format("%s  # 仅批准本次操作；可在设备能力授权中设置确认策略", action);
+    ConfirmationOutcome outcome = confirmOutcome(scope, capability, why, true, target);
     // A sensitive confirmation is one-shot, but must obey the same revocation and
     // run identity checks as a remembered grant. Never revive an old dialog result.
-    return uiGrant.completeConfirmation(
-        ok,
-        generation,
-        controller.getWebGeneration(),
-        revision,
-        !controller.isStopping() && !controller.isUserStopped(),
-        !sensitive);
+    boolean granted =
+        uiGrant.completeConfirmation(
+            outcome == ConfirmationOutcome.ALLOWED,
+            capability,
+            com.deepseekharness.app.core.ScreenRuntimeIdentity.epoch(ctx),
+            scope.run.runId,
+            revision,
+            grants.screenPolicy().revision,
+            screenBridgeCurrent(scope)
+                && !controller.isStopping()
+                && !controller.isUserStopped()
+                && DshaApp.from(ctx).capabilityBroker().current(capability),
+            false);
+    if (granted && DshaApp.from(ctx).capabilityBroker().authorize(capability))
+      return ScreenAuthorization.ALLOWED;
+    if (outcome == ConfirmationOutcome.DENIED) return ScreenAuthorization.DENIED;
+    if (outcome == ConfirmationOutcome.NO_ANSWER) return ScreenAuthorization.NO_ANSWER;
+    return ScreenAuthorization.UNAVAILABLE;
   }
 
   private static String shortText(String s) {
@@ -1066,142 +1531,285 @@ public final class HttpShellService {
     return t.length() > 24 ? t.substring(0, 24) + "…" : t;
   }
 
-  /** Accessibility requests retain the current generation, target and native screen-authorization checks. */
-  private String appUi(String path) {
-    var target = DshaAccessibilityService.observeTarget(0);
-    if (target == null) return "[ERR] SCREEN_TARGET_UNAVAILABLE";
-    var controller = HarnessController.get(ctx);
-    long generation = controller.getWebGeneration(), revision = uiGrant.revision();
-    return DshaAccessibilityService.runAuthorized(
-        target,
-        () ->
-            generation == controller.getWebGeneration()
-                && revision == uiGrant.revision()
-                && !controller.isStopping()
-                && !controller.isUserStopped(),
-        () -> appUiAuthorized(path, target));
-  }
-
-  private boolean uiAuthorizedForTarget(
-      com.deepseekharness.app.util.ScreenTarget target, String action) {
-    return uiAuthorized(action, target.packageName);
-  }
-
-  private String appUiAuthorized(String path, com.deepseekharness.app.util.ScreenTarget target) {
-    String q = queryOf(path);
-    // 命名空间内的子端点也走精确匹配：startsWith 会让 /app/ui/shotXXX
-    // 命中截屏，而截屏会把当前画面留到磁盘。
-    String r = path.split("\\?", 2)[0];
+  /** Main-screen adapter receives an explicit request and the caller's observation evidence. */
+  private String appUi(String path, RequestScope scope) {
+    String route = path.split("\\?", 2)[0];
+    String operation = route.substring("/app/ui/".length());
+    if (operation.equals("shot")) operation = "screenshot";
+    if (!java.util.Set.of(
+            "dump",
+            "screenshot",
+            "tap",
+            "input",
+            "key",
+            "swipe",
+            "tree",
+            "node",
+            "task-begin",
+            "task-end")
+        .contains(operation)) return "[ERR] UNKNOWN_ROUTE";
+    String query = queryOf(path);
     try {
-      if (r.equals("/app/ui/dump")) {
-        if (!uiAuthorizedForTarget(
-            target, com.deepseekharness.app.util.UiText.text("读取当前屏幕上的文字与控件")))
-          return com.deepseekharness.app.util.UiText.text("[ERR] 你拒绝了这次屏幕读取");
-        return DshaAccessibilityService.uiDump();
+      var arguments = new org.json.JSONObject();
+      for (String pair : query.split("&")) {
+        if (pair.isEmpty()) continue;
+        String[] item = pair.split("=", 2);
+        String key = java.net.URLDecoder.decode(item[0], "UTF-8");
+        if (arguments.has(key)) return "[ERR] DUPLICATE_ARGUMENT";
+        arguments.put(key, java.net.URLDecoder.decode(item.length == 2 ? item[1] : "", "UTF-8"));
       }
-      if (r.equals("/app/ui/tap")) {
-        String text = getParam(q, "text", "");
-        // 有文字就按文字点：控件位置会随滚动和动画变，文字不会
-        if (!text.isEmpty()) {
-          if (!uiAuthorizedForTarget(
-              target, com.deepseekharness.app.util.UiText.format("点击「%s」", shortText(text))))
-            return com.deepseekharness.app.util.UiText.text("[ERR] 你拒绝了这次点击");
-          return DshaAccessibilityService.uiTapText(text);
-        }
-        int x = intParam(q, "x", -1);
-        int y = intParam(q, "y", -1);
-        if (x < 0 || y < 0)
-          return com.deepseekharness.app.util.UiText.text("[ERR] 需要 ?text=要点的文字 或 ?x=&y=坐标");
-        if (!uiAuthorizedForTarget(
-            target, com.deepseekharness.app.util.UiText.format("点击坐标 (%s,%s)", x, y)))
-          return com.deepseekharness.app.util.UiText.text("[ERR] 你拒绝了这次点击");
-        return DshaAccessibilityService.uiTap(x, y);
+      if (operation.equals("tap") && !arguments.optString("text").isEmpty()) {
+        if (arguments.has("observationId") || arguments.has("gesture"))
+          return "[ERR] AMBIGUOUS_SCREEN_ACTION";
+        operation = "tapText";
       }
-      if (r.equals("/app/ui/input")) {
-        String text = getParam(q, "text", null);
-        if (text == null) return com.deepseekharness.app.util.UiText.text("[ERR] 需要 ?text=");
-        if (!uiAuthorizedForTarget(
-            target,
-            text.isEmpty()
-                ? com.deepseekharness.app.util.UiText.choose(
-                    "清空当前输入框", "Clear the current input field")
-                : com.deepseekharness.app.util.UiText.format("在输入框里填入「%s」", shortText(text)))) {
-          return com.deepseekharness.app.util.UiText.text("[ERR] 你拒绝了这次输入");
-        }
-        return DshaAccessibilityService.uiInput(text);
+      var coordinator = com.deepseekharness.app.control.PhoneControlCoordinator.get(ctx);
+      var runtime = com.deepseekharness.app.core.ScreenRuntimeIdentity.epoch(ctx);
+      // The bridge runtime identifies a connection, never a conversation. Both
+      // caller IDs must be supplied by the actual tool execution transport.
+      if (!arguments.has("taskSessionId") || !arguments.has("turnId"))
+        return "[ERR] SCREEN_TASK_IDENTITY_REQUIRED";
+      if (!screenBridgeCurrent(scope)) return "[ERR] BRIDGE_RUN_CHANGED";
+      String taskSessionId = arguments.getString("taskSessionId");
+      String turnId = arguments.getString("turnId");
+      long actualTurn = com.deepseekharness.app.control.ControlTaskAuthority.localTurn(turnId);
+      var binding =
+          new com.deepseekharness.app.control.ControlTaskAuthority.Binding(
+              com.deepseekharness.app.control.ControlTaskAuthority.Owner.LOCAL_DSH,
+              scope.run.runId + ":" + runtime.instanceId,
+              taskSessionId,
+              turnId);
+      if (operation.equals("task-end")) {
+        if (!screenBridgeCurrent(scope)) return "[ERR] BRIDGE_RUN_CHANGED";
+        coordinator.completeLocal(binding);
+        com.deepseekharness.app.assistant.AssistantService.finishLocalTask(ctx, binding);
+        return "OK";
       }
-      if (r.equals("/app/ui/key")) {
-        String k = getParam(q, "name", "");
-        if (!uiAuthorizedForTarget(
-            target, com.deepseekharness.app.util.UiText.format("按下系统按键 %s", shortText(k))))
-          return com.deepseekharness.app.util.UiText.text("[ERR] 你拒绝了这次按键");
-        return DshaAccessibilityService.uiKey(k);
+      // A turn/end HTTP notification can race the next turn. Its completion
+      // evidence is also sent with the next actual execution, scoped to the
+      // same full conversation, never a global last-active turn.
+      if (arguments.has("completedTurnId")) {
+        String completed = arguments.getString("completedTurnId");
+        if (com.deepseekharness.app.control.ControlTaskAuthority.localTurn(completed) >= actualTurn)
+          return "[ERR] CONTROL_TURN_INVALID";
+        if (!screenBridgeCurrent(scope)) return "[ERR] BRIDGE_RUN_CHANGED";
+        coordinator.completeLocal(
+            new com.deepseekharness.app.control.ControlTaskAuthority.Binding(
+                binding.owner(), binding.connection(), taskSessionId, completed));
       }
-      if (r.equals("/app/ui/screenshot") || r.equals("/app/ui/shot")) {
-        // 截屏会把当前画面留到磁盘，等于一份可被后续读取的隐私快照
-        String format = getParam(q, "format", "path");
-        if (!format.equals("path") && !format.equals("mcp"))
-          return "[ERR] SCREENSHOT_FORMAT_INVALID";
-        var controller = com.deepseekharness.app.core.HarnessController.get(ctx);
-        long generation = controller.getWebGeneration(), revision = uiGrant.revision();
-        if (!uiAuthorizedForTarget(
-            target, com.deepseekharness.app.util.UiText.text("截取当前屏幕并保存为图片")))
-          return com.deepseekharness.app.util.UiText.text("[ERR] 你拒绝了这次截屏");
-        return DshaAccessibilityService.uiScreenshot(
-            () ->
-                generation == controller.getWebGeneration()
-                    && revision == uiGrant.revision()
-                    && !controller.isStopping()
-                    && !controller.isUserStopped()
-                    && DshaAccessibilityService.matchesTarget(target),
-            format.equals("mcp"));
+      var taskUi = com.deepseekharness.app.assistant.AssistantService.ensureLocalTask(ctx, binding);
+      if (!taskUi.ready()) return taskUi.failureReply();
+      if (!screenBridgeCurrent(scope)) return "[ERR] BRIDGE_RUN_CHANGED";
+      if (operation.equals("task-begin")) {
+        if (!com.deepseekharness.app.assistant.AssistantService.stopChannelCurrent(ctx, binding))
+          return new com.deepseekharness.app.assistant.AssistantService.TaskUiResult(
+                  false, "ASSISTANT_STOP_NOTIFICATION_REQUIRED")
+              .failureReply();
+        coordinator.begin(binding);
+        return com.deepseekharness.app.screen.ScreenReply.completed()
+            .put("needsObservation", true)
+            .toString();
       }
-      if (r.equals("/app/ui/swipe")) {
-        int x1 = intParam(q, "x1", -1);
-        int y1 = intParam(q, "y1", -1);
-        int x2 = intParam(q, "x2", -1);
-        int y2 = intParam(q, "y2", -1);
-        if (x1 < 0 || y1 < 0 || x2 < 0 || y2 < 0) {
-          return com.deepseekharness.app.util.UiText.text("[ERR] 需要 ?x1=&y1=&x2=&y2=（可选 &ms=时长）");
-        }
-        if (!uiAuthorizedForTarget(
-            target,
-            com.deepseekharness.app.util.UiText.format("滑动屏幕 (%s,%s)→(%s,%s)", x1, y1, x2, y2))) {
-          return com.deepseekharness.app.util.UiText.text("[ERR] 你拒绝了这次滑动");
-        }
-        return DshaAccessibilityService.uiSwipe(x1, y1, x2, y2, intParam(q, "ms", 300));
-      }
-      return com.deepseekharness.app.util.UiText.text("[ERR] 未知端点（可用：dump/tap/input/key/swipe）");
-    } catch (Throwable t) {
-      return "[ERR] " + SensitiveData.redact(String.valueOf(t));
+      boolean observing = java.util.Set.of("dump", "tree", "screenshot").contains(operation);
+      var screenUi =
+          com.deepseekharness.app.assistant.AssistantService.prepareScreenOperation(
+              ctx, binding, observing);
+      if (!screenUi.ready()) return screenUi.failureReply();
+      var taskLease = coordinator.begin(binding);
+      if (!observing && !coordinator.actionAllowed(taskLease))
+        return com.deepseekharness.app.screen.ScreenReply.refused(
+                "FRESH_SCREEN_OBSERVATION_REQUIRED")
+            .toString();
+      long observationSequence = observing ? coordinator.beginObservation(taskLease) : 0;
+      if (observing && observationSequence < 0)
+        return com.deepseekharness.app.screen.ScreenReply.refused("SCREEN_RUN_CHANGED").toString();
+      var observed =
+          DshaAccessibilityService.observeTargetForRequest(
+              () ->
+                  com.deepseekharness.app.assistant.AssistantService.stopChannelCurrent(
+                          ctx, binding)
+                      && screenBridgeCurrent(scope)
+                      && coordinator.current(taskLease));
+      if (observed.target == null) return observed.failure().toString();
+      var target = observed.target;
+      if (!observing && !coordinator.checkActionTarget(taskLease, target))
+        return com.deepseekharness.app.screen.ScreenReply.refused("SCREEN_TARGET_CHANGED")
+            .toString();
+      var capability = screenRequest(scope, operation, target);
+      coordinator.bindRequest(capability, taskLease);
+      ScreenAuthorization authorization =
+          screenAuthorization(scope, operation, target.packageName, target, capability);
+      if (authorization != ScreenAuthorization.ALLOWED)
+        return "[ERR] "
+            + (authorization == ScreenAuthorization.DENIED
+                ? "USER_REJECTED"
+                : authorization == ScreenAuthorization.NO_ANSWER
+                    ? "USER_NO_ANSWER"
+                    : "USER_CONFIRM_UNAVAILABLE");
+      var controller = HarnessController.get(ctx);
+      java.util.function.BooleanSupplier live =
+          () ->
+              com.deepseekharness.app.assistant.AssistantService.stopChannelCurrent(ctx, binding)
+                  && screenBridgeCurrent(scope)
+                  && coordinator.current(taskLease)
+                  && (observing || coordinator.actionAllowed(taskLease, target))
+                  && !com.deepseekharness.app.control.OwnedScreenOverlay.expanded()
+                  && capability.runtime.equals(
+                      com.deepseekharness.app.core.ScreenRuntimeIdentity.epoch(ctx))
+                  && controller.isWebRunning()
+                  && !controller.isStarting()
+                  && !controller.isStopping()
+                  && !controller.isUserStopped();
+      String reply =
+          DshaAccessibilityService.execute(
+              DshaApp.from(ctx).capabilityBroker(), capability, live, operation, arguments);
+      if (observing
+          && new org.json.JSONObject(reply).optString("state").equals("COMPLETED")
+          && !coordinator.observed(taskLease, observationSequence, target))
+        return com.deepseekharness.app.screen.ScreenReply.refused("SCREEN_OBSERVATION_SUPERSEDED")
+            .toString();
+      return reply;
+    } catch (Exception error) {
+      return "[ERR] " + safeError(error);
     }
   }
 
   /** 虚拟屏只接受已认证的固定端点；每个写入/启动动作仍复用当前屏幕授权确认。 */
-  private String appVscreen(com.deepseekharness.app.util.VscreenBridgeRequest request) {
+  private String appVscreen(
+      com.deepseekharness.app.util.VscreenBridgeRequest request, RequestScope scope) {
     String route = request.route(),
         query = request.query(),
         operation = com.deepseekharness.app.util.VirtualScreenRoutes.operation(route);
+    boolean[] dispatched = {false};
+    String[] receipt = {null};
     try {
-      if (operation.equals("status") || operation.equals("close"))
-        return com.deepseekharness.app.vscreen.VirtualScreenManager.from(ctx).bridge(request);
+      String callerCore = request.parameters.getOrDefault("coreInstance", "");
+      String callerGeneration = request.parameters.getOrDefault("generation", "");
+      if (operation.equals("status") || operation.equals("close")) {
+        var capability =
+            callerCore.isEmpty()
+                ? screenRequest(scope, "vscreen." + operation, null)
+                : screenRequestEvidence(
+                    scope,
+                    "vscreen." + operation,
+                    new com.deepseekharness.app.vscreen.VscreenTargetEvidence(
+                        callerCore,
+                        callerGeneration,
+                        -1,
+                        -1,
+                        "",
+                        com.deepseekharness.app.vscreen.VscreenTargetEvidence.Observation.DISPLAY,
+                        -1,
+                        ""));
+        return com.deepseekharness.app.vscreen.VirtualScreenManager.from(ctx)
+            .bridge(
+                DshaApp.from(ctx).capabilityBroker(),
+                capability,
+                request,
+                () -> screenBridgeCurrent(scope));
+      }
       var controller = HarnessController.get(ctx);
       long generation = controller.getWebGeneration(), revision = uiGrant.revision();
-      var status = com.deepseekharness.app.vscreen.VirtualScreenManager.from(ctx).status();
+      var status = com.deepseekharness.app.vscreen.VirtualScreenManager.from(ctx).targetStatus();
+      boolean existingCore = !operation.equals("create");
+      if (existingCore) {
+        if (callerCore.isEmpty()) return vscreenNotSent("VSCREEN_CORE_IDENTITY_REQUIRED");
+        if (!callerCore.equals(status.optString("coreInstance", "")))
+          return vscreenNotSent("VSCREEN_CORE_IDENTITY_CHANGED");
+        if (!callerGeneration.isEmpty()
+            && !callerGeneration.equals(status.optString("generation", "")))
+          return vscreenNotSent("VSCREEN_GENERATION_CHANGED");
+      }
       int display = status.optInt("displayId", -1);
-      var target = display > 0 ? DshaAccessibilityService.observeTarget(display) : null;
+      var promptTarget = display > 0 ? DshaAccessibilityService.observeTarget(display) : null;
+      if (java.util.Set.of("anchor", "anchored-click").contains(operation) && promptTarget == null)
+        return new org.json.JSONObject()
+            .put("ok", false)
+            .put("state", "NOT_SENT")
+            .put("error", "ACCESSIBILITY_UNAVAILABLE")
+            .put("treeUnavailable", DshaAccessibilityService.windowDiagnostic())
+            .toString();
       String pkg =
           operation.equals("launch")
               ? getParam(query, "package", "")
-              : target != null
-                  ? target.packageName
+              : promptTarget != null
+                  ? promptTarget.packageName
                   : status.optBoolean("packageVerified") ? status.optString("package") : "";
-      if (!uiAuthorized(com.deepseekharness.app.util.UiText.format("操作独立虚拟屏：%s", route), pkg))
-        return "{\"ok\":false,\"error\":\"USER_REJECTED\"}";
+      var capability =
+          existingCore || !callerCore.isEmpty()
+              ? screenRequestEvidence(
+                  scope,
+                  "vscreen." + operation,
+                  vscreenEvidence(
+                      request,
+                      callerCore,
+                      callerGeneration,
+                      display,
+                      promptTarget,
+                      pkg,
+                      scope.consentRevision))
+              : screenRequest(scope, "vscreen." + operation, promptTarget);
+      ScreenAuthorization authorization =
+          screenAuthorization(
+              scope,
+              com.deepseekharness.app.util.UiText.format("操作独立虚拟屏：%s", route),
+              pkg,
+              promptTarget,
+              capability);
+      if (authorization != ScreenAuthorization.ALLOWED)
+        // "用户还没点允许"与"用户拒绝了"必须给不同的码：前者调用方应等一会儿再问，
+        // 后者不该重试（issue #123 的 60 秒挂起）。
+        return "{\"ok\":false,\"error\":\""
+            + (authorization == ScreenAuthorization.DENIED
+                ? "USER_REJECTED"
+                : authorization == ScreenAuthorization.NO_ANSWER
+                    ? "USER_NO_ANSWER"
+                    : "USER_CONFIRM_UNAVAILABLE")
+            + "\"}";
+      // 确认结束后重新取目标，但不能把批准 A 的许可用于 B。
+      var target = display > 0 ? DshaAccessibilityService.observeTarget(display) : null;
+      var confirmedStatus =
+          com.deepseekharness.app.vscreen.VirtualScreenManager.from(ctx).targetStatus();
+      if (existingCore && !callerCore.equals(confirmedStatus.optString("coreInstance", "")))
+        return vscreenNotSent("VSCREEN_CORE_IDENTITY_CHANGED");
+      if (existingCore
+          && !callerGeneration.isEmpty()
+          && !callerGeneration.equals(confirmedStatus.optString("generation", "")))
+        return vscreenNotSent("VSCREEN_GENERATION_CHANGED");
+      int confirmedDisplay = confirmedStatus.optInt("displayId", -1);
+      String confirmedPackage =
+          target != null
+              ? target.packageName
+              : confirmedStatus.optBoolean("packageVerified")
+                  ? confirmedStatus.optString("package")
+                  : "";
+      if (!operation.equals("launch")
+          && display > 0
+          && (display != confirmedDisplay
+              || !pkg.isEmpty()
+                  && !VirtualScreenWindowPolicy.approved(
+                      display, pkg, confirmedDisplay, confirmedPackage)
+              || VirtualScreenRoutes.mutates(operation) && pkg.isEmpty()))
+        return ScreenActionResult.notExecuted();
+      boolean semantic =
+          java.util.Set.of("node", "editor", "edit", "submit", "tree", "anchor", "anchored-click")
+                  .contains(operation)
+              || operation.equals("type") && !getParam(query, "text", "").matches("[\\x20-\\x7e]+");
+      if (semantic && target == null)
+        return new org.json.JSONObject()
+            .put("ok", false)
+            .put("error", "ACCESSIBILITY_UNAVAILABLE")
+            .put("treeUnavailable", DshaAccessibilityService.windowDiagnostic())
+            .toString();
       java.util.function.BooleanSupplier live =
           () ->
-              generation == controller.getWebGeneration()
+              screenBridgeCurrent(scope)
+                  && capability.runtime.equals(
+                      com.deepseekharness.app.core.ScreenRuntimeIdentity.epoch(ctx))
+                  && generation == controller.getWebGeneration()
                   && revision == uiGrant.revision()
+                  && controller.isWebRunning()
+                  && !controller.isStarting()
                   && !controller.isStopping()
                   && !controller.isUserStopped();
       if (!live.getAsBoolean()) return "{\"ok\":false,\"error\":\"SCREEN_RUN_CHANGED\"}";
@@ -1212,31 +1820,108 @@ public final class HttpShellService {
                     && !operation.equals("launch")
                     && !DshaAccessibilityService.matchesTarget(target))
               return "{\"ok\":false,\"error\":\"SCREEN_TARGET_CHANGED\"}";
+            dispatched[0] = true;
             String result =
                 com.deepseekharness.app.vscreen.VirtualScreenManager.from(ctx)
-                    .withBridgeTarget(
-                        operation.equals("launch") ? "" : pkg,
+                    .bridge(
+                        DshaApp.from(ctx).capabilityBroker(),
+                        capability,
+                        request,
                         () ->
                             live.getAsBoolean()
                                 && (target == null
                                     || operation.equals("launch")
-                                    || DshaAccessibilityService.matchesTarget(target)),
-                        () ->
-                            com.deepseekharness.app.vscreen.VirtualScreenManager.from(ctx)
-                                .bridge(request));
-            if (!live.getAsBoolean()
-                || target != null
+                                    || DshaAccessibilityService.matchesTarget(target)));
+            receipt[0] = result;
+            boolean targetChanged =
+                target != null
                     && !operation.equals("launch")
-                    && !DshaAccessibilityService.matchesTarget(target))
-              return "{\"ok\":false,\"error\":\"SCREEN_TARGET_CHANGED\"}";
+                    && !DshaAccessibilityService.matchesTarget(target);
+            boolean runChanged = !live.getAsBoolean();
+            if (targetChanged || runChanged)
+              return VirtualScreenRoutes.mutates(operation)
+                  ? ScreenActionResult.executed(result, targetChanged, runChanged)
+                  : ScreenActionResult.notExecuted();
             return result;
           };
       return target != null && !operation.equals("launch")
           ? DshaAccessibilityService.runAuthorized(target, live, action)
           : action.get();
     } catch (Throwable error) {
-      return "[ERR] " + SensitiveData.redact(String.valueOf(error));
+      if (receipt[0] != null) return receipt[0];
+      try {
+        boolean unknown = dispatched[0] && VirtualScreenRoutes.mutates(operation);
+        org.json.JSONObject value =
+            new org.json.JSONObject()
+                .put("ok", false)
+                .put(
+                    "error",
+                    unknown
+                        ? "INPUT_RESULT_UNKNOWN"
+                        : error instanceof DshaAccessibilityService.TargetChangedException
+                            ? "SCREEN_TARGET_CHANGED"
+                            : com.deepseekharness.app.util.VirtualScreenFailures.code(error));
+        if (unknown) value.put("executionUnknown", true);
+        value.put("cause", com.deepseekharness.app.util.VirtualScreenFailures.cause(error));
+        return value.toString();
+      } catch (Exception ignored) {
+        return "{\"ok\":false,\"error\":\"INPUT_RESULT_UNKNOWN\",\"executionUnknown\":true}";
+      }
     }
+  }
+
+  /** Caller observation identity is retained verbatim; current status may only reject it. */
+  private static com.deepseekharness.app.vscreen.VscreenTargetEvidence vscreenEvidence(
+      com.deepseekharness.app.util.VscreenBridgeRequest request,
+      String core,
+      String generation,
+      int display,
+      com.deepseekharness.app.util.ScreenTarget target,
+      String pkg,
+      long consentRevision) {
+    String operation = com.deepseekharness.app.util.VirtualScreenRoutes.operation(request.route());
+    var observation =
+        operation.equals("anchored-click")
+            ? com.deepseekharness.app.vscreen.VscreenTargetEvidence.Observation.ANCHORED_NODE
+            : operation.equals("anchor")
+                ? com.deepseekharness.app.vscreen.VscreenTargetEvidence.Observation.OBSERVED_ANCHOR
+                : operation.equals("node")
+                    ? com.deepseekharness.app.vscreen.VscreenTargetEvidence.Observation.NODE
+                    : java.util.Set.of("editor", "edit", "submit").contains(operation)
+                        ? com.deepseekharness.app.vscreen.VscreenTargetEvidence.Observation.EDITOR
+                        : java.util.Set.of("touch", "tap", "swipe", "key", "type")
+                                .contains(operation)
+                            ? com.deepseekharness.app.vscreen.VscreenTargetEvidence.Observation
+                                .PIXEL
+                            : com.deepseekharness.app.vscreen.VscreenTargetEvidence.Observation
+                                .DISPLAY;
+    long frame = Long.parseLong(request.parameters.getOrDefault("frameSeq", "-1"));
+    String id =
+        request.parameters.getOrDefault(
+            operation.equals("anchored-click")
+                ? "anchorId"
+                : operation.equals("anchor")
+                    ? "observationId"
+                    : operation.equals("node") ? "nodeId" : "editorId",
+            "");
+    return new com.deepseekharness.app.vscreen.VscreenTargetEvidence(
+        core,
+        generation,
+        display,
+        target == null ? -1 : target.windowId,
+        pkg,
+        observation,
+        frame,
+        id,
+        consentRevision);
+  }
+
+  private static String vscreenNotSent(String code) {
+    return "{\"ok\":false,\"state\":\"NOT_SENT\",\"error\":\""
+        + code
+        + "\",\"code\":\""
+        + code
+        + "\"}";
   }
 
   private int intParam(String q, String k, int def) {
@@ -1269,16 +1954,30 @@ public final class HttpShellService {
    * 而 dsh 与 DSHA 是各自升级的 —— 用户完全可能拿新插件配旧 App。
    */
   private String appVersion() {
-    return com.deepseekharness.app.util.UiText.format(
-        "BRIDGE_PROTOCOL=%s\nBRIDGE_AUTH=header-x-token\nAPP_VERSION=%s\nAPP_CODE=%s\nHINT=端点清单见 /app/help；判版本请用 >= 而不是 ==\n",
-        BRIDGE_PROTOCOL, BuildConfig.VERSION_NAME, BuildConfig.VERSION_CODE);
+    // Fixed protocol keys must not be translated. Read the current locale on every request,
+    // rather than the Web process's language captured before an in-place language change.
+    return String.format(
+        java.util.Locale.ROOT,
+        "BRIDGE_PROTOCOL=%s\nBRIDGE_PORT=%s\nAPPLICATION_ID=%s\nBRIDGE_AUTH=header-x-token\nAPP_VERSION=%s\nAPP_CODE=%s\nUI_LANGUAGE=%s\nHINT=See /app/help; compare protocol with >=\n",
+        BRIDGE_PROTOCOL,
+        bridgePort,
+        ctx.getPackageName(),
+        BuildConfig.VERSION_NAME,
+        BuildConfig.VERSION_CODE,
+        com.deepseekharness.app.util.UiText.language());
   }
 
   /** /app/help lists bridge endpoint parameters for authenticated clients. */
   private String appHelp() {
+    String taskHelp =
+        com.deepseekharness.app.util.UiText.choose(
+            "\n== 当前对话手机任务 ==\n用户明确要求手机操作时，先 /app/ui/task-begin；包括只启动应用的任务。每次请求携带真实工具环境的 taskSessionId=$DSH_PHONE_SESSION_ID 与 turnId=$DSH_PHONE_TURN_ID；不猜测或复制其它会话身份。begin 只显示当前对话状态和建立任务围栏，不授予系统权限、不自动批准动作。需要读屏再 dump/tree/screenshot；任务窗口会先隐藏，窗口可见状态变化后必须重新观察。成功 begin 后，任务完成或放弃时在 finally 收尾中调用一次 /app/ui/task-end，完成围栏并关闭该任务窗口，不取消模型对话；本轮结束后不再重新 begin。完成收尾不证明 UNKNOWN 动作已成功或已退出，不自动重放。普通讨论、引用或翻译不开始手机任务。\n",
+            "\n== Phone task in the current conversation ==\nWhen the user explicitly requests phone actions, call /app/ui/task-begin first, including app-launch-only tasks. Every request carries the real tool environment taskSessionId=$DSH_PHONE_SESSION_ID and turnId=$DSH_PHONE_TURN_ID; never invent or copy another conversation identity. Begin displays this conversation state and establishes the task boundary; it grants no system permission or automatic approval. Read dump/tree/screenshot when observation is needed; the task window is hidden first, and any visibility change requires a fresh observation. After successful begin, call /app/ui/task-end once in final cleanup when the task is completed or abandoned. End finishes this task and closes its window without cancelling the model conversation; do not begin again in the same finished turn. Cleanup does not prove an UNKNOWN action succeeded or exited; never replay automatically. Discussion, quotations and translations do not start phone tasks.\n");
     return com.deepseekharness.app.util.UiText.format(
-        "DSHA 3090 桥端点清单（BRIDGE_PROTOCOL=%s）\n凭据由宿主写入 /root/.dsh/.bridge_headers；使用 curl -H @/root/.dsh/.bridge_headers，不把 token 写进 URL 或命令参数。\n带中文/空格的参数一律用 -G --data-urlencode，别手写 URL 编码。\n\n== 屏幕操作（无障碍服务，不需要 ADB/Shizuku）==\n读屏  curl -s -H @/root/.dsh/.bridge_headers \"127.0.0.1:3090/app/ui/dump\"\n      → 每行「[序号] \"文字\" 可点击 中心=(x,y) 区域=l,t,r,b」\n点按  curl -s -G 127.0.0.1:3090/app/ui/tap --data-urlencode \"text=设置\" -H @/root/.dsh/.bridge_headers\n      → 优先按文字点：控件位置随滚动/动画变，文字不变。没有文字才用 ?x=&y=\n输入  curl -s -G 127.0.0.1:3090/app/ui/input --data-urlencode \"text=内容\" -H @/root/.dsh/.bridge_headers\n      → 填到当前焦点框；没有焦点先 tap 一下输入框\n按键  /app/ui/key?name=back  （back/home/recents/notifications/quicksettings/lock）\n滑动  /app/ui/swipe?x1=500&y1=1500&x2=500&y2=500&ms=300\n截屏  /app/ui/screenshot   → 存 PNG 到应用截图目录并返回路径（不回 base64）\n节奏：每次点按/输入后先 dump 再决定下一步，别凭记忆连点。\n\n== 独立虚拟屏（Android 11+；每次输入必须带最新 frameSeq）==\n/app/vscreen/create?orientation=portrait|landscape  创建虚拟屏\n/app/vscreen/status  查询 displayId、尺寸和 frameSeq\n/app/vscreen/launch?package=com.example.app  启动已安装应用\n/app/vscreen/see  获取最新预览；tap/swipe/type/key 必须携带该 frameSeq\n/app/vscreen/close  关闭并回收虚拟屏\n\n== 设备与应用 ==\n/app/device                     机型/系统/电量/网络/屏幕/存储/内存\n/app/apps                       全部已装应用，分用户应用与系统应用；可加 q/limit/user=1 筛选显示\n/app/launch?pkg=com.tencent.mm  启动应用\n/app/clip                       读剪贴板（需 App 在前台，系统限制）\n/app/clip + text=…              写剪贴板\n/app/readfile?path=/…          读取绝对路径的目录或文本，仍受 Android 权限限制；凭据区（.dsh/.ssh/.android）不可读\n设备文件写入请走下方受保护的设备 shell；普通 Download 文件可操作，DCIM/Pictures/Android/data/obb 只读。\n\n== 与用户交互 ==\n/app/ask?options=继续|取消 + q=…  弹窗阻塞等回答（最多三个选项）\n/app/notify?title=… + text=…      通知栏\n/app/toast + text=…               App 内提示\n/app/vibrate?ms=300               震动（长任务跑完叫醒用户）\n/app/share（text= 或 path=）      分享到其它应用\n/app/open?url=https://…           打开链接\n/app/export?path=/root/report.md  把产物交给用户 → 落 Download/DSHA；凭据区不可导出\n建议：需要用户拍板用 /app/ask 而不是干等；长任务结束用 notify 或 vibrate 叫人；\n产出报告用 /app/export，别只留在容器里。\n\n== 传感器与位置（默认关闭，需用户在配置页勾选）==\n/app/location（加 fresh=1 强制重新定位，可能等数秒）\n/app/sensors 列表 · /app/sensor?name=light 读值\n（light 环境光 lux / accel / gyro / magnet / pressure / proximity /\n gravity / rotation 姿态四元数 / steps 开机后步数）\n/app/torch?on=1 手电\n这三类返回 DISABLED（用户没开该能力）或 NO_PERMISSION（没授系统权限）时，\n照原话告诉用户去哪开，不要重试 —— 重试不会让开关自己变。\n\n== 元信息 ==\n/app/version                          桥协议版本 + App 版本（特性检测用）\n/app/help                             本清单\n\n== 插件状态 ==\n/app/plugins                          读回上次上报的加载状态\n/app/plugins?loaded=a,b&failed=c      上报（插件侧用）\n\n== 设备 shell（自动选择 root / Shizuku / ADB）==\n/root/dsh-bin/adb-shell \"命令\"        用 id 核验实际身份\n包装命令不存在时：python3 /root/.dsh/adb-shell.py \"命令\"\n短信只允许当前 Android 用户的 content query --uri content://sms，默认关闭；设置 → 设备能力授权可开启或撤销。\n短信预授权可能返回正文及验证码；不允许发送、修改或删除，Android 仍可拒绝访问。Shizuku 不执行此敏感查询。\n仅执行已识别的单条命令；允许读取各目录和明确路径的普通文件操作。禁止脚本、管道、重定向、未知命令。\n根目录及系统目录只读；禁止块设备/分区、SELinux、系统设置写入、挂载和刷机操作。\n结束进程前自动刷新全量用户/系统应用清单；普通用户应用直接结束，系统应用与关键进程拦截。\n按完整包名调用 am force-stop / killall / pkill -x；kill 正数 PID 会核对 UID 后按包名停止。\n策略拦截返回 [POLICY_BLOCKED]/126；root 和旧确认开关不能放行。不可用其它解释器或 UI 绕过。\n报连不上/未配对：先看上面的 App 层接口能不能办成；确实必须 shell 才请用户到\n设置 → 设备能力授权中连接可用通道，别反复试同一条命令。\n不要用 /root/dsh-bin/adb 或裸 adb —— 那是守卫包装脚本，会失败。\n\n== root（--su）==\n已启用并经 root 管理器授权的 su 可直接执行，无需 ADB 配对；其次使用 Shizuku，再使用 ADB。\n--su 仅在明确需要 root 时使用，须先在设备能力授权页允许；同一设备保护策略始终生效。\n[EXECUTION_UNKNOWN] 表示命令可能已执行，先核对实际状态，不能切换通道或自动重放。\n",
-        BRIDGE_PROTOCOL);
+                "DSHA 3090 桥端点清单（BRIDGE_PROTOCOL=%s）\n凭据由宿主写入 /root/.dsh/.bridge_headers；使用 curl -H @/root/.dsh/.bridge_headers，不把 token 写进 URL 或命令参数。\n带中文/空格的参数一律用 -G --data-urlencode，别手写 URL 编码。\n\n== 屏幕操作（无障碍服务，不需要 ADB/Shizuku）==\n坐标触控仅限物理display 0：先 /app/ui/screenshot，返回 coordinatesAvailable:true 且含 observationId 才可用；dump/tree不签发像素凭据。ID限最新截图、30秒、一次手势；画面/窗口/遮挡/代次变化即拒绝。\n文字/节点动作返回 SCREEN_ACTION_SUBMITTED、actionAccepted:true、effectVerified:false 只代表Android接受动作，不证明WebView DOM已变；须重新观察，后续坐标操作须显式取新截图，禁止隐式回退或重放UNKNOWN。\n读屏  curl -s -H @/root/.dsh/.bridge_headers \"127.0.0.1:3090/app/ui/dump\"\n      → 每行语义节点附bounds；boundsHaveArea:false没有可触摸面积，不能取中心点触控\n点按  curl -s -G 127.0.0.1:3090/app/ui/tap --data-urlencode \"text=设置\" -H @/root/.dsh/.bridge_headers\n      → 优先按文字点：控件位置随滚动/动画变，文字不变。坐标触控须先截图取得 observationId（dump不签发），再用 ?observationId=截图返回的ID&x=&y=\n语义滚动 先 /app/ui/tree 或 dump 取 treeId、nodeId 和 supportedActions；/app/ui/node?treeId=返回的树ID&nodeId=返回的节点ID&action=scroll_forward（或 scroll_backward）。只调用节点列出的动作，一次请求后取新树；无障碍接受不代表实际已滚动，不自动改用滑动或重放未知结果。\n输入  curl -s -G 127.0.0.1:3090/app/ui/input --data-urlencode \"text=内容\" -H @/root/.dsh/.bridge_headers\n      → 填到当前焦点框；没有焦点先 tap 一下输入框\n按键  /app/ui/key?name=back  （back/home/recents/notifications/quicksettings/lock）\n长按  /app/ui/tap?observationId=截图返回的ID&x=540&y=1200&gesture=long_press&ms=600\n双击  /app/ui/tap?observationId=截图返回的ID&x=540&y=1200&gesture=double_tap（同一Gesture/一次许可）\n当前只支持单指触控；多指/缩放不支持。\n滑动  /app/ui/swipe?observationId=截图返回的ID&x1=500&y1=1500&x2=500&y2=500&ms=300\n截屏  /app/ui/screenshot   → 存 PNG 到应用截图目录并返回路径（不回 base64）\n节奏：每次点按/输入后先 dump 再决定下一步，别凭记忆连点。\n\n== 独立虚拟屏（Android 11+） ==\n/app/vscreen/create?orientation=portrait  创建虚拟屏；也可选 landscape\n/app/vscreen/status  查询 coreInstance、generation、displayId 和状态\n$CORE 取自 create/status 返回的 coreInstance；$GEN 取自当前 see 或 tree 的 generation，$FRAME 取自该 see 的 frameSeq，$NODE 取自该 tree 的 nodeId。不要混用不同 Core 或不同观察的身份。\n/app/vscreen/launch?coreInstance=$CORE&package=com.example.app  启动已安装应用；此端点不接受 generation\n/app/vscreen/see?coreInstance=$CORE  获取新画面及 generation、frameSeq\n/app/vscreen/tap?coreInstance=$CORE&generation=$GEN&frameSeq=$FRAME&x=10&y=20\ntap/swipe/touch/type/key 需要 coreInstance、generation 和最新 see 的 frameSeq；坐标按显示尺寸换算。\n/app/vscreen/tree?coreInstance=$CORE  获取当前树及 nodeId、generation\n/app/vscreen/node?coreInstance=$CORE&generation=$GEN&nodeId=$NODE&action=click  语义节点动作；不要求 frameSeq，使用新树中的节点\n/app/vscreen/editor?coreInstance=$CORE&generation=$GEN  读取当前输入框；edit/submit 还需 editorId，edit 需 text；均不要求 frameSeq\nanchor 使用原 see 的 coreInstance、generation、frameSeq、observationId 和全尺寸整数 x/y；anchored-click 使用同一组身份及 anchorId。\n/app/vscreen/close?coreInstance=$CORE  关闭对应 Core；无运行中或待清理的 Core 时可省略身份\n应用启动或动作后重新观察；UNKNOWN 不自动重放。\n\n== 设备与应用 ==\n/app/device                     机型/系统/电量/网络/屏幕/存储/内存\n/app/apps                       全部已装应用，分用户应用与系统应用；可加 q/limit/user=1 筛选显示\n/app/launch?pkg=com.tencent.mm  启动应用\n/app/intent + cmd=start -n 包名/.类 [-a -d -c --es 键 值]  以 DSHA 身份启动界面（也可 broadcast -p 包名 -a ACTION）；按屏幕确认策略询问，guest 命令 dsha-am\n/app/clip                       读剪贴板（需 App 在前台，系统限制）\n/app/clip + text=…              写剪贴板\n/app/readfile?path=/…          读取容器路径或当前用户共享存储的目录或文本（最多 256 KiB）；受 Android 权限限制，凭据区及跨域符号链接不可读；format=image 返回 8 MiB 内静态 PNG/JPEG/WebP 数据，动图及 GIF 不支持；/proc/self/status 单独提供当前桥进程诊断\n设备文件写入请走下方受保护的设备 shell；普通 Download 文件可操作，DCIM/Pictures/Android/data/obb 只读。\n\n== 与用户交互 ==\n/app/ask?options=继续|取消 + q=…  弹窗阻塞等回答（最多三个选项）\n/app/notify?title=… + text=…      通知栏\n/app/toast + text=…               App 内提示\n/app/vibrate?ms=300               震动（长任务跑完叫醒用户）\n/app/share（text= 或 path=）      分享到其它应用\n/app/open?url=https://…           打开链接\n/app/export?path=/root/report.md  把产物交给用户 → 落 Download/DSHA；凭据区不可导出\n建议：需要用户拍板用 /app/ask 而不是干等；长任务结束用 notify 或 vibrate 叫人；\n产出报告用 /app/export，别只留在容器里。\n\n== 传感器与位置（默认关闭，需用户在配置页勾选）==\n/app/location（加 fresh=1 强制重新定位，可能等数秒）\n/app/sensors 列表 · /app/sensor?name=light 读值\n（light 环境光 lux / accel / gyro / magnet / pressure / proximity /\n gravity / rotation 姿态四元数 / steps 开机后步数）\n/app/torch?on=1 手电\n这三类返回 DISABLED（用户没开该能力）或 NO_PERMISSION（没授系统权限）时，\n照原话告诉用户去哪开，不要重试 —— 重试不会让开关自己变。\n\n== 元信息 ==\n/app/version                          桥协议版本 + App 版本（特性检测用）\n/app/help                             本清单\n\n== 插件状态 ==\n/app/plugins                          读回上次上报的加载状态\n/app/plugins?loaded=a,b&failed=c      上报（插件侧用）\n\n== 设备 shell（自动选择 root / Shizuku / ADB）==\n/root/dsh-bin/adb-shell \"命令\"        用 id 核验实际身份\n包装命令不存在时：python3 /root/.dsh/adb-shell.py \"命令\"\n不受限制的设备 shell（默认关闭，设置 → 设备能力授权开启）：/device/execute?unrestricted=1 + cmd=…，或 guest 命令 dsha-su；仅 root/Shizuku，分区/SELinux/挂载/刷机仍拒绝\nTermux:API 风格命令：termux-clipboard-get/set、termux-notification、termux-toast、termux-vibrate、termux-torch、termux-open-url、termux-share、termux-location、termux-sensor、termux-battery-status、termux-dialog\n短信只允许当前 Android 用户的 content query --uri content://sms，默认关闭；设置 → 设备能力授权可开启或撤销。\n短信预授权可能返回正文及验证码；不允许发送、修改或删除，Android 仍可拒绝访问。Shizuku 不执行此敏感查询。\n仅执行已识别的单条命令；允许读取各目录和明确路径的普通文件操作。禁止脚本、管道、重定向、未知命令。\n根目录及系统目录只读；禁止块设备/分区、SELinux、系统设置写入、挂载和刷机操作。\n结束进程前自动刷新全量用户/系统应用清单；普通用户应用直接结束，系统应用与关键进程拦截。\n按完整包名调用 am force-stop / killall / pkill -x；kill 正数 PID 会核对 UID 后按包名停止。\n策略拦截返回 [POLICY_BLOCKED]/126；root 和旧确认开关不能放行。不可用其它解释器或 UI 绕过。\n报连不上/未配对：先看上面的 App 层接口能不能办成；确实必须 shell 才请用户到\n设置 → 设备能力授权中连接可用通道，别反复试同一条命令。\n不要用 /root/dsh-bin/adb 或裸 adb —— 那是守卫包装脚本，会失败。\n\n== root（--su）==\n已启用并经 root 管理器授权的 su 可直接执行，无需 ADB 配对；其次使用 Shizuku，再使用 ADB。\n--su 仅在明确需要 root 时使用，须先在设备能力授权页允许；同一设备保护策略始终生效。\n[EXECUTION_UNKNOWN] 表示命令可能已执行，先核对实际状态，不能切换通道或自动重放。\n",
+                BRIDGE_PROTOCOL)
+            .replace("3090", Integer.toString(bridgePort))
+        + taskHelp;
   }
 
   /** /app/plugins records actual startup loading observations; registration alone is not readiness. */
@@ -1370,12 +2069,39 @@ public final class HttpShellService {
     try {
       String p = getParam(queryOf(path), "path", "");
       if (p.isEmpty()) return "NO_PATH";
+      String format = getParam(queryOf(path), "format", "text");
+      if (!format.equals("text") && !format.equals("image")) return "BAD_FORMAT";
+      // A fixed diagnostic file, not a general host /proc access rule.
+      if (format.equals("text") && com.deepseekharness.app.util.BridgeProcessStatus.isExactPath(p))
+        return com.deepseekharness.app.util.BridgeProcessStatus.read();
+      if (com.deepseekharness.app.util.BridgeProcessStatus.isExactPath(p)) return "NOT_IMAGE";
       java.io.File f = new java.io.File(p);
       if (!f.isAbsolute()) return com.deepseekharness.app.util.UiText.text("FORBIDDEN: 读取需要绝对路径");
       // 凭据/运行时内部状态不开放给桥读取：读到的内容会回到会话里，
       // 再经 /app/export 就能落到公共目录（真机实测过这条链路）。
-      if (com.deepseekharness.app.util.BridgePathPolicy.denied(p))
+      if (com.deepseekharness.app.util.BridgePathPolicy.deniedReadRaw(p))
         return "FORBIDDEN: " + com.deepseekharness.app.util.BridgePathPolicy.reason();
+      boolean sharedDomain = com.deepseekharness.app.util.BridgePathPolicy.readSharedDomain(p);
+      java.io.File rootfs = null;
+      String rootfsCanonical = null;
+      String sharedCanonical = null;
+      String mediaCanonical = null;
+      try {
+        rootfs = HarnessController.get(ctx).getProot().getRootfsDir().getCanonicalFile();
+        rootfsCanonical = rootfs.getPath();
+      } catch (Throwable ignored) {
+        // Without a rootfs identity, private host paths remain forbidden.
+      }
+      try {
+        java.io.File shared = android.os.Environment.getExternalStorageDirectory();
+        sharedCanonical = shared.getCanonicalPath();
+        String user = shared.getName();
+        if (user.matches("[0-9]+")) mediaCanonical = "/data/media/" + user;
+      } catch (Throwable ignored) {
+        // Fail closed if the current user's storage root cannot be established.
+      }
+      f = com.deepseekharness.app.util.BridgePathPolicy.resolveReadFile(p, rootfs);
+      if (f == null) return "FORBIDDEN: " + com.deepseekharness.app.util.BridgePathPolicy.reason();
       String canon;
       try {
         canon = f.getCanonicalPath();
@@ -1383,7 +2109,8 @@ public final class HttpShellService {
         return com.deepseekharness.app.util.UiText.format("FORBIDDEN: 路径无法解析（%s）", p);
       }
       // 复核 canonical：软链接不能成为读凭据的跳板。
-      if (exportDeniedByCanonical(f))
+      if (com.deepseekharness.app.util.BridgePathPolicy.deniedReadCanonical(
+          canon, rootfsCanonical, sharedCanonical, mediaCanonical, sharedDomain))
         return "FORBIDDEN: " + com.deepseekharness.app.util.BridgePathPolicy.reason();
       // canon 之后用于目录遍历的越界复核，避免同一路径被解析两遍产生竞态。
       if (canon == null || canon.isEmpty())
@@ -1393,6 +2120,7 @@ public final class HttpShellService {
       java.io.File resolved = new java.io.File(canon);
       var identity = fs.stat(resolved);
       if (identity.type.equals("DIRECTORY")) {
+        if (format.equals("image")) return "NOT_IMAGE";
         java.util.List<String> children = fs.list(resolved);
         StringBuilder listing = new StringBuilder();
         for (String entry : children) {
@@ -1403,7 +2131,12 @@ public final class HttpShellService {
           }
           // 列出上层目录时也不能暴露凭据区条目（名字本身就是情报）。
           if (com.deepseekharness.app.util.BridgePathPolicy.denied(child.getPath())
-              || exportDeniedByCanonical(child)) continue;
+              || com.deepseekharness.app.util.BridgePathPolicy.deniedReadCanonical(
+                  child.getCanonicalPath(),
+                  rootfsCanonical,
+                  sharedCanonical,
+                  mediaCanonical,
+                  sharedDomain)) continue;
           listing
               .append(fs.stat(child).type.equals("DIRECTORY") ? "d\t" : "f\t")
               .append(child.getName())
@@ -1415,6 +2148,27 @@ public final class HttpShellService {
       if (!identity.type.equals("FILE"))
         return com.deepseekharness.app.util.UiText.format(
             "NOT_FOUND_OR_NO_PERMISSION: 路径不存在或 Android 未授予读取权限：%s", p);
+      if (format.equals("image")) {
+        if (identity.size > com.deepseekharness.app.util.BridgeImage.MAX_BYTES)
+          return "IMAGE_TOO_LARGE";
+        byte[] image;
+        try (java.io.InputStream in = fs.read(resolved, identity)) {
+          try {
+            image = com.deepseekharness.app.util.BridgeImage.read(in);
+          } catch (java.io.IOException tooLarge) {
+            if ("IMAGE_TOO_LARGE".equals(tooLarge.getMessage())) return "IMAGE_TOO_LARGE";
+            throw tooLarge;
+          }
+        }
+        String media = com.deepseekharness.app.util.BridgeImage.mediaType(image);
+        if (media == null) return "NOT_IMAGE";
+        if (!com.deepseekharness.app.util.BridgeImage.isStatic(image, media))
+          return "ANIMATED_OR_INVALID_IMAGE";
+        if (!com.deepseekharness.app.util.BridgeImageDecoder.valid(image, media))
+          return "INVALID_IMAGE";
+        return com.deepseekharness.app.util.BridgeImage.envelope(
+            media, android.util.Base64.encodeToString(image, android.util.Base64.NO_WRAP));
+      }
       if (identity.size > 256 * 1024) return "TOO_LARGE: " + identity.size;
       java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
       try (java.io.InputStream in = fs.read(resolved, identity)) {
@@ -1569,18 +2323,83 @@ public final class HttpShellService {
   }
 
   /** 应用动作的授权仍由本轮桥持有，平台操作交给具体协作者。 */
-  private String appLaunch(String path) {
+  private String appLaunch(String path, RequestScope scope) {
     var controller = HarnessController.get(ctx);
     long generation = controller.getWebGeneration(), revision = uiGrant.revision();
+    String packageName = getParam(queryOf(path), "pkg", "");
+    if (packageName.isEmpty()) return "NO_PKG";
+    var capability =
+        screenRequestEvidence(
+            scope,
+            "launch",
+            new com.deepseekharness.app.bridge.AppLaunchTargetEvidence(packageName));
     return com.deepseekharness.app.bridge.AppDeviceActions.launch(
         ctx,
         getParam(queryOf(path), "pkg", ""),
-        this::uiAuthorized,
+        (action, pkg) ->
+            switch (screenAuthorization(scope, action, pkg, null, capability)) {
+              case ALLOWED -> null;
+              case DENIED -> "USER_REJECTED";
+              case NO_ANSWER -> "USER_NO_ANSWER";
+              case UNAVAILABLE -> "USER_CONFIRM_UNAVAILABLE";
+            },
         () ->
-            generation == controller.getWebGeneration()
+            screenBridgeCurrent(scope)
+                && generation == controller.getWebGeneration()
                 && revision == uiGrant.revision()
+                && controller.isWebRunning()
+                && !controller.isStarting()
                 && !controller.isStopping()
-                && !controller.isUserStopped());
+                && !controller.isUserStopped(),
+        DshaApp.from(ctx).capabilityBroker(),
+        capability);
+  }
+
+  /**
+   * /app/intent?cmd=start -n 包名/.类 [其他选项]：以 DSHA 自身身份发起 Intent。
+   *
+   * <p>系统 {@code am} 用 {@code com.android.shell} 身份发起，普通 App 执行必然被拒；
+   * 这里改由 App 进程自己 startActivity/sendBroadcast，与 Termux 自带 am 同理，
+   * 不需要 root 或 ADB。授权沿用 /app/launch 的屏幕确认流程：目标包名进确认文案，
+   * 敏感应用同样逐次确认，不因为换了入口就跳过。
+   */
+  private String appIntent(String command, RequestScope scope) {
+    com.deepseekharness.app.util.IntentRequest request;
+    try {
+      request =
+          com.deepseekharness.app.util.IntentRequest.parse(
+              com.deepseekharness.app.util.DeviceShellPolicy.split(command));
+    } catch (com.deepseekharness.app.util.IntentRequest.Invalid invalid) {
+      return "[ERR] " + invalid.code;
+    } catch (IllegalArgumentException malformed) {
+      return "[ERR] INTENT_ARGUMENTS_UNPARSABLE";
+    }
+    String target = request.targetPackage();
+    var controller = HarnessController.get(ctx);
+    long generation = controller.getWebGeneration(), revision = uiGrant.revision();
+    var capability =
+        screenRequestEvidence(
+            scope,
+            request.summary(),
+            new com.deepseekharness.app.bridge.AppIntentTargetEvidence(request));
+    String failure =
+        switch (screenAuthorization(scope, request.summary(), target, null, capability)) {
+          case ALLOWED -> null;
+          case DENIED -> "USER_REJECTED";
+          case NO_ANSWER -> "USER_NO_ANSWER";
+          case UNAVAILABLE -> "USER_CONFIRM_UNAVAILABLE";
+        };
+    if (failure != null) return "[ERR] " + failure;
+    if (!(screenBridgeCurrent(scope)
+        && generation == controller.getWebGeneration()
+        && revision == uiGrant.revision()
+        && controller.isWebRunning()
+        && !controller.isStarting()
+        && !controller.isStopping()
+        && !controller.isUserStopped())) return "[ERR] SCREEN_RUN_CHANGED";
+    var broker = DshaApp.from(ctx).capabilityBroker();
+    if (broker.claimDispatch(capability) == null) return "[ERR] CAPABILITY_NOT_AUTHORIZED";
+    return com.deepseekharness.app.bridge.AppIntentDispatch.send(ctx, request);
   }
 
   private String appClip(String path) {
@@ -1950,6 +2769,165 @@ public final class HttpShellService {
     }
   }
 
+  /** 确认结果三态：允许 / 用户明确拒绝 / 没等到回答（超时、窗口关闭、代次失效、桥停止）。 */
+  private enum ConfirmationOutcome {
+    ALLOWED,
+    DENIED,
+    NO_ANSWER,
+    UNAVAILABLE
+  }
+
+  /** 只请求用户确认（不执行命令）。
+   *  通知与弹窗同时发：只走弹窗的话，Activity 一被 pause 用户就再也看不见，
+   *  只能干等 60s 超时——这正是「弹窗有时不出现」的由来。（吸收上游 PR#24）
+   *  返回三态结果：桥要用它区分「用户还没点允许」与「用户拒绝了」（issue #123）。 */
+  private ConfirmationOutcome confirmOutcome(
+      RequestScope scope,
+      com.deepseekharness.app.capabilities.CapabilityRequest capability,
+      String cmd,
+      boolean screen,
+      com.deepseekharness.app.util.ScreenTarget target) {
+    final PendingConfirmation pending;
+    final com.deepseekharness.app.control.ScreenControlConfirmation taskHandler;
+    synchronized (LIFECYCLE) {
+      BridgeRun run = activeRun;
+      if (!running
+          || run == null
+          || !LIFECYCLE.isCurrent(run.generation)
+          || scope.run != run
+          || !screenBridgeCurrent(scope)) return ConfirmationOutcome.UNAVAILABLE;
+      com.deepseekharness.app.control.ControlTaskAuthority.Lease taskLease = null;
+      var coordinator = com.deepseekharness.app.control.PhoneControlCoordinator.get(ctx);
+      String taskIdentity =
+          com.deepseekharness.app.control.ScreenAuthorityBindings.identity(capability);
+      if (screen && !taskIdentity.isEmpty()) {
+        var state = coordinator.snapshot();
+        var binding = state.binding();
+        // A bound request cannot fall back to another confirmation channel after losing its task.
+        // Unbound commands never borrow whichever conversation happens to be active.
+        if (binding == null
+            || binding.owner()
+                != com.deepseekharness.app.control.ControlTaskAuthority.Owner.LOCAL_DSH
+            || state.paused()
+            || !binding.connection().equals(run.runId + ":" + capability.runtime.instanceId)
+            || !taskIdentity.equals(binding.identity() + "\0" + state.revision())
+            || !com.deepseekharness.app.control.ScreenAuthorityBindings.current(capability)
+            || !capability.runtime.equals(
+                com.deepseekharness.app.core.ScreenRuntimeIdentity.epoch(ctx))
+            || !capability.bridgeRunId.equals(run.runId)) return ConfirmationOutcome.UNAVAILABLE;
+        taskLease =
+            new com.deepseekharness.app.control.ControlTaskAuthority.Lease(
+                binding, state.revision());
+        taskHandler = coordinator.confirmationHandler();
+        if (taskHandler == null) return ConfirmationOutcome.UNAVAILABLE;
+      } else taskHandler = null;
+      var request =
+          confirmations.begin(DshaApp.from(ctx).capabilityBroker(), capability, run.generation);
+      if (request == null) return ConfirmationOutcome.UNAVAILABLE;
+      pending = new PendingConfirmation(request, screen, target, scope, taskLease);
+      pendingConfirm = pending;
+    }
+    try {
+      if (taskHandler != null) {
+        var prompt =
+            taskHandler.confirm(
+                capability,
+                target,
+                () -> {
+                  synchronized (LIFECYCLE) {
+                    return currentConfirmation(pending);
+                  }
+                },
+                decision -> {
+                  synchronized (LIFECYCLE) {
+                    if (!currentConfirmation(pending) || decision.allowed() == null) {
+                      // Expiry can make the broker non-current before its blocking waiter wakes.
+                      // Retire only this request, including its exact prompt, without a late grant.
+                      if (pendingConfirm == pending) finishConfirmation(pending);
+                      return;
+                    }
+                    pending.promptWindow = decision.windowId();
+                  }
+                  resolveConfirm(Boolean.TRUE.equals(decision.allowed()), pending.request.identity);
+                });
+        synchronized (LIFECYCLE) {
+          if (currentConfirmation(pending)) pending.taskPrompt = prompt;
+          else prompt.close();
+        }
+      } else {
+        synchronized (LIFECYCLE) {
+          if (!currentConfirmation(pending)) return ConfirmationOutcome.UNAVAILABLE;
+          showConfirmNotification(cmd, pending);
+          OverlayController.askConfirm(
+              ctx,
+              pending,
+              safeDisplay(cmd),
+              () -> resolveConfirm(true, pending.request.identity),
+              () -> resolveConfirm(false, pending.request.identity));
+        }
+        final androidx.fragment.app.FragmentActivity act = ForegroundActivity.current();
+        if (act != null) {
+          final String prompt =
+              com.deepseekharness.app.util.UiText.format(
+                  "模型试图在设备上执行：\n%s\n\n是否允许？", safeDisplay(cmd));
+          act.runOnUiThread(
+              () -> {
+                synchronized (LIFECYCLE) {
+                  try {
+                    if (!ForegroundActivity.isResumed(act) || !currentConfirmation(pending)) return;
+                    pending.dialog =
+                        new com.deepseekharness.app.ui.DshaDialogBuilder(act)
+                            .setTitle(com.deepseekharness.app.util.UiText.text("DSHA 安全确认"))
+                            .setMessage(prompt)
+                            .setCancelable(false)
+                            .setPositiveButton(
+                                com.deepseekharness.app.util.UiText.text("允许"),
+                                (d, w) -> resolveConfirm(true, pending.request.identity))
+                            .setNegativeButton(
+                                com.deepseekharness.app.util.UiText.text("拒绝"),
+                                (d, w) -> resolveConfirm(false, pending.request.identity))
+                            .show();
+                    pending.promptWindow = confirmationWindowId(pending.dialog);
+                  } catch (Throwable t) {
+                    android.util.Log.w(
+                        "DSHA",
+                        com.deepseekharness.app.util.UiText.format(
+                            "确认弹窗弹出失败，仍可从通知确认：%s", safeError(t)));
+                  }
+                }
+              });
+        } else if (!notificationsEnabled()) {
+          android.util.Log.w(
+              "DSHA",
+              com.deepseekharness.app.util.UiText.format(
+                  "无前台界面且通知权限被拒，确认必然超时拒绝：%s", safeDisplay(cmd)));
+        }
+      }
+      boolean allowed = pending.request.await(CONFIRM_TIMEOUT_S, TimeUnit.SECONDS);
+      synchronized (LIFECYCLE) {
+        BridgeRun run = activeRun;
+        if (!(running
+            && run != null
+            && run.generation == pending.request.generation
+            && LIFECYCLE.isCurrent(run.generation))) return ConfirmationOutcome.UNAVAILABLE;
+        if (pending.targetChanged) throw new DshaAccessibilityService.TargetChangedException();
+        if (allowed) return ConfirmationOutcome.ALLOWED;
+        // await 返回 false 只说明"期限内没等到"；用户的选择必须单独读 —— 否则迟到的「允许」
+        // 会被报成「拒绝」，正是 issue #123 要消灭的那种误判。
+        Boolean answer = pending.request.answer();
+        if (answer == null) return ConfirmationOutcome.NO_ANSWER;
+        return answer ? ConfirmationOutcome.ALLOWED : ConfirmationOutcome.DENIED;
+      }
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      return ConfirmationOutcome.UNAVAILABLE;
+    } finally {
+      synchronized (LIFECYCLE) {
+        finishConfirmation(pending);
+      }
+    }
+  }
+
   private boolean currentConfirmation(PendingConfirmation pending) {
     BridgeRun run = activeRun;
     return running
@@ -1957,6 +2935,14 @@ public final class HttpShellService {
         && pendingConfirm == pending
         && run.generation == pending.request.generation
         && LIFECYCLE.isCurrent(run.generation)
+        && (pending.taskLease == null
+            || screenBridgeCurrent(pending.scope)
+                && com.deepseekharness.app.control.PhoneControlCoordinator.get(ctx)
+                    .current(pending.taskLease)
+                && com.deepseekharness.app.control.ScreenAuthorityBindings.current(
+                    pending.request.context)
+                && com.deepseekharness.app.assistant.AssistantService.stopChannelCurrent(
+                    ctx, pending.taskLease.binding()))
         && confirmations.pending(pending.request);
   }
 
@@ -1976,9 +2962,97 @@ public final class HttpShellService {
   public void resolveConfirm(boolean allow, String identity) {
     synchronized (LIFECYCLE) {
       PendingConfirmation pending = pendingConfirm;
-      if (pending == null || !currentConfirmation(pending)) return;
-      if (!confirmations.resolve(pending.request.generation, identity, allow)) return;
+      if (pending == null
+          || !currentConfirmation(pending)
+          || pending.resolving
+          || !pending.request.identity.equals(identity)) return;
+      if (!allow) {
+        if (confirmations.resolve(pending.request.generation, identity, false))
+          clearConfirmationUi(pending);
+        return;
+      }
+      // Reserve the first decision without waking the HTTP worker under its own confirmation
+      // window.
+      pending.resolving = true;
+      if (Looper.myLooper() == Looper.getMainLooper()) {
+        int window = confirmationWindowId(pending.dialog);
+        if (window >= 0) pending.promptWindow = window;
+      }
+      long deadline = android.os.SystemClock.elapsedRealtime() + 1500;
+      mainHandler.post(() -> closeAllowedConfirmation(pending, identity, deadline));
+    }
+  }
+
+  private void closeAllowedConfirmation(
+      PendingConfirmation pending, String identity, long deadline) {
+    synchronized (LIFECYCLE) {
+      if (!currentConfirmation(pending)) return;
+      final androidx.appcompat.app.AlertDialog dialog = pending.dialog;
+      int window = confirmationWindowId(dialog);
+      if (window >= 0) pending.promptWindow = window;
       clearConfirmationUi(pending);
+      final int ownWindow = pending.promptWindow;
+      // FIFO after the existing dismiss, then wait only by read-only metadata observations.
+      mainHandler.post(
+          () -> finishAllowedConfirmation(pending, identity, dialog, ownWindow, deadline));
+    }
+  }
+
+  private static int confirmationWindowId(androidx.appcompat.app.AlertDialog dialog) {
+    if (dialog == null || !dialog.isShowing() || dialog.getWindow() == null) return -1;
+    android.view.accessibility.AccessibilityNodeInfo node = null;
+    try {
+      node = dialog.getWindow().getDecorView().createAccessibilityNodeInfo();
+      return node == null ? -1 : node.getWindowId();
+    } catch (RuntimeException unavailable) {
+      // An unknown prompt identity cannot excuse a different application window.
+      return -1;
+    } finally {
+      if (node != null) node.recycle();
+    }
+  }
+
+  private void finishAllowedConfirmation(
+      PendingConfirmation pending,
+      String identity,
+      androidx.appcompat.app.AlertDialog dialog,
+      int promptWindow,
+      long deadline) {
+    synchronized (LIFECYCLE) {
+      if (!currentConfirmation(pending)) return;
+      if (android.os.SystemClock.elapsedRealtime() >= deadline) {
+        pending.targetChanged = pending.target != null;
+        finishConfirmation(pending);
+        return;
+      }
+      boolean waiting = dialog != null && dialog.isShowing();
+      if (!waiting && pending.target != null) {
+        com.deepseekharness.app.util.ScreenTarget current = null;
+        try {
+          current = DshaAccessibilityService.observeTarget(pending.target.displayId);
+        } catch (RuntimeException unavailable) {
+          // Keep the action undispatched while the accessibility window list is unavailable.
+        }
+        if (!pending.target.matches(current)) {
+          waiting =
+              current == null
+                  || promptWindow >= 0
+                      && current.displayId == 0
+                      && current.windowId == promptWindow
+                      && ctx.getPackageName().equals(current.packageName);
+          if (!waiting) {
+            pending.targetChanged = true;
+            finishConfirmation(pending);
+            return;
+          }
+        }
+      }
+      if (waiting) {
+        mainHandler.postDelayed(
+            () -> finishAllowedConfirmation(pending, identity, dialog, promptWindow, deadline), 50);
+        return;
+      }
+      confirmations.resolve(pending.request.generation, identity, true);
     }
   }
 
@@ -1992,6 +3066,11 @@ public final class HttpShellService {
 
   private void clearConfirmationUi(PendingConfirmation pending) {
     if (pendingConfirm != pending) return;
+    var taskPrompt = pending.taskPrompt;
+    pending.taskPrompt = null;
+    if (taskPrompt != null) taskPrompt.close();
+    // The task prompt is the only approval UI for a bound task, including its cleanup.
+    if (pending.taskLease != null) return;
     if (pending.allow != null) {
       try {
         pending.allow.cancel();

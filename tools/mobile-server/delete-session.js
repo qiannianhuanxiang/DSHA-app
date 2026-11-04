@@ -184,3 +184,4 @@ export async function deleteSession(deps, sessionId) {
         return { status: 200, ok: true, deleted: sessionId, ...(warnings.length ? { warnings } : {}) };
     } finally { deleting.delete(sessionId); }
 }
+//# sourceMappingURL=delete-session.js.map

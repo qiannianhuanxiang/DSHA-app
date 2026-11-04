@@ -4,12 +4,50 @@ plugins {
 
 // 两版共用功能和离线环境；只有 low 携带兼容旧 Android 的 Gecko 内核。
 // 文件名独立于可诊断版本名，保持当前用户下载入口不变。
-ext.dshaApkNameVersion = '0.2.0-rc2'
+ext.dshaApkNameVersion = '0.2.1-rc.3'
 def bundledTools = new groovy.json.JsonSlurper().parse(rootProject.file('tools/runtime-tools.lock.json'))
 if (bundledTools.schema != 1 || !(bundledTools.pnpm.version ==~ /[0-9]+\.[0-9]+\.[0-9]+/))
     throw new GradleException('随包工具身份格式错误')
+// BEGIN DSHA_BUNDLED_DSH_VERSION_GATE
+// Read during configuration too: assemble/package/test must reject a mixed native/asset generation.
+def verifyBundledDshGeneration = {
+    def manifest = new groovy.json.JsonSlurper().parse(rootProject.file('tools/dsh-runtime/package.json'))
+    def lock = new groovy.json.JsonSlurper().parse(rootProject.file('tools/dsh-runtime/package-lock.json'))
+    def registry = new groovy.json.JsonSlurper().parse(file('src/main/assets/runtime-patches.json'))
+    def source = file('src/main/java/com/deepseekharness/app/util/Constants.java').getText('UTF-8')
+    def declarations = (source =~ /(?m)^\s*public static final String DSH_VERSION = "([^"\r\n]+)";\s*$/)
+    if (declarations.count != 1)
+        throw new GradleException('BUNDLED_DSH_NATIVE_VERSION_ANCHOR')
+    def version = manifest.dependencies['@deepseek-ai/dsh']
+    if (!(version instanceof String) || !(version ==~ /[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?/)
+            || manifest.version != version || lock.version != version
+            || lock.packages[''].version != version
+            || lock.packages[''].dependencies['@deepseek-ai/dsh'] != version
+            || lock.packages['node_modules/@deepseek-ai/dsh'].version != version
+            || registry.schema != 1 || registry.dshVersion != version
+            || declarations[0][1] != version)
+        throw new GradleException('BUNDLED_DSH_VERSION_MISMATCH: native, npm lock and signed patch registry must agree')
+}
+verifyBundledDshGeneration()
+def verifyBundledDshVersion = tasks.register('verifyBundledDshVersion') {
+    inputs.files(rootProject.files('tools/dsh-runtime/package.json', 'tools/dsh-runtime/package-lock.json'))
+    inputs.files(file('src/main/assets/runtime-patches.json'),
+            file('src/main/java/com/deepseekharness/app/util/Constants.java'))
+    doLast { verifyBundledDshGeneration() }
+}
+// END DSHA_BUNDLED_DSH_VERSION_GATE
 // CI 只生成未签名完整包；该产物不得进入 release 或覆盖安装。
 def unsignedPackage = project.findProperty('dsha.unsignedPackage') == 'true'
+// 个人测试分支：显式开关才改包名/版本名，默认构建与基线完全一致。
+def sunsetTest = project.findProperty('dsha.sunsetTest') == 'true' || System.getenv('DSHA_SUNSET_TEST') == '1'
+// 独立上岛版：显式开关才换包名，与正式 DSHA 共存且数据完全隔离；默认构建不变。
+def islandEdition = project.findProperty('dsha.islandEdition') == 'true' || System.getenv('DSHA_ISLAND_EDITION') == '1'
+if (sunsetTest && islandEdition)
+    throw new GradleException('Sunset 测试版和独立上岛版不能同时启用')
+// 只有源码 CI 可显式允许缺少真实测试夹具；完整测试默认要求固定输入齐备。
+def sourceOnlyTests = providers.gradleProperty('dsha.sourceOnlyTests').orElse('false').get()
+if (!(sourceOnlyTests in ['true', 'false']))
+    throw new GradleException('dsha.sourceOnlyTests 只接受 true 或 false')
 
 android {
     namespace 'com.deepseekharness.app'
@@ -19,13 +57,17 @@ android {
     ndkVersion '26.3.11579264'
 
     defaultConfig {
-        applicationId "com.dsh.client"
+        applicationId "dsh.android.bxroot"
         minSdk 30
         targetSdk 37
         buildConfigField 'String', 'BUNDLED_PNPM_VERSION', '"' + bundledTools.pnpm.version + '"'
-        versionCode 157
+        // 供界面区分「正式版 / 独立上岛版」；包名与数据目录由 applicationIdSuffix 隔离。
+        buildConfigField 'boolean', 'ISLAND_EDITION', islandEdition ? 'true' : 'false'
+        // 上岛版用独立显示名，避免桌面上与正式 DSHA 同名、误以为是同一个应用。
+        resValue 'string', 'app_name', islandEdition ? 'DSHA 上岛版' : 'DSHA'
+        versionCode 218
         // DSHA 修订号 + 固定的北京时间戳 + 内置 DSH 版本；同一交付重建不变。
-        versionName "0.2.8-20261004.1719-dsh0.2.0-rc.2"
+        versionName "0.2.1-rc.3-bxroot.16-dsh0.2.1-rc.3"
         testInstrumentationRunner project.findProperty('dsha.testRunner') ?: "com.deepseekharness.app.Rc13Instrumentation"
         ndk {
             abiFilters 'arm64-v8a'
@@ -38,12 +80,24 @@ android {
             dimension 'androidSupport'
             minSdk 30
             buildConfigField 'boolean', 'LOW_ANDROID', 'false'
+            if (sunsetTest) {
+                applicationIdSuffix '.SunsetRNE'
+                versionNameSuffix '-SunsetTest'
+            } else if (islandEdition) {
+                applicationIdSuffix '.island'
+                versionNameSuffix '-island'
+            }
         }
         low {
             dimension 'androidSupport'
             minSdk 23
-            versionNameSuffix 'low'
+            versionNameSuffix sunsetTest ? 'low-SunsetTest' : 'low'
             buildConfigField 'boolean', 'LOW_ANDROID', 'true'
+            if (sunsetTest) {
+                applicationIdSuffix '.SunsetRNE'
+            } else if (islandEdition) {
+                applicationIdSuffix '.island'
+            }
         }
     }
 
@@ -116,7 +170,20 @@ android {
         buildConfig = true
     }
 
+    testOptions {
+        unitTests.includeAndroidResources = true
+        // 完整 Standard 套件在同一测试 JVM 内运行 2500+ 项，并包含 25MB 位图边界和
+        // 多组 Robolectric 界面沙箱；默认堆上限会在与断言无关的位图分配处 OOM。
+        // 这里只提高测试进程内存上限，不放宽或跳过任何用例。
+        unitTests.all { it.maxHeapSize = '2048m' }
+    }
+
     sourceSets {
+        // The promoted notification permission belongs only to the isolated island package.
+        if (islandEdition) {
+            standard.manifest.srcFile 'src/islandEdition/AndroidManifest.xml'
+            low.manifest.srcFile 'src/islandEdition/AndroidManifest.xml'
+        }
         main.assets.setSrcDirs([layout.buildDirectory.dir("generated/standardAssets").get().asFile,
                 layout.buildDirectory.dir("generated/recoveryAssets").get().asFile])
         main.java.srcDir(layout.buildDirectory.dir("generated/uiLanguage").get().asFile)
@@ -144,7 +211,7 @@ tasks.configureEach {
     if (!unsignedPackage && name.matches("(package|validateSigning|assemble)(Standard|Low)Release")) dependsOn(verifyPublishCertificate)
 }
 tasks.register('signPublishRelease') {
-    if (!unsignedPackage) dependsOn(verifyPublishCertificate, 'assembleStandardRelease', 'assembleLowRelease')
+    if (!unsignedPackage) dependsOn(verifyPublishCertificate, 'assembleStandardRelease')
     doFirst {
         if (unsignedPackage) throw new GradleException('未签名 CI 模式不能执行正式发布任务')
     }
@@ -168,9 +235,49 @@ def verifyCredentialRegistry = tasks.register('verifyCredentialRegistry', Exec) 
     commandLine(System.getenv('DSHA_PYTHON') ?: 'python3', '-B',
             rootProject.file('tools/generate-credential-paths.py').absolutePath, '--check')
 }
-tasks.named('preBuild').configure { dependsOn(verifyBundledIdentities, verifyBuiltinRegistry, verifyCredentialRegistry) }
+def verifyProrootCompat = tasks.register('verifyProrootCompat', Exec) {
+    inputs.files(rootProject.files('tools/test-proroot-compat.py',
+            'tools/proroot-compat/stack-sysconf.c', 'tools/proroot-compat/abi.lock.json',
+            'tools/proroot-compat/build.py', 'tools/proroot-compat/linker-entry.c'))
+    inputs.files(fileTree('src/main/jniLibs') { include '**/libproroot*.so', '**/libdsha-proroot*.so' })
+    commandLine(System.getenv('DSHA_PYTHON') ?: 'python3', '-B',
+            rootProject.file('tools/test-proroot-compat.py').absolutePath)
+}
+def verifyCurrentChangelog = tasks.register('verifyCurrentChangelog', Exec) {
+    inputs.file(file('build.gradle'))
+    inputs.files(rootProject.files('tools/generate-changelog.py', 'tools/source_text.py',
+            'tools/ui_language_catalog.py'))
+    ['zh', 'zh-Hant', 'en', 'ru', 'ja', 'ko', 'ar', 'pt', 'la', 'fr'].each { language ->
+        inputs.file(rootProject.file("docs/releases/build${android.defaultConfig.versionCode}-changes.${language}.md"))
+    }
+    inputs.files(fileTree('src/main/res') { include 'raw*/changelog.md' })
+    commandLine(System.getenv('DSHA_PYTHON') ?: 'python3', '-B',
+            rootProject.file('tools/generate-changelog.py').absolutePath, '--check')
+}
+
+tasks.named('preBuild').configure { dependsOn(verifyBundledIdentities, verifyBuiltinRegistry, verifyCredentialRegistry, verifyBundledDshVersion, verifyProrootCompat, verifyCurrentChangelog) }
+
+def verifyWebLanguages = tasks.register('verifyWebLanguages', Exec) {
+    inputs.files(rootProject.files('tools/prepare-web-languages.py', 'tools/web_language_catalog.py',
+            'tools/source_text.py', 'tools/ui_language_catalog.py',
+            'tools/i18n/web-messages.json', 'tools/i18n/web-language-bridge.js',
+            'tools/fixtures/language-v1-patch.json'))
+    inputs.files(rootProject.fileTree('tools/i18n/web-translations') { include '*.json' })
+    inputs.files(files('src/main/assets/web-integration/language.js',
+            'src/main/assets/language-patch.json',
+            'src/main/assets/recovery-recipes/0.2.1-rc.3/language-patch.json'))
+    commandLine(System.getenv('DSHA_PYTHON') ?: 'python3', '-B',
+            rootProject.file('tools/prepare-web-languages.py').absolutePath,
+            '--catalog-only', '--check')
+}
+
+tasks.named('preBuild').configure { dependsOn(verifyWebLanguages) }
+
 tasks.withType(Test).configureEach {
     systemProperty 'dsha.assetsDir', file('src/main/assets').absolutePath
+    systemProperty 'dsha.sourceOnlyTests', sourceOnlyTests
+    // 切换到完整测试时不得复用 source-only 的跳过结果。
+    inputs.property 'dsha.sourceOnlyTests', sourceOnlyTests
 }
 tasks.configureEach {
     if (name in ['verifyBundledIdentities', 'verifyBuiltinRegistry', 'prepareStandardAssets',
@@ -186,6 +293,7 @@ def prepareStandardAssets = tasks.register("prepareStandardAssets", Exec) {
     inputs.file(rootProject.file("tools/prepare-web-compat.mjs"))
     inputs.files(rootProject.files("tools/web-compat/entry.cjs", "tools/web-compat/package.json", "tools/web-compat/package-lock.json"))
     inputs.file(rootProject.file("tools/build-dsh-runtime.py"))
+    inputs.files(rootProject.files("tools/runtime_stable_patches.py", "tools/runtime_input_contract.py"))
     inputs.dir(rootProject.file("tools/dsh-runtime"))
     inputs.file(rootProject.file("tools/prepare-ubuntu-tools.py"))
     inputs.dir(rootProject.file("tools/ubuntu-tools"))
@@ -233,15 +341,20 @@ def verifyRuntimeDescriptorInputs = tasks.register("verifyRuntimeDescriptorInput
 }
 prepareRuntimeDescriptor.configure { dependsOn(verifyRuntimeDescriptorInputs) }
 prepareStandardAssets.configure { dependsOn(prepareRuntimeDescriptor) }
+// 包来源证明也是运行时身份输入，显式保证检查顺序，避免并行任务读取未检查的证明。
+prepareRuntimeDescriptor.configure { dependsOn(prepareBackupAssets) }
 
 // 应急运行时拥有独立锁；正式 DSH 更新不会把它隐式替换。
 def prepareRecoveryAssets = tasks.register("prepareRecoveryAssets", Exec) {
     dependsOn(prepareStandardAssets)
     inputs.file(rootProject.file("tools/prepare-recovery-assets.py"))
     inputs.file(rootProject.file("tools/recovery_runtime_overlay.py"))
+    inputs.file(rootProject.file("tools/recovery_descriptor_limits.py"))
+    inputs.file(file("src/main/java/com/deepseekharness/app/util/RecoveryDescriptorLimits.java"))
     inputs.file(rootProject.file("tools/generated_asset_directory.py"))
     inputs.files(rootProject.files("tools/asset-deployment.json", "tools/asset_deployment.py"))
     inputs.file(rootProject.file("tools/recovery-runtime/lock.json"))
+    inputs.files(fileTree("src/main/assets/recovery-recipes"))
     // 正式归档变化必须重算物理位置；固定副本可以首次缺失后由同摘要种子建立。
     inputs.files(layout.buildDirectory.file("generated/standardAssets/offline-rootfs.bin"),
             layout.buildDirectory.file("generated/standardAssets/dsh-runtime.bin"))
@@ -249,6 +362,7 @@ def prepareRecoveryAssets = tasks.register("prepareRecoveryAssets", Exec) {
     inputs.files(fileTree(rootProject.file("tools/recovery-runtime/archives")))
             .withPropertyName("recoveryPinnedArchives")
     inputs.files(file("src/main/assets/recovery-agent.js"), file("src/main/assets/recovery-profile-package.json"), file("src/main/assets/recovery-profile.patch.yml"))
+    inputs.files(fileTree("src/main/assets/destructive-policy"), file("src/main/assets/recovery-native-consent.cjs"))
     inputs.files(file("src/main/assets/web-integration/es-compat.js"), file("src/main/assets/web-integration/startup.js"), file("src/main/assets/pdf-compat-patch.json"),
             file("src/main/assets/language-patch.json"), file("src/main/assets/web-integration/language.js"))
     inputs.files(fileTree("src/main/jniLibs"), fileTree("src/low/jniLibs"))
@@ -317,12 +431,28 @@ tasks.named("preBuild").configure { dependsOn(prepareStandardAssets, prepareReco
 def prepareUiLanguages = tasks.register("prepareUiLanguages", Exec) {
     inputs.file(rootProject.file("tools/prepare-ui-languages.py"))
     inputs.file(rootProject.file("tools/i18n/messages.json"))
+    inputs.files(rootProject.files("tools/ui_language_catalog.py", "tools/i18n/messages-extra.json"))
+    inputs.files(rootProject.fileTree("tools/i18n/translations") { include "*.json" })
+    inputs.files(rootProject.fileTree("tools/i18n/translations-extra") { include "*.json" })
     outputs.dir(layout.buildDirectory.dir("generated/uiLanguage"))
     commandLine(System.getenv("DSHA_PYTHON") ?: "python3", "-B",
             rootProject.file("tools/prepare-ui-languages.py").absolutePath,
             "--output", layout.buildDirectory.dir("generated/uiLanguage").get().asFile.absolutePath)
 }
 tasks.named("preBuild").configure { dependsOn(prepareUiLanguages) }
+
+def verifyUiLanguageResources = tasks.register("verifyUiLanguageResources", Exec) {
+    inputs.files(rootProject.files("tools/localize-android-ui.py", "tools/ui_language_catalog.py",
+            "tools/i18n/messages.json", "tools/i18n/messages-extra.json", "tools/i18n/android-resources.json"))
+    inputs.files(rootProject.fileTree("tools/i18n/translations") { include "*.json" })
+    inputs.files(rootProject.fileTree("tools/i18n/translations-extra") { include "*.json" })
+    inputs.files(fileTree("src/main/res") { include "**/*.xml" })
+    inputs.files(fileTree("src/standard/res") { include "**/*.xml" })
+    commandLine(System.getenv("DSHA_PYTHON") ?: "python3", "-B",
+            rootProject.file("tools/localize-android-ui.py").absolutePath,
+            "--resources-only", "--check")
+}
+tasks.named("preBuild").configure { dependsOn(verifyUiLanguageResources) }
 
 dependencies {
     coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.0.4'
@@ -339,11 +469,24 @@ dependencies {
     // 真 PTY 终端：Termux 拆出的 terminal-view/terminal-emulator（Apache 2.0），
     // 自带 JNI PTY 层（openpty+fork/exec）。坐标是 JitPack 多模块真实 groupId
     // （com.termux.termux-app），不是 Wiki 上会 401 的 com.termux:terminal-view。
-    implementation 'com.termux.termux-app:terminal-view:0.118.0'
+    implementation('com.termux.termux-app:terminal-view:0.118.0') {
+        // Fixed 0.118.0 emulator sources are vendored with the bounded input queue fix.
+        exclude group: 'com.termux.termux-app', module: 'terminal-emulator'
+    }
     // 宿主备份：流式 JSON 清单与跨 API 23 的 PBKDF2-SHA256 / AES-GCM 实现，版本锁定。
     implementation 'com.google.code.gson:gson:2.13.1'
     implementation 'org.bouncycastle:bcprov-jdk15to18:1.85.2'
     // 宿主凭据 YAML 仅使用 data-only SafeConstructor；来源、JAR 和许可由备份锁核验。
     implementation 'org.yaml:snakeyaml:2.4'
     testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.robolectric:robolectric:4.15.1'
+}
+
+tasks.withType(Test).configureEach {
+    jvmArgs '--add-opens=java.base/java.io=ALL-UNNAMED'
+    def frameworkDirectory = System.getenv('DSHA_ROBOLECTRIC_DEPENDENCY_DIR')
+    if (frameworkDirectory) {
+        systemProperty 'robolectric.offline', 'true'
+        systemProperty 'robolectric.dependency.dir', frameworkDirectory
+    }
 }

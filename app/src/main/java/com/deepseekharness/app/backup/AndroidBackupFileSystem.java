@@ -6,7 +6,7 @@ import java.io.*;
 import java.util.*;
 
 /** 不使用 root/ADB，不把 EACCES 当成不存在；描述符打开后再次检查类型、设备和 inode。 */
-public final class AndroidBackupFileSystem implements BackupFileSystem {
+public class AndroidBackupFileSystem implements BackupFileSystem {
   private static final int O_PATH = 0x200000; // Linux UAPI；仅持有目录，不要求列出 /data 等父目录。
   // NDK r26 asm-generic/fcntl.h: 02000000；内核早已支持，Android Java 字段到 API 27 才公开。
   private static final int O_CLOEXEC = 0x80000;
@@ -46,7 +46,7 @@ public final class AndroidBackupFileSystem implements BackupFileSystem {
     }
   }
 
-  private static IOException failure(ErrnoException error) {
+  static IOException failure(ErrnoException error) {
     return new IOException(
         error.errno == OsConstants.EACCES || error.errno == OsConstants.EPERM
             ? "PERMISSION_DENIED"
@@ -55,7 +55,7 @@ public final class AndroidBackupFileSystem implements BackupFileSystem {
   }
 
   /** Android 的 FileInput/OutputStream(FileDescriptor) 不拥有传入的描述符。明确转交给自动关闭流。 */
-  private static ParcelFileDescriptor owned(File file, int flags, int mode)
+  static ParcelFileDescriptor owned(File file, int flags, int mode)
       throws IOException, ErrnoException {
     FileDescriptor raw = anchored(file, flags, mode);
     try {
@@ -65,7 +65,7 @@ public final class AndroidBackupFileSystem implements BackupFileSystem {
     }
   }
 
-  private static Node node(StructStat stat) {
+  static Node node(StructStat stat) {
     String type =
         OsConstants.S_ISREG(stat.st_mode)
             ? "FILE"
@@ -182,6 +182,30 @@ public final class AndroidBackupFileSystem implements BackupFileSystem {
       };
     } catch (ErrnoException e) {
       throw failure(e);
+    }
+  }
+
+  @Override
+  public byte[] currentSnapshot(File file, int limit) throws IOException {
+    if (limit < 1) throw new IOException("METADATA_LIMIT");
+    try {
+      ParcelFileDescriptor handle =
+          owned(file, OsConstants.O_RDONLY | O_CLOEXEC | OsConstants.O_NOFOLLOW, 0);
+      try (InputStream in = new ParcelFileDescriptor.AutoCloseInputStream(handle);
+          ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+        var stat = Os.fstat(handle.getFileDescriptor());
+        if (!OsConstants.S_ISREG(stat.st_mode) || stat.st_size > limit)
+          throw new IOException("METADATA_LIMIT");
+        byte[] buffer = new byte[4096];
+        int count;
+        while ((count = in.read(buffer)) != -1) {
+          if (out.size() + count > limit) throw new IOException("METADATA_LIMIT");
+          out.write(buffer, 0, count);
+        }
+        return out.toByteArray();
+      }
+    } catch (ErrnoException error) {
+      throw failure(error);
     }
   }
 

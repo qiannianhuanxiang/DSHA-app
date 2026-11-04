@@ -30,7 +30,7 @@ public final class AccessibilitySetupActivity extends AppCompatActivity {
         page.text(
             t(
                 "点下方按钮 → 已下载的应用 / 服务 → DSHA 配对助手 → 开启「使用服务」，确认系统提示。",
-                "Tap below → Downloaded apps / services → DSHA 配对助手 → Enable the service, then confirm the system prompt."),
+                "Tap below → Downloaded apps / services → DSHA Pairing Assistant → Enable the service, then confirm the system prompt."),
             13,
             R.color.text_secondary));
     enable =
@@ -81,7 +81,9 @@ public final class AccessibilitySetupActivity extends AppCompatActivity {
       } catch (RuntimeException error) {
         Toast.makeText(
                 activity,
-                t("请打开系统设置 → 无障碍 → DSHA 配对助手。", "Open Settings → Accessibility → DSHA 配对助手."),
+                t(
+                    "请打开系统设置 → 无障碍 → DSHA 配对助手。",
+                    "Open Settings → Accessibility → DSHA Pairing Assistant."),
                 Toast.LENGTH_LONG)
             .show();
       }

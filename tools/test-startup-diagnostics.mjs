@@ -44,7 +44,7 @@ for (const language of ['zh', 'en']) {
 const source = fs.readFileSync(path.join(assets, 'web-integration/startup.js'), 'utf8');
 const reports = [], listeners = {};
 let mutation, currentDefinition, boot = null, composer = null;
-const document = { querySelector(selector) { return selector === '[data-dsh-boot]' ? boot : composer; }, getElementById(){return {children:[{}]};} };
+const document = { querySelector(selector) { return selector === '[data-dsh-boot]' ? boot : composer; }, getElementById(){return {children:[{}],querySelector(){return null;}};} };
 const context = {document,location:{origin:'http://127.0.0.1:3087',pathname:'/'},__DSHA_PAGE_BINDING__:{nonce:'a'.repeat(32)},console:{info(line){reports.push(JSON.parse(line.slice(12)));}},
   CustomEvent:class {constructor(type,options){this.type=type;this.detail=options.detail;}},
   MutationObserver:class {constructor(callback){mutation=callback;} observe(){} disconnect(){this.stopped=true;}},
@@ -71,9 +71,56 @@ assert.equal(reports.at(-1).fatal,false);
 assert(reports.every(e=>e.nonce==='a'.repeat(32)&&e.documentId===context.__dshaStartupDocumentId&&e.page==='http://127.0.0.1:3087/'));
 assert(reports.every((e,index)=>index===0||e.sequence>reports[index-1].sequence));
 // A legacy WebView can inject only after the official failed boot screen exists.
-const lateReports=[];const late={...context,__dshaStartupObserved:false,document:{querySelector(s){return s==='[data-dsh-boot]'?{textContent:'Failed to load plugins historical-failure'}:null;},getElementById(){return {children:[]};}},console:{info(line){lateReports.push(JSON.parse(line.slice(12)));}}};late.window=late;late.top=late;
+const lateReports=[];const late={...context,__dshaStartupObserved:false,document:{querySelector(s){return s==='[data-dsh-boot]'?{textContent:'Failed to load plugins historical-failure'}:null;},getElementById(){return {children:[],querySelector(){return null;}};}},console:{info(line){lateReports.push(JSON.parse(line.slice(12)));}}};late.window=late;late.top=late;
 vm.runInNewContext(source,late);assert(lateReports.some(e=>e.fatal&&e.message.includes('historical-failure')));
 // A retained old runtime may already have installed the old unbound observer.
 const oldReports=[];const old={...late,__dshaStartupObserved:true,__dshaStartupObservationNonce:undefined,console:{info(line){oldReports.push(JSON.parse(line.slice(12)));}}};old.window=old;old.top=old;
 vm.runInNewContext(source,old);assert(oldReports.some(e=>e.fatal&&e.nonce==='a'.repeat(32)));
+// 完成时注入未见 boot，rc2 首次说明/空会话已经挂载 shell 但没有 composer。
+for(const shell of [false,true]){
+ const seen=[];const mounted={...context,__dshaStartupObserved:false,document:{querySelector(){return null;},getElementById(){return {children:[{}],querySelector(){return shell?{}:null;}};}},console:{info(line){seen.push(JSON.parse(line.slice(12)));}}};mounted.window=mounted;mounted.top=mounted;
+ vm.runInNewContext(source,mounted);
+ assert.equal(seen.some(e=>e.type==='ready'),shell,'arbitrary nonempty root is insufficient; mounted rc2 shell is ready');
+}
+// This observer runs before any locale plugin. Exercise its own static copy,
+// retain the plugin identity and error text, and preserve apply() return values.
+const pageLabels = {
+  zh:['正在初始化网页插件：','网页插件初始化返回：','网页已就绪'],
+  en:['Initializing web plugin: ','Web plugin initialization returned: ','Web page ready'],
+  'zh-Hant':['正在初始化網頁外掛：','網頁外掛初始化已返回：','網頁已就緒'],
+  ru:['Инициализация веб-плагина: ','Инициализация веб-плагина завершилась: ','Веб-страница готова'],
+  ja:['Web プラグインを初期化中：','Web プラグインの初期化から戻りました：','Web ページの準備ができました'],
+  ko:['웹 플러그인 초기화 중: ','웹 플러그인 초기화가 반환되었습니다: ','웹 페이지가 준비되었습니다'],
+  ar:['جارٍ تهيئة إضافة الويب: ','عادت تهيئة إضافة الويب: ','صفحة الويب جاهزة'],
+  pt:['Inicializando plugin da Web: ','A inicialização do plugin da Web retornou: ','Página da Web pronta'],
+  la:['Additamentum interretiale initiatur: ','Initiatio additamenti interretialis rediit: ','Pagina interretialis parata est'],
+  fr:['Initialisation du module Web : ','L’initialisation du module Web a rendu la main : ','La page Web est prête'],
+};
+for (const [language, labels] of Object.entries(pageLabels)) {
+  const seen = []; let definition, inspectLocale, mounted = false;
+  const localized = {
+    __DSHA_LANGUAGE__:language, __DSHA_PAGE_BINDING__:{nonce:'b'.repeat(32)},
+    document:{querySelector(selector){return selector==='[data-composer-input]' && mounted ? {} : null;},getElementById(){return null;}},
+    location:{origin:'http://127.0.0.1:3087',pathname:'/'},
+    console:{info(line){seen.push(JSON.parse(line.slice(12)));}},
+    CustomEvent:context.CustomEvent,
+    MutationObserver:class {constructor(callback){inspectLocale=callback;}observe(){}disconnect(){}},
+    addEventListener(){},dispatchEvent(){},
+  };
+  localized.window=localized;localized.top=localized;
+  vm.runInNewContext(source,localized);
+  localized.__ModuleLoader__={load(value){definition=value;}};
+  const pluginId='plugin/原始-ID';
+  localized.__ModuleLoader__.load({id:pluginId,factory(){return {apply(){return 197;}};}});
+  assert.equal(definition.factory().apply(),197,language);
+  mounted=true;inspectLocale();
+  assert.equal(seen.find(event=>event.type==='loading').message,labels[0]+pluginId,language);
+  assert.equal(seen.find(event=>event.type==='active').message,labels[1]+pluginId,language);
+  assert.equal(seen.find(event=>event.type==='ready').message,labels[2],language);
+  const rawError='原始用户错误 / User error <keep-{value}>';const error=new Error(rawError);
+  localized.__ModuleLoader__.load({id:'error/原始',factory(){return {apply(){throw error;}};}});
+  assert.throws(()=>definition.factory().apply(),value=>value===error);
+  assert(seen.some(event=>event.type==='issue' && event.id==='error/原始' && event.message.includes(rawError)),language);
+}
 console.log('PASS startup observer: named missing import, thrown module, one execution, browser factory/apply/rejection, boot failure, ready');
+console.log('PASS startup page labels: ten languages before locale plugins; plugin IDs, return values and raw errors preserved');

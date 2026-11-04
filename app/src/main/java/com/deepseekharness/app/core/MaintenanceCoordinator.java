@@ -36,6 +36,16 @@ public final class MaintenanceCoordinator {
     return GATE.isExclusive() || EnvironmentTaskGate.isBusy();
   }
 
+  /** 备份/安装等独占动作的准入提示：普通共享查询/启动也会挡住它们。 */
+  public static boolean isExclusiveWorkBlocked() {
+    return isEnvironmentTaskBusy() || EnvironmentTaskGate.hasSharedUse();
+  }
+
+  public static String activeEnvironmentDescription() {
+    String exclusive = EnvironmentTaskGate.activeKind();
+    return exclusive.isEmpty() ? EnvironmentTaskGate.sharedKinds() : exclusive;
+  }
+
   public static HostMaintenancePending.Check inspectPending(File filesDir) {
     return HostMaintenancePending.inspect(filesDir);
   }
@@ -88,7 +98,7 @@ public final class MaintenanceCoordinator {
 
     @Override
     public boolean ownsExecutionTicket() {
-      return EnvironmentTaskGate.ownsCurrentThread();
+      return EnvironmentTaskGate.ownsExclusiveCurrentThread();
     }
 
     @Override
