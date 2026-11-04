@@ -132,6 +132,12 @@ public final class AssistantSessionController implements AutoCloseable {
 
   public void collapse() {
     expanded = false;
+    // expand() fences the screen and collapse() used to clear only the flag, so a
+    // panel that was opened and closed left the authority paused forever. Nothing
+    // exposes resume over the bridge, and hideForScreen() refuses to run while
+    // paused, so the next begin() could never recover. Release exactly the pause
+    // this controller raised; user and policy pauses stay untouched.
+    if ("ASSISTANT_EXPANDED".equals(fence.snapshot().reason())) fence.resume();
     changed();
   }
 
