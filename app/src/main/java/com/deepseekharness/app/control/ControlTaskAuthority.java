@@ -43,6 +43,11 @@ public final class ControlTaskAuthority {
   // completion watermarks so a delayed old request cannot reacquire the screen.
   private final Map<String, Long> completedLocalTurns = new HashMap<>();
 
+  /** Explicit user intent; never auto-released by checkBegin. */
+  private static boolean userHeld(String why) {
+    return "USER_PAUSED".equals(why) || "LOCAL_USER_PAUSE".equals(why);
+  }
+
   public synchronized void checkBegin(Binding requested) {
     long turn = localTurn(requested.turnId());
     String key = localKey(requested);
@@ -50,7 +55,24 @@ public final class ControlTaskAuthority {
       throw new IllegalStateException("SCREEN_TURN_ENDED");
     if (!completedLocalTurns.containsKey(key) && completedLocalTurns.size() >= 4096)
       throw new IllegalStateException("CONTROL_SESSION_LIMIT");
-    if (paused) throw new IllegalStateException("SCREEN_CONTROL_PAUSED");
+    // Transient reasons (overlay gone, IME shown, service exited, panel expanded)
+    // describe a moment that has already passed when a new begin arrives. Holding
+    // them forever left the bridge permanently refused: no endpoint exposes resume,
+    // and the assistant window that would host the control is itself torn down.
+    // Only explicit user pauses survive.
+    if (paused && !userHeld(reason)) {
+      android.util.Log.w("DSHA", "checkBegin auto-released transient pause: " + reason);
+      paused = false;
+      needsObservation = true;
+      revision++;
+      reason = "OBSERVE_REQUIRED";
+    }
+    if (paused) {
+      // A: the reason was never observable through the bridge, so diagnosing a
+      // stuck refusal always required guessing which caller set it.
+      android.util.Log.e("DSHA", "checkBegin refused: paused reason=" + reason);
+      throw new IllegalStateException("SCREEN_CONTROL_PAUSED");
+    }
     if (binding != null && !binding.equals(requested))
       throw new IllegalStateException("PHYSICAL_SCREEN_BUSY");
   }
@@ -180,6 +202,8 @@ public final class ControlTaskAuthority {
 
   public synchronized Binding pause(String why) {
     Binding previous = binding;
+    // A2: stack trace identifies which caller fenced the screen.
+    android.util.Log.e("DSHA", "pause(" + why + ")", new Throwable("pause origin"));
     paused = true;
     needsObservation = true;
     revision++;
