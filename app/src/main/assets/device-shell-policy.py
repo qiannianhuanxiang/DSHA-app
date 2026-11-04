@@ -269,6 +269,19 @@ def stop_targets(plan, shell):
     return list(dict.fromkeys(requested))
 
 
+def valid_vscreen_identity(value):
+    if not isinstance(value, str) or len(value) > 160:
+        return False
+    fields = value.split(':')
+    if len(fields) != 5:
+        return False
+    uuid = r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+    return (bool(re.fullmatch(r'[1-9][0-9]{0,9}', fields[0])) and 1 < int(fields[0]) <= 2147483647
+            and bool(re.fullmatch(r'[1-9][0-9]{0,18}', fields[1])) and int(fields[1]) <= 9223372036854775807
+            and bool(re.fullmatch(r'0|[1-9][0-9]{0,9}', fields[2])) and int(fields[2]) <= 2147483647
+            and bool(re.fullmatch(uuid, fields[3])) and bool(re.fullmatch(uuid, fields[4])))
+
+
 def execute(plan, shell, result_class):
     if not isinstance(plan, dict) or plan.get('version') != 1 or plan.get('kind') not in ('READ', 'FILE', 'STOP', 'VIRTUAL_SCREEN'):
         raise Blocked('原生设备策略没有授权此操作')
@@ -276,14 +289,16 @@ def execute(plan, shell, result_class):
         argv = plan.get('argv')
         source = plan.get('sourceApk')
         self_package = plan.get('selfPackage')
+        launch = isinstance(argv, list) and len(argv) == 9 and argv[4:7] == ['--launch', '--port', '0']
+        probe = (isinstance(argv, list) and len(argv) == 9 and argv[4:6] == ['--probe-exit', '--identity']
+                 and valid_vscreen_identity(argv[6]))
         if (not isinstance(argv, list) or len(argv) != 9 or argv[0] != 'app_process'
                 or not isinstance(source, str) or not re.fullmatch(r'/data/app/[^\s]+\.apk', source)
                 or '..' in source.split('/') or '\\' in source or '//' in source
                 or argv[1] != '-Djava.class.path=' + source
                 or argv[2] != '/system/bin'
                 or argv[3] != 'com.deepseekharness.app.vscreen.VirtualScreenCore'
-                or argv[4:6] != ['--launch', '--port']
-                or not re.fullmatch(r'8[0-9]{3}', argv[6])
+                or not (launch or probe)
                 or not isinstance(self_package,str) or not re.fullmatch(r'[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+',self_package)
                 or argv[7:] != ['--package',self_package]
                 or plan.get('nativeAuthorization') != 'managed-vscreen-start'

@@ -30,8 +30,15 @@ import com.google.android.material.materialswitch.MaterialSwitch;
 public final class DeviceGrantsFragment extends Fragment {
   private MaterialSwitch sms;
   private TextView smsStatus;
+  private MaterialSwitch unrestrictedShell;
+  private TextView unrestrictedShellStatus;
+  private TextView screenPolicyStatus;
+  private android.widget.Button screenPause;
+  private android.widget.Button screenRules, screenRevoke;
+  private android.widget.RadioGroup screenModes;
   private boolean updating;
   private int adbStatusRequest;
+  private FullPermissionControls fullPermissions;
   private final android.os.Handler main = new android.os.Handler(android.os.Looper.getMainLooper());
   private final Runnable refreshConnections =
       new Runnable() {
@@ -39,6 +46,7 @@ public final class DeviceGrantsFragment extends Fragment {
         public void run() {
           if (!isResumed() || getView() == null) return;
           refreshChannelLabels();
+          if (fullPermissions != null) fullPermissions.refresh();
           main.postDelayed(this, 1000);
         }
       };
@@ -47,6 +55,11 @@ public final class DeviceGrantsFragment extends Fragment {
   public View onCreateView(LayoutInflater inflater, ViewGroup container, Bundle saved) {
     View view = inflater.inflate(R.layout.fragment_device_grants, container, false);
     Context ctx = requireContext();
+    fullPermissions =
+        new FullPermissionControls(
+            this,
+            (android.widget.LinearLayout) ((android.widget.ScrollView) view).getChildAt(0),
+            this::refreshNativePolicyControls);
     for (int id :
         new int[] {
           R.id.device_root_status, R.id.workspace_shizuku_status, R.id.config_adb_status
@@ -70,20 +83,32 @@ public final class DeviceGrantsFragment extends Fragment {
                 startActivity(new Intent(requireContext(), AccessibilitySetupActivity.class)));
     android.widget.LinearLayout screenCard =
         (android.widget.LinearLayout) view.findViewById(R.id.computer_use_hint).getParent();
+    addScreenPolicyControls(ctx, screenCard);
     android.widget.Button revoke = new androidx.appcompat.widget.AppCompatButton(ctx);
+    screenRevoke = revoke;
     revoke.setText(
         com.deepseekharness.app.util.UiText.choose(
-            "撤销本次读屏与操作授权", "Revoke screen access for this run"));
+            "暂停屏幕操作并撤销预授权", "Pause screen actions and revoke preauthorizations"));
     revoke.setTextSize(12);
     revoke.setAllCaps(false);
     revoke.setBackgroundResource(R.drawable.bg_btn);
     screenCard.addView(revoke, new android.widget.LinearLayout.LayoutParams(-1, -2));
     revoke.setOnClickListener(
         button -> {
+          boolean persisted =
+              new DeviceGrants(ctx)
+                  .setScreenPolicy(
+                      com.deepseekharness.app.util.ScreenConfirmationPolicy.Mode.MANUAL,
+                      java.util.Map.of());
+          com.deepseekharness.app.HttpShellService.setScreenPaused(ctx, true);
           com.deepseekharness.app.HttpShellService.revokeScreenGrant(ctx);
+          refreshScreenPolicy();
           toast(
-              com.deepseekharness.app.util.UiText.choose(
-                  "已撤销，后续屏幕操作需要重新确认", "Revoked. Future screen actions require confirmation"));
+              persisted
+                  ? com.deepseekharness.app.util.UiText.choose(
+                      "已暂停屏幕操作并撤销预授权；可点恢复后继续",
+                      "Screen actions are paused and preauthorizations revoked. Use Resume to continue")
+                  : com.deepseekharness.app.util.UiText.text("授权保存失败，请重试"));
         });
     android.widget.Button virtualScreen = new androidx.appcompat.widget.AppCompatButton(ctx);
     virtualScreen.setText(
@@ -95,13 +120,23 @@ public final class DeviceGrantsFragment extends Fragment {
         button ->
             startActivity(
                 new Intent(ctx, com.deepseekharness.app.vscreen.VirtualScreenActivity.class)));
-    if (com.deepseekharness.app.vscreen.VirtualScreenManager.supported(ctx))
+    if (com.deepseekharness.app.vscreen.VirtualScreenManager.supported(ctx)) {
+      android.widget.TextView virtualHint = new android.widget.TextView(ctx);
+      virtualHint.setText(
+          com.deepseekharness.app.util.UiText.choose(
+              "虚拟屏需要已连接的设备通道。无障碍不会自动创建，请打开虚拟屏后点“创建竖屏”或“创建横屏”；页内有使用说明。",
+              "A virtual screen requires a connected device channel. Accessibility does not create it automatically. Open virtual screen, then tap Create portrait or Create landscape. Instructions are available on that page."));
+      virtualHint.setTextSize(12);
+      virtualHint.setTextColor(ctx.getColor(R.color.text_secondary));
+      screenCard.addView(virtualHint, new android.widget.LinearLayout.LayoutParams(-1, -2));
       screenCard.addView(virtualScreen, new android.widget.LinearLayout.LayoutParams(-1, -2));
+    }
 
     CompoundButton root = view.findViewById(R.id.config_root_shell);
-    root.setChecked(RootShell.enabled(ctx));
+    root.setChecked(new ConfigStore(ctx).isRootShellAllowed());
     root.setOnCheckedChangeListener(
         (button, enabled) -> {
+          if (updating) return;
           new ConfigStore(ctx).setRootShellAllowed(enabled);
           if (!enabled) com.deepseekharness.app.vscreen.VirtualScreenManager.from(ctx).revoke();
           syncSettings();
@@ -159,11 +194,16 @@ public final class DeviceGrantsFragment extends Fragment {
             });
     CompoundButton sensors = view.findViewById(R.id.config_cap_sensors);
     sensors.setChecked(pref(ctx, "cap_sensors", false));
-    sensors.setOnCheckedChangeListener((button, enabled) -> savePreference("cap_sensors", enabled));
+    sensors.setOnCheckedChangeListener(
+        (button, enabled) -> {
+          if (!updating) savePreference("cap_sensors", enabled);
+        });
     CompoundButton location = view.findViewById(R.id.config_cap_location);
     location.setChecked(pref(ctx, "cap_location", false));
     location.setOnCheckedChangeListener(
         (button, enabled) -> {
+          if (updating) return;
+          if (fullPermissions != null) fullPermissions.cancelForLocationChange();
           savePreference("cap_location", enabled);
           if (enabled
               && ctx.checkSelfPermission(android.Manifest.permission.ACCESS_COARSE_LOCATION)
@@ -176,9 +216,12 @@ public final class DeviceGrantsFragment extends Fragment {
                 104);
         });
     CompoundButton adb = view.findViewById(R.id.config_adb_enable);
-    adb.setChecked(DeviceBridgeService.isAdbEnabled(ctx));
+    adb.setChecked(pref(ctx, "adb_enabled", false));
     adb.setOnCheckedChangeListener(
         (button, enabled) -> {
+          if (updating) return;
+          com.deepseekharness.app.HttpShellService.smsPolicyChanged(ctx);
+          DeviceBridgeService.adbIntentChanging();
           savePreference("adb_enabled", enabled);
           if (!enabled) com.deepseekharness.app.vscreen.VirtualScreenManager.from(ctx).revoke();
           if (enabled) {
@@ -214,7 +257,7 @@ public final class DeviceGrantsFragment extends Fragment {
             saveSms(false);
             return;
           }
-          new com.deepseekharness.app.ui.DshaDialogBuilder(ctx)
+          new com.deepseekharness.app.ui.DshaDialogBuilder(ctx, true)
               .setTitle(com.deepseekharness.app.util.UiText.text("持续允许读取短信？"))
               .setMessage(
                   com.deepseekharness.app.util.UiText.text(
@@ -226,7 +269,241 @@ public final class DeviceGrantsFragment extends Fragment {
               .show();
         });
     updateSms();
+    unrestrictedShell = view.findViewById(R.id.device_unrestricted_shell);
+    unrestrictedShellStatus = view.findViewById(R.id.device_unrestricted_shell_status);
+    unrestrictedShell.setOnCheckedChangeListener(
+        (button, enabled) -> {
+          if (updating) return;
+          updateUnrestrictedShell();
+          if (!enabled) {
+            saveUnrestrictedShell(false);
+            return;
+          }
+          new com.deepseekharness.app.ui.DshaDialogBuilder(ctx, true)
+              .setTitle(com.deepseekharness.app.util.UiText.choose("开启不受限制的设备 shell？", "Enable the unrestricted device shell?"))
+              .setMessage(
+                  com.deepseekharness.app.util.UiText.choose(
+                      "当前 DSHA 环境内的助手和插件将能通过已授权的 root 或 Shizuku 执行任意命令，包括管道、脚本、input、screencap、am start 和 settings put，可能改动系统设置或读取其他应用数据。\n\n分区、SELinux、挂载和刷机仍然禁止；ADB 通道仍按白名单执行。关闭后立即阻止新命令。",
+                      "Assistants and plugins in this DSHA environment will be able to run any command through the authorized root or Shizuku channel, including pipes, scripts, input, screencap, am start and settings put. They may change system settings or read other apps' data.\n\nPartition, SELinux, mount and flashing operations stay blocked, and the ADB channel keeps its allowlist. Turning this off blocks new commands immediately."))
+              .setPositiveButton(
+                  com.deepseekharness.app.util.UiText.choose("开启不受限 shell", "Enable unrestricted shell"),
+                  (dialog, which) -> saveUnrestrictedShell(true))
+              .setNegativeButton(com.deepseekharness.app.util.UiText.text("取消"), null)
+              .show();
+        });
+    updateUnrestrictedShell();
     return view;
+  }
+
+  private void saveUnrestrictedShell(boolean enabled) {
+    boolean saved = new DeviceGrants(requireContext()).setUnrestrictedShellAllowed(enabled);
+    updateUnrestrictedShell();
+    toast(
+        !saved
+            ? com.deepseekharness.app.util.UiText.text("授权保存失败，请重试")
+            : enabled
+                ? com.deepseekharness.app.util.UiText.choose("不受限 shell 已开启", "Unrestricted shell enabled")
+                : com.deepseekharness.app.util.UiText.choose("不受限 shell 已关闭", "Unrestricted shell disabled"));
+  }
+
+  private void updateUnrestrictedShell() {
+    if (unrestrictedShell == null || !isAdded()) return;
+    boolean allowed = new DeviceGrants(requireContext()).unrestrictedShellAllowed();
+    updating = true;
+    unrestrictedShell.setChecked(allowed);
+    updating = false;
+    unrestrictedShellStatus.setText(
+        allowed
+            ? com.deepseekharness.app.util.UiText.choose("已开启 · root/Shizuku 可执行任意命令（硬禁止项除外）· 关闭可撤销", "On · root/Shizuku can run any command (hard-blocked operations excepted) · turn off to revoke")
+            : com.deepseekharness.app.util.UiText.choose("已关闭 · 设备命令按白名单执行", "Off · device commands follow the allowlist"));
+    unrestrictedShellStatus.setTextColor(
+        requireContext().getColor(allowed ? R.color.primary : R.color.text_muted));
+  }
+
+  private void addScreenPolicyControls(Context ctx, android.widget.LinearLayout card) {
+    screenPolicyStatus = new TextView(ctx);
+    screenPolicyStatus.setTextSize(12);
+    card.addView(screenPolicyStatus, new android.widget.LinearLayout.LayoutParams(-1, -2));
+    screenModes = new android.widget.RadioGroup(ctx);
+    String[] labels = {
+      com.deepseekharness.app.util.UiText.choose("全部手动", "Confirm every action"),
+      com.deepseekharness.app.util.UiText.choose("按应用自定义", "Customize by app"),
+      com.deepseekharness.app.util.UiText.choose("全部允许", "Allow all")
+    };
+    for (int index = 0; index < labels.length; index++) {
+      var radio = new androidx.appcompat.widget.AppCompatRadioButton(ctx);
+      radio.setId(android.view.View.generateViewId());
+      radio.setText(labels[index]);
+      radio.setTag(com.deepseekharness.app.util.ScreenConfirmationPolicy.Mode.values()[index]);
+      screenModes.addView(radio);
+    }
+    card.addView(screenModes, new android.widget.LinearLayout.LayoutParams(-1, -2));
+    screenModes.setOnCheckedChangeListener(
+        (group, checked) -> {
+          if (updating) return;
+          var selected = group.findViewById(checked);
+          if (selected == null) return;
+          var grants = new DeviceGrants(ctx);
+          if (!grants.setScreenPolicy(
+              (com.deepseekharness.app.util.ScreenConfirmationPolicy.Mode) selected.getTag(),
+              grants.screenPolicy().rules))
+            toast(com.deepseekharness.app.util.UiText.text("授权保存失败，请重试"));
+          refreshScreenPolicy();
+        });
+    var rules = new androidx.appcompat.widget.AppCompatButton(ctx);
+    screenRules = rules;
+    rules.setText(
+        com.deepseekharness.app.util.UiText.choose("编辑应用确认规则", "Edit app confirmation rules"));
+    rules.setAllCaps(false);
+    rules.setBackgroundResource(R.drawable.bg_btn);
+    rules.setOnClickListener(button -> showScreenRules());
+    card.addView(rules, new android.widget.LinearLayout.LayoutParams(-1, -2));
+    screenPause = new androidx.appcompat.widget.AppCompatButton(ctx);
+    screenPause.setAllCaps(false);
+    screenPause.setBackgroundResource(R.drawable.bg_btn);
+    screenPause.setOnClickListener(
+        button -> {
+          com.deepseekharness.app.HttpShellService.setScreenPaused(
+              ctx, !com.deepseekharness.app.HttpShellService.screenPaused());
+          refreshScreenPolicy();
+        });
+    card.addView(screenPause, new android.widget.LinearLayout.LayoutParams(-1, -2));
+    refreshScreenPolicy();
+  }
+
+  private void refreshScreenPolicy() {
+    if (screenModes == null || !isAdded()) return;
+    var policy = new DeviceGrants(requireContext()).screenPolicy();
+    boolean global = new DeviceGrants(requireContext()).consentPolicy().globalAllow();
+    updating = true;
+    for (int i = 0; i < screenModes.getChildCount(); i++) {
+      var radio = (android.widget.RadioButton) screenModes.getChildAt(i);
+      radio.setChecked(radio.getTag() == policy.mode);
+      radio.setEnabled(true);
+    }
+    updating = false;
+    if (screenRules != null) screenRules.setEnabled(true);
+    if (screenRevoke != null) screenRevoke.setEnabled(true);
+    screenPause.setEnabled(true);
+    screenPolicyStatus.setText(
+        global
+            ? com.deepseekharness.app.util.UiText.choose(
+                "全局权限已开启：已授权能力免 DSHA 安全确认。可编辑下列保留规则；关闭全局后按这些规则确认。独立撤销或暂停仍有效。",
+                "Global permission is on: authorized capabilities skip DSHA confirmation. You can edit the retained rules below; they apply when global permission is off. Explicit revocation or pause remains effective.")
+            : com.deepseekharness.app.util.UiText.choose(
+                "仅设置 DSHA 的屏幕确认；不会授予系统权限。全部允许包含敏感界面；自定义中未配置的应用仍询问。规则保存在本机，不随备份迁移。",
+                "These rules only control DSHA confirmations and do not grant system permissions. Allow all includes sensitive screens. Unconfigured apps still ask in custom mode. Rules stay on this device and are excluded from backups."));
+    screenPause.setText(
+        com.deepseekharness.app.HttpShellService.screenPaused()
+            ? com.deepseekharness.app.util.UiText.choose(
+                "恢复助手屏幕操作", "Resume assistant screen actions")
+            : com.deepseekharness.app.util.UiText.choose(
+                "暂停助手屏幕操作", "Pause assistant screen actions"));
+  }
+
+  private void refreshNativePolicyControls() {
+    refreshScreenPolicy();
+    View page = getView();
+    if (page == null || !isAdded()) return;
+    updating = true;
+    ((CompoundButton) page.findViewById(R.id.config_root_shell))
+        .setChecked(new ConfigStore(requireContext()).isRootShellAllowed());
+    ((CompoundButton) page.findViewById(R.id.config_adb_enable))
+        .setChecked(pref(requireContext(), "adb_enabled", false));
+    ((CompoundButton) page.findViewById(R.id.config_cap_sensors))
+        .setChecked(pref(requireContext(), "cap_sensors", false));
+    ((CompoundButton) page.findViewById(R.id.config_cap_location))
+        .setChecked(pref(requireContext(), "cap_location", false));
+
+    updating = false;
+    updateSms();
+  }
+
+  private void showScreenRules() {
+    var policy = new DeviceGrants(requireContext()).screenPolicy();
+    String[] packages = policy.rules.keySet().toArray(new String[0]);
+    String[] labels = new String[packages.length];
+    for (int i = 0; i < packages.length; i++)
+      labels[i] =
+          packages[i]
+              + " · "
+              + (policy.rules.get(packages[i])
+                      == com.deepseekharness.app.util.ScreenConfirmationPolicy.Rule.ALLOW
+                  ? com.deepseekharness.app.util.UiText.choose("允许", "Allow")
+                  : com.deepseekharness.app.util.UiText.choose("询问", "Ask"));
+    new DshaDialogBuilder(requireContext())
+        .setTitle(com.deepseekharness.app.util.UiText.choose("应用确认规则", "App confirmation rules"))
+        .setItems(labels, (dialog, which) -> editScreenRule(packages[which]))
+        .setPositiveButton(
+            com.deepseekharness.app.util.UiText.choose("添加应用", "Add app"),
+            (dialog, which) -> editScreenRule(""))
+        .setNegativeButton(com.deepseekharness.app.util.UiText.text("取消"), null)
+        .show();
+  }
+
+  private void editScreenRule(String existing) {
+    var ctx = requireContext();
+    var content = new android.widget.LinearLayout(ctx);
+    content.setOrientation(android.widget.LinearLayout.VERTICAL);
+    var pkg = new androidx.appcompat.widget.AppCompatEditText(ctx);
+    pkg.setSingleLine(true);
+    pkg.setHint(com.deepseekharness.app.util.UiText.choose("精确应用包名", "Exact app package name"));
+    pkg.setText(existing);
+    pkg.setEnabled(existing.isEmpty());
+    content.addView(pkg);
+    var allow = new MaterialSwitch(ctx);
+    allow.setText(
+        com.deepseekharness.app.util.UiText.choose(
+            "允许该应用免确认（含敏感界面）", "Allow this app without confirmation, including sensitive screens"));
+    allow.setChecked(
+        new DeviceGrants(ctx).screenPolicy().rules.get(existing)
+            == com.deepseekharness.app.util.ScreenConfirmationPolicy.Rule.ALLOW);
+    content.addView(allow);
+    var scroll = new android.widget.ScrollView(ctx);
+    scroll.setFillViewport(true);
+    scroll.addView(content);
+    var builder =
+        new DshaDialogBuilder(ctx)
+            .setTitle(
+                com.deepseekharness.app.util.UiText.choose(
+                    "编辑应用确认规则", "Edit app confirmation rules"))
+            .setView(scroll)
+            .setPositiveButton(
+                com.deepseekharness.app.util.UiText.text("保存"),
+                (dialog, which) -> {
+                  String key = pkg.getText().toString().trim();
+                  if (!com.deepseekharness.app.util.ScreenConfirmationPolicy.validPackage(key)) {
+                    toast(
+                        com.deepseekharness.app.util.UiText.choose(
+                            "应用包名无效，规则未保存", "Invalid package name. Rule was not saved"));
+                    return;
+                  }
+                  var grants = new DeviceGrants(ctx);
+                  var current = grants.screenPolicy();
+                  var rules = new java.util.LinkedHashMap<>(current.rules);
+                  rules.put(
+                      key,
+                      allow.isChecked()
+                          ? com.deepseekharness.app.util.ScreenConfirmationPolicy.Rule.ALLOW
+                          : com.deepseekharness.app.util.ScreenConfirmationPolicy.Rule.ASK);
+                  if (!grants.setScreenPolicy(current.mode, rules))
+                    toast(com.deepseekharness.app.util.UiText.text("授权保存失败，请重试"));
+                  refreshScreenPolicy();
+                })
+            .setNegativeButton(com.deepseekharness.app.util.UiText.text("取消"), null);
+    if (!existing.isEmpty())
+      builder.setNeutralButton(
+          com.deepseekharness.app.util.UiText.choose("删除规则", "Remove rule"),
+          (dialog, which) -> {
+            var grants = new DeviceGrants(ctx);
+            var current = grants.screenPolicy();
+            var rules = new java.util.LinkedHashMap<>(current.rules);
+            rules.remove(existing);
+            if (!grants.setScreenPolicy(current.mode, rules))
+              toast(com.deepseekharness.app.util.UiText.text("授权保存失败，请重试"));
+            refreshScreenPolicy();
+          });
+    builder.show();
   }
 
   private void savePreference(String key, boolean enabled) {
@@ -393,8 +670,11 @@ public final class DeviceGrantsFragment extends Fragment {
   @Override
   public void onResume() {
     super.onResume();
+    refreshNativePolicyControls();
+    if (fullPermissions != null) fullPermissions.resume();
     ShizukuShell.ensureBound(requireContext());
     updateSms();
+    updateUnrestrictedShell();
     main.removeCallbacks(refreshConnections);
     main.post(refreshConnections);
     View page = getView();
@@ -407,15 +687,22 @@ public final class DeviceGrantsFragment extends Fragment {
 
   @Override
   public void onPause() {
+    if (fullPermissions != null) fullPermissions.pause();
     main.removeCallbacks(refreshConnections);
     super.onPause();
   }
 
   @Override
   public void onDestroyView() {
+    if (fullPermissions != null) {
+      fullPermissions.close();
+      fullPermissions = null;
+    }
     adbStatusRequest++;
     sms = null;
     smsStatus = null;
+    unrestrictedShell = null;
+    unrestrictedShellStatus = null;
     super.onDestroyView();
   }
 
@@ -491,14 +778,28 @@ public final class DeviceGrantsFragment extends Fragment {
   }
 
   private void openBatteryOpt(Context ctx) {
+    openBatterySettings(
+        ctx,
+        this::startActivity,
+        () -> toast(com.deepseekharness.app.util.UiText.text("无法打开电池优化设置")));
+  }
+
+  /** 只在用户点击后导航到系统设置；不申请或自动修改电池优化白名单。 */
+  static void openBatterySettings(
+      Context context, java.util.function.Consumer<Intent> open, Runnable failed) {
     try {
-      Intent i =
+      open.accept(new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));
+      return;
+    } catch (RuntimeException unavailable) {
+      // OEM may omit or restrict the general battery settings Activity.
+    }
+    try {
+      open.accept(
           new Intent(
-              Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
-              Uri.parse("package:" + ctx.getPackageName()));
-      startActivity(i);
-    } catch (Exception e) {
-      toast(com.deepseekharness.app.util.UiText.text("无法打开电池优化设置"));
+              Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+              Uri.parse("package:" + context.getPackageName())));
+    } catch (RuntimeException unavailable) {
+      failed.run();
     }
   }
 
@@ -548,7 +849,9 @@ public final class DeviceGrantsFragment extends Fragment {
     }
     status.setText(
         granted
-            ? com.deepseekharness.app.util.UiText.text("已开启：容器可读写手机存储任意文件（含 DSHA 目录外）")
+            ? com.deepseekharness.app.util.UiText.choose(
+                "已开启：可读写系统允许的共享存储；其他应用私有目录仍受系统限制",
+                "Allowed: shared storage permitted by Android; other apps' private directories remain restricted")
             : com.deepseekharness.app.util.UiText.text("未开启：仅能访问 App 私有目录；去系统设置开启后可访问全部文件"));
     try {
       status.setTextColor(

@@ -1,0 +1,16 @@
+{
+  "dshVersion": "0.2.1-rc.3",
+  "module": "@deepseek-ai/dsh-llm-pi-ai/lib/index.js",
+  "packageVersion": "0.2.1-rc.3",
+  "canonicalSourceSha256": "99b5c20830a52f69641df8a18a39206079b0c725201958cce2c4a934f1d4f7cd",
+  "patches": [
+    {
+      "before": "\t\t\tconst known = toolIds.get(event.contentIndex);",
+      "after": "\t\t\t// DSHA_TOOL_LATE_IDENTITY_RC2_V1: providers may populate identity after start.\n\t\t\tconst previous = toolIds.get(event.contentIndex);\n\t\t\tconst partial = event.partial?.content?.[event.contentIndex];\n\t\t\tconst current = partial?.type === \"toolCall\" ? partial : undefined;\n\t\t\tconst known = {\n\t\t\t\tid: typeof current?.id === \"string\" && current.id.trim() ? current.id : previous?.id ?? \"\",\n\t\t\t\tname: typeof current?.name === \"string\" && current.name.trim() ? current.name : previous?.name ?? \"\"\n\t\t\t};\n\t\t\ttoolIds.set(event.contentIndex, known);"
+    },
+    {
+      "before": "function assertSupportedHistory(messages) {\n\tfor (const message of messages) {",
+      "after": "function assertSupportedHistory(messages) {\n\t// DSHA_TOOL_HISTORY_READ_ONLY_RC2_V1: reject malformed legacy protocol before HTTP; never rewrite it.\n\tfor (const message of messages) {\n\t\tif (message.role === \"assistant\" && message.content.some(block => block.type === \"tool-call\" && !(typeof block.id === \"string\" && block.id.trim() !== \"\" && typeof block.name === \"string\" && block.name.trim() !== \"\")))\n\t\t\tthrow new LlmError(\"DSHA_INVALID_TOOL_HISTORY: incomplete tool identity; retained history is read only. Start a new session.\", \"INVALID_REQUEST\");\n\t\tif (message.role === \"tool\" && (typeof message.toolCallId !== \"string\" || !message.toolCallId.trim()))\n\t\t\tthrow new LlmError(\"DSHA_INVALID_TOOL_HISTORY: missing result call id; retained history is read only.\", \"INVALID_REQUEST\");"
+    }
+  ]
+}

@@ -13,6 +13,7 @@ import os
 import re
 import shlex
 import socket
+import stat
 import sys
 import threading
 import time
@@ -26,9 +27,50 @@ _policy_spec.loader.exec_module(policy)
 KEYDIR = '/root/.dsh/adbkeys'
 KEY = KEYDIR + '/adbkey'
 KEYPUB = KEY + '.pub'
+BRIDGE_TOKEN_FILE = '/root/.dsh/.bridge_token'
+BRIDGE_PORT_FILE = '/root/.dsh/.bridge_port'
+DEFAULT_BRIDGE_PORT = 3090
 TRANSPORT_TIMEOUT = 4.0
 CONNECT_TIMEOUT = 25.0
 COMMAND_TIMEOUT = 90.0
+
+
+def bridge_port():
+    """每次重读本安装端口；只接受 ASCII 十进制，失效时再读环境及旧默认值。"""
+    def regular(info):
+        return (stat.S_ISREG(info.st_mode) and 1 <= info.st_size <= 5
+                and (info.st_mode & 0o077) == 0)
+
+    def same(left, right):
+        return regular(right) and all(getattr(left, key) == getattr(right, key)
+            for key in ('st_dev', 'st_ino', 'st_mode', 'st_size', 'st_mtime_ns', 'st_ctime_ns'))
+
+    try:
+        before = os.lstat(BRIDGE_PORT_FILE)
+        if not regular(before):
+            raise OSError('invalid port file')
+        # NONBLOCK 防止 lstat 后被换成 FIFO 时阻塞；fstat 只接受同一普通文件。
+        descriptor = os.open(BRIDGE_PORT_FILE, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            opened = os.fstat(descriptor)
+            if not same(before, opened):
+                raise OSError('port file changed')
+            raw = os.read(descriptor, 6)
+            if (len(raw) != opened.st_size or not re.fullmatch(rb'[0-9]{1,5}', raw)
+                    or not same(opened, os.fstat(descriptor))
+                    or not same(opened, os.lstat(BRIDGE_PORT_FILE))):
+                raise OSError('invalid port file')
+            value = int(raw)
+            if 1 <= value <= 65535:
+                return value
+        finally:
+            os.close(descriptor)
+    except OSError:
+        pass
+    raw = os.environ.get('DSHA_BRIDGE_PORT', '')
+    if re.fullmatch(r'[0-9]{1,5}', raw) and 1 <= int(raw) <= 65535:
+        return int(raw)
+    return DEFAULT_BRIDGE_PORT
 
 class ConnectFail(Exception):
     """命令尚未发送，允许重新发现地址。"""
@@ -174,28 +216,57 @@ def parse_shell_result(raw, marker):
     return ShellResult(out[:match.start()], int(match.group(1)))
 
 
+def bridge_request(route, parameters, timeout):
+    """Dedicated VScreen transport adapter to the production170 authenticated local bridge."""
+    import urllib.request
+    import urllib.parse
+    with open('/root/.dsh/.bridge_token') as source:
+        token = source.read().strip()
+    if not token:
+        raise ValueError('CREDENTIAL_UNAVAILABLE')
+    request = urllib.request.Request(
+        'http://127.0.0.1:%d' % bridge_port() + route + '?' + urllib.parse.urlencode(parameters),
+        headers={'X-Token': token})
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    return opener.open(request, timeout=timeout)
+
+
+def vscreen_bridge_failure(stage, error):
+    """Fixed stage/reason only: exception messages may include credentials or private paths."""
+    import urllib.error
+    if isinstance(error, urllib.error.HTTPError): reason = 'HTTP_ERROR'
+    elif isinstance(error, (TimeoutError, socket.timeout)): reason = 'TIMEOUT'
+    elif isinstance(error, urllib.error.URLError):
+        reason = 'TIMEOUT' if isinstance(error.reason, (TimeoutError, socket.timeout)) else 'CONNECT_FAILED'
+    elif isinstance(error, (FileNotFoundError, PermissionError)): reason = 'CREDENTIAL_UNAVAILABLE'
+    elif isinstance(error, (ValueError, KeyError, TypeError)): reason = 'INVALID_RESPONSE'
+    else: reason = 'FAILED'
+    return 'ADB_' + stage + '_BRIDGE_' + reason
+
+
+def vscreen_start_rejection(value):
+    output = value.get('output', '') if isinstance(value, dict) else ''
+    if not isinstance(output, str): return 'ADB_START_BRIDGE_PLAN_REJECTED'
+    if '虚拟屏启动许可无效、过期或已使用' in output: return 'ADB_START_BRIDGE_TICKET_REJECTED'
+    if '无法核验 DSHA 安装包路径' in output: return 'ADB_START_BRIDGE_PATH_UNVERIFIED'
+    if 'ADB 通道不可用' in output: return 'ADB_START_BRIDGE_CHANNEL_UNAVAILABLE'
+    return 'ADB_START_BRIDGE_PLAN_REJECTED'
+
+
 def request_native_vscreen_commit(ticket):
     """Consume the one-use managed launch authority immediately before the ADB shell send."""
     import urllib.request
     import urllib.parse
     try:
-        with open('/root/.dsh/.bridge_token') as source:
-            token = source.read().strip()
-        if not token:
-            raise ValueError('missing token')
-        query = urllib.parse.urlencode({'ticket': ticket})
-        request = urllib.request.Request('http://127.0.0.1:3090/device/vscreen/commit?' + query,
-            headers={'X-Token': token})
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        with opener.open(request, timeout=10) as response:
+        with bridge_request('/device/vscreen/commit', {'ticket': ticket}, timeout=10) as response:
             value = json.loads(response.read(65536)).get('result')
         if value != 'VSCREEN_START_COMMITTED':
-            raise policy.Blocked('虚拟屏启动许可已撤销或已使用')
+            raise policy.Blocked('ADB_COMMIT_BRIDGE_AUTH_REJECTED' if value == '[UNAUTHORIZED]' else 'ADB_COMMIT_BRIDGE_TICKET_REJECTED')
     except policy.Blocked:
         raise
     except Exception as error:
         # A lost commit response may mean the one-use ticket was consumed. Never send or retry.
-        raise ExecutionUnknown('虚拟屏启动许可结果未知，命令未重放（' + type(error).__name__ + '）') from error
+        raise ExecutionUnknown(vscreen_bridge_failure('COMMIT', error)) from error
 
 
 def run_on_endpoint(device_cls, signer_cls, cmd, host, port, deadline, command_timeout=COMMAND_TIMEOUT):
@@ -302,7 +373,7 @@ def request_device_plan(cmd, use_su=False):
         if not token:
             raise ValueError('missing token')
         query = urllib.parse.urlencode({'cmd': cmd, 'su': '1' if use_su else '0'})
-        request = urllib.request.Request('http://127.0.0.1:3090/device/plan?' + query, headers={'X-Token': token})
+        request = urllib.request.Request('http://127.0.0.1:%d/device/plan?' % bridge_port() + query, headers={'X-Token': token})
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         with opener.open(request, timeout=75) as response:
             value = json.loads(response.read(1024 * 1024)).get('result')
@@ -324,27 +395,21 @@ def request_native_vscreen_start(cmd, ticket):
     import urllib.request
     import urllib.parse
     try:
-        with open('/root/.dsh/.bridge_token') as source:
-            token = source.read().strip()
-        if not token:
-            raise ValueError('missing token')
-        query = urllib.parse.urlencode({'cmd': cmd, 'ticket': ticket})
-        request = urllib.request.Request('http://127.0.0.1:3090/device/vscreen/start?' + query,
-            headers={'X-Token': token})
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        with opener.open(request, timeout=15) as response:
+        with bridge_request('/device/vscreen/start', {'cmd': cmd, 'ticket': ticket}, timeout=15) as response:
             envelope = json.loads(response.read(1024 * 1024))
+        if envelope.get('result') == '[UNAUTHORIZED]':
+            raise policy.Blocked('ADB_START_BRIDGE_AUTH_REJECTED')
         value = json.loads(envelope['result'])
         plan = value.get('plan')
         if (value.get('state') != 'adb' or not isinstance(plan, dict)
                 or plan.get('kind') != 'VIRTUAL_SCREEN' or plan.get('nativeTicket') != ticket
                 or plan.get('nativeAuthorization') != 'managed-vscreen-start'):
-            raise policy.Blocked('原生虚拟屏启动许可没有授权此操作')
+            raise policy.Blocked(vscreen_start_rejection(value))
         return plan
     except policy.Blocked:
         raise
     except Exception as error:
-        raise policy.Blocked('无法取得原生虚拟屏启动许可，命令未发送（' + type(error).__name__ + '）') from error
+        raise policy.Blocked(vscreen_bridge_failure('START', error)) from error
 
 
 def parse_args(args):
@@ -409,7 +474,7 @@ def request_native_execution(cmd, use_su=False, force_adb=False):
     except (OSError, ValueError) as error:
         raise policy.Blocked('设备桥未准备好，请打开 DSHA 后重试') from error
     query = urllib.parse.urlencode({'cmd': cmd, 'su': '1' if use_su else '0', 'adb': '1' if force_adb else '0'})
-    request = urllib.request.Request('http://127.0.0.1:3090/device/execute?' + query, headers={'X-Token': token})
+    request = urllib.request.Request('http://127.0.0.1:%d/device/execute?' % bridge_port() + query, headers={'X-Token': token})
     try:
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         with opener.open(request, timeout=155) as response:

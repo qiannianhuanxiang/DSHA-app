@@ -2,12 +2,15 @@
 """Narrow source gate for active managed bridge clients; behavior is tested separately."""
 from pathlib import Path
 import re
+import shutil
+import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 CLIENTS = (
     'dsh-device-shell-guide/lib/index.js', 'dsh-computer-use-android/lib/server.cjs',
     'dsh-task-notifier/lib/index.js', 'dsh-tool-vscreen/lib/server.cjs',
+    'dsh-status-overlay/lib/index.js',
 )
 
 
@@ -27,6 +30,17 @@ def main():
         failures.append('HttpShellService help: non-header credential guidance')
     if failures:
         raise RuntimeError('\n'.join(failures))
+    node = shutil.which('node')
+    if not node:
+        raise RuntimeError('NODE24_REQUIRED_FOR_REAL_HTTP_FIXTURE')
+    subprocess.run([node, str(ROOT / 'tools/fixtures/vscreen-production-http.mjs')],
+                   check=True, timeout=45)
+    subprocess.run([node, '--experimental-vm-modules', str(ROOT / 'tools/test-bridge-port.mjs')],
+                   check=True, timeout=45)
+    subprocess.run([sys.executable, '-B', str(ROOT / 'tools/test-bridge-port.py')],
+                   check=True, timeout=30)
+    subprocess.run([node, str(ROOT / 'tools/test-destructive-global-consent.mjs'), '--bridge-port-only'],
+                   check=True, timeout=30)
     print('PASS active managed client/help header transport source gate; LAN/browser first-visit credentials and the limited migration shim are separate protocols.')
     return 0
 

@@ -10,8 +10,155 @@ import re
 import tarfile
 import zipfile
 from test_runtime_fixture import runtime as verified_runtime
+from runtime_stable_patches import load_chains, apply as apply_stable_patches
 
 PREFIX = 'usr/local/lib/node_modules/@deepseek-ai/dsh'
+SIDEBAR_RIGHT = '@deepseek-ai/dsh-client-ui-sidebar-right/lib/client.js'
+SIDEBAR_RECIPE = 'sidebar-layout-recovery-patch.json'
+FRONTEND_ENTRY = '@deepseek-ai/dsh-web-frontend/dist/assets/index-BXV-oxvX.js'
+CONVERSATION = '@deepseek-ai/dsh-client-ui-conversation/lib/client.js'
+CONVERSATION_SPECIAL_INPUTS = ('lexical-claim-patch.json', 'conversation-materialized-patch.json')
+REVIEWED_OFFICIAL_CHAINS = {
+    SIDEBAR_RIGHT: (SIDEBAR_RECIPE,),
+    FRONTEND_ENTRY: ('tooltip-interaction-patch.json',),
+    CONVERSATION: ('composer-enter-patch.json', 'queue-dock-patch.json',
+                   'conversation-large-image-file-patch.json'),
+    '@deepseek-ai/dsh-web-search-deepseek/lib/index.js': ('deepseek-web-search-headers-patch.json',),
+    '@deepseek-ai/dsh-client-file-upload/lib/index.js': (
+        'file-upload-resolver-lifecycle-patch.json', 'file-upload-capacity-patch.json'),
+    '@deepseek-ai/dsh-client-file-upload/lib/client.js': ('file-upload-binary-client-patch.json',),
+    '@deepseek-ai/dsh-client-ui-deliverables/lib/client.js': ('file-deliverables-patch.json',),
+    '@deepseek-ai/dsh-client-ui-attachment/lib/client.js': ('file-image-actions-patch.json',),
+    '@deepseek-ai/dsh-plugin-manager/lib/index.js': (
+        'plugin-manager-policy-patch.json', 'plugin-pnpm-argv-patch.json',
+        'retired-market-catalog-patch.json', 'auto-review-native-disabled-patch.json',
+        'plugin-manager-entries-patch.json', 'plugin-bundle-proof-workers-patch.json'),
+}
+BUILD192_RECIPE_MODULES = {
+    'deepseek-web-search-headers-patch.json': '@deepseek-ai/dsh-web-search-deepseek/lib/index.js',
+    'file-upload-capacity-patch.json': '@deepseek-ai/dsh-client-file-upload/lib/index.js',
+    'file-upload-binary-client-patch.json': '@deepseek-ai/dsh-client-file-upload/lib/client.js',
+    'conversation-large-image-file-patch.json': CONVERSATION,
+    'file-deliverables-patch.json': '@deepseek-ai/dsh-client-ui-deliverables/lib/client.js',
+    'file-image-actions-patch.json': '@deepseek-ai/dsh-client-ui-attachment/lib/client.js',
+}
+BUILD193_RECIPE_MODULES = {
+    'plugin-pnpm-argv-patch.json': '@deepseek-ai/dsh-plugin-manager/lib/index.js',
+}
+
+
+def verify_build192_recipe_coverage(assets, version):
+    chains, _ = load_chains(assets, version)
+    selected = {name: module for module, chain in chains.items()
+                for name, _, _ in chain if name in BUILD192_RECIPE_MODULES}
+    require(selected == BUILD192_RECIPE_MODULES and len(set(selected.values())) == 6,
+            'BUILD192_SIX_RECIPE_MODULE_COVERAGE_CHANGED')
+    for recipe, module in selected.items():
+        require(recipe in REVIEWED_OFFICIAL_CHAINS.get(module, ()),
+                'BUILD192_MODULE_MUST_USE_COMPLETE_CHAIN_DIGEST:' + module)
+    selected193 = {name: module for module, chain in chains.items()
+                   for name, _, _ in chain if name in BUILD193_RECIPE_MODULES}
+    require(selected193 == BUILD193_RECIPE_MODULES,
+            'BUILD193_ARGV_RECIPE_MODULE_COVERAGE_CHANGED')
+    for recipe, module in selected193.items():
+        require(recipe in REVIEWED_OFFICIAL_CHAINS.get(module, ()),
+                'BUILD193_MODULE_MUST_USE_COMPLETE_CHAIN_DIGEST:' + module)
+
+
+def official_conversation_content(raw, assets, version):
+    """Independently verify the retired transform and the retained special patch."""
+    proof = json.loads((assets / CONVERSATION_SPECIAL_INPUTS[0]).read_text(encoding='utf-8'))
+    text = raw.decode('utf-8')
+    require(proof.get('version') == 1 and proof.get('module') == CONVERSATION
+            and proof.get('dshVersion') == version and proof.get('retired') is True
+            and proof.get('patches') == []
+            and proof.get('sourceSha256') == hashlib.sha256(raw).hexdigest(),
+            'OFFICIAL_COMMAND_CHIP_RETIREMENT_PROOF_CHANGED')
+    require(text.count('class CommandChipNode') == 1 and 'TOKEN_STYLE' not in text
+            and 'node.splitText(token.length)' not in text
+            and 'DSHA_CLAIM_DECOR_OVERFLOW_STYLE_V1' not in text,
+            'OFFICIAL_COMMAND_CHIP_ARCHITECTURE_CHANGED')
+    recipe = json.loads((assets / CONVERSATION_SPECIAL_INPUTS[1]).read_text(encoding='utf-8'))
+    require(recipe.get('module') == CONVERSATION and recipe.get('dshVersion') == version
+            and isinstance(recipe.get('patches'), list) and len(recipe['patches']) == 1,
+            'OFFICIAL_CONVERSATION_SPECIAL_RECIPE_CHANGED')
+    for patch in recipe['patches']:
+        require(set(patch) == {'before', 'after'} and text.count(patch['before']) == 1,
+                'OFFICIAL_CONVERSATION_SPECIAL_ANCHOR_CHANGED')
+        text = text.replace(patch['before'], patch['after'])
+    return text.encode('utf-8')
+
+
+def official_feature_digest(apk, assets, version, module, raw):
+    """Keep raw protection except for these explicitly reviewed complete chains."""
+    expected = raw
+    if module in REVIEWED_OFFICIAL_CHAINS:
+        chains, _ = load_chains(assets, version)
+        chain = chains.get(module, [])
+        require(tuple(row[0] for row in chain) == REVIEWED_OFFICIAL_CHAINS[module],
+                'OFFICIAL_FEATURE_PRODUCTION_CHAIN_CHANGED:' + module)
+        names = {'runtime-patches.json'}
+        for asset in REVIEWED_OFFICIAL_CHAINS[module] + (CONVERSATION_SPECIAL_INPUTS if module == CONVERSATION else ()):
+            recipe = json.loads((assets / asset).read_text(encoding='utf-8'))
+            names.add(asset)
+            names.update(patch['prependAsset'] for patch in recipe['patches'] if 'prependAsset' in patch)
+        for name in sorted(names):
+            require(apk.read('assets/' + name) == (assets / name).read_bytes(),
+                    'OFFICIAL_FEATURE_APK_RECIPE_CHANGED:' + name)
+        if module == CONVERSATION:
+            expected = official_conversation_content(raw, assets, version)
+        expected = apply_stable_patches(expected, chain)
+    return hashlib.sha256(expected).hexdigest()
+
+
+def verify_ubuntu_tools(apk, lock, lock_sha256, expected_archive_sha256):
+    layout = apk.read('assets/ubuntu-tools.layout').strip()
+    require(layout in (b'deb-install-v1', b'configured-overlay-v1'), 'Ubuntu 工具布局未知')
+    digest = hashlib.sha256()
+    with apk.open('assets/ubuntu-tools.bin') as stream:
+        for block in iter(lambda: stream.read(1048576), b''):
+            digest.update(block)
+    require(digest.hexdigest() == expected_archive_sha256, 'APK Ubuntu 工具归档与源不符')
+    if layout == b'configured-overlay-v1':
+        manifest = json.loads(apk.read('assets/ubuntu-tools.manifest.json'))
+        require(manifest.get('schema') == 1
+                and manifest.get('archiveSha256') == digest.hexdigest()
+                and manifest.get('packageLockSha256') == lock_sha256
+                and manifest.get('packages') == len(lock['packages']), 'Ubuntu 工具制备证明不符')
+        found = {}
+        with apk.open('assets/ubuntu-tools.bin') as stream, tarfile.open(fileobj=stream, mode='r|gz') as tools:
+            for member in tools:
+                name = member.name.removeprefix('./')
+                if name not in ('var/lib/dpkg/status', 'root/.dsha-ubuntu-tools-version'):
+                    continue
+                require(member.isfile() and name not in found and member.size <= 16 * 1024 * 1024,
+                        'Ubuntu 工具状态成员无效')
+                found[name] = tools.extractfile(member).read()
+        require(set(found) == {'var/lib/dpkg/status', 'root/.dsha-ubuntu-tools-version'}, 'Ubuntu 工具状态缺失')
+        require(found['root/.dsha-ubuntu-tools-version'].decode('ascii').strip() == lock_sha256,
+                'Ubuntu 工具版本标记不符')
+        status = found['var/lib/dpkg/status']
+        require(hashlib.sha256(status).hexdigest() == manifest.get('statusSha256'), 'Ubuntu dpkg 状态摘要不符')
+        packages = {}
+        for paragraph in status.decode('utf-8').split('\n\n'):
+            row = dict(line.split(': ', 1) for line in paragraph.splitlines()
+                       if ': ' in line and not line.startswith(' '))
+            if 'Package' in row:
+                require(row['Package'] not in packages, 'Ubuntu dpkg 包记录重复')
+                packages[row['Package']] = row
+        for row in lock['packages']:
+            actual = packages.get(row['Package'], {})
+            require(actual.get('Version') == row['Version'] and actual.get('Status') == 'install ok installed',
+                    'Ubuntu 工具未按锁完成配置：' + row['Package'])
+        return
+    packages = {Path(row['Filename']).name: row['SHA256'] for row in lock['packages']}
+    with apk.open('assets/ubuntu-tools.bin') as stream, tarfile.open(fileobj=stream, mode='r|gz') as tools:
+        for member in tools:
+            if member.name.endswith('.deb'):
+                require(member.isfile() and member.name in packages, '离线工具归档存在未知软件包')
+                require(hashlib.sha256(tools.extractfile(member).read()).hexdigest() == packages.pop(member.name),
+                        'Ubuntu deb 摘要不符')
+    require(not packages, 'APK 缺少锁定的 Ubuntu 软件包')
 
 
 def verify_builtin_plugins(apk, expected):
@@ -35,6 +182,7 @@ def verify(path):
     root = Path(__file__).resolve().parent.parent
     dsh_version = json.loads((root / 'tools/dsh-runtime/package.json').read_text(encoding='utf-8'))['dependencies']['@deepseek-ai/dsh']
     expected_runtime_sha256 = hashlib.sha256((root / 'app/src/main/assets/dsh-runtime.bin').read_bytes()).hexdigest()
+    verify_build192_recipe_coverage(root / 'app/src/main/assets', dsh_version)
     with zipfile.ZipFile(path) as apk:
         version = apk.read('assets/offline-rootfs.version').decode().strip()
         require((version == '10'), '环境版本错误')
@@ -67,12 +215,31 @@ def verify(path):
                 b'DSHA_DEEPSEEK_MESSAGES_PROJECTED_TOOL_CALL_V1',
                 b'if (block.type === "tool-call") return [dshaMessagesProjectedToolCall(block)];',
             ),
-            PREFIX + '/node_modules/@deepseek-ai/dsh-client-ui-conversation/lib/client.js': b'DSHA_CLAIM_DECOR_OVERFLOW_STYLE_V1',
             PREFIX + '/node_modules/dsha-client-combo-cache/index.js': b'createComboCache',
         }
-        # 新增预览、文件交付和反馈模块必须与锁定官方包逐字节一致，不能被旧适配覆盖。
-        untouched = {}
+        # Unpatched features keep exact locked raw bytes. The explicitly
+        # reviewed active chains run before archive construction; compare their
+        # complete bytes, retaining raw protection for every other module.
+        feature_digests = {}
         runtime = verified_runtime('raw',os.environ.get('DSHA_TEST_RUNTIME')) / 'node_modules'
+        # Same-version JavaScript can survive a generation bump. Bind every
+        # official DSH package manifest to the verified current npm tree too,
+        # so old package versions cannot hide behind retained patch markers.
+        npm_lock = json.loads((root / 'tools/dsh-runtime/package-lock.json').read_text(encoding='utf-8'))
+        official_package_digests = {}
+        for package_key, locked in npm_lock['packages'].items():
+            if not package_key.startswith('node_modules/@deepseek-ai/dsh') or len(package_key.split('/')) != 3:
+                continue
+            package_name = package_key.removeprefix('node_modules/')
+            source_manifest = runtime / package_name / 'package.json'
+            metadata = json.loads(source_manifest.read_text(encoding='utf-8'))
+            require(metadata.get('name') == package_name and metadata.get('version') == locked.get('version'),
+                    'OFFICIAL_PACKAGE_RAW_METADATA:' + package_name)
+            require(locked.get('version') == dsh_version, 'OFFICIAL_DSH_PACKAGE_GENERATION:' + package_name)
+            destination = PREFIX if package_name == '@deepseek-ai/dsh' else PREFIX + '/node_modules/' + package_name
+            official_package_digests[destination + '/package.json'] = hashlib.sha256(source_manifest.read_bytes()).hexdigest()
+        official_package_count = len(official_package_digests)
+        require(official_package_count >= 300, 'OFFICIAL_DSH_PACKAGE_COVERAGE')
         frontend = runtime / '@deepseek-ai/dsh-web-frontend/dist'
         entry_match = re.search(r'src="\./(assets/index-[^"?]+\.js)',
                                 (frontend / 'index.html').read_text(encoding='utf-8'))
@@ -80,14 +247,28 @@ def verify(path):
         frontend_entry = entry_match.group(1)
         for name, entry in [('dsh-client-ui-sidebar-documentpreview', 'lib/client.js'),
                             ('dsh-client-ui-deliverables', 'lib/client.js'),
+                            ('dsh-client-ui-attachment', 'lib/client.js'),
+                            ('dsh-client-file-upload', 'lib/client.js'),
+                            ('dsh-client-file-upload', 'lib/index.js'),
+                            ('dsh-web-search-deepseek', 'lib/index.js'),
+                            ('dsh-plugin-manager', 'lib/index.js'),
                             ('dsh-command-feedback', 'lib/index.js'),
                             ('dsh-client-ui-sidebar-right', 'lib/client.js'),
                             ('dsh-client-ui-sidebar-files', 'lib/client.js'),
                             ('dsh-client-ui-model-selection', 'lib/client.js'),
+                            ('dsh-client-ui-conversation', 'lib/client.js'),
                             ('dsh-web-frontend', 'dist/' + frontend_entry)]:
             source = runtime / '@deepseek-ai' / name / entry
-            untouched[PREFIX + '/node_modules/@deepseek-ai/' + name + '/' + entry] = hashlib.sha256(source.read_bytes()).hexdigest()
-        preserved_features = list(untouched)
+            module = '@deepseek-ai/' + name + '/' + entry
+            feature_digests[PREFIX + '/node_modules/' + module] = official_feature_digest(
+                apk, root / 'app/src/main/assets', dsh_version, module, source.read_bytes())
+        preserved_features = list(feature_digests)
+        require(set(BUILD192_RECIPE_MODULES.values()) <= {
+            name.removeprefix(PREFIX + '/node_modules/') for name in feature_digests
+        }, 'BUILD192_SIX_MODULE_ARCHIVE_DIGEST_COVERAGE_CHANGED')
+        require(set(BUILD193_RECIPE_MODULES.values()) <= {
+            name.removeprefix(PREFIX + '/node_modules/') for name in feature_digests
+        }, 'BUILD193_ARGV_MODULE_ARCHIVE_DIGEST_COVERAGE_CHANGED')
         aliases, expanded = 0, 0
         legacy_workflow_aliases = {
             PREFIX + '/node_modules/@deepseek-ai/dsh-workflow-worker-thread': 'dsh-workflow-ptc',
@@ -111,13 +292,28 @@ def verify(path):
                         seen.add(name)
                     if item.isfile():
                         expanded += item.size
+                    content = None
                     if name in wanted:
                         expected = wanted.pop(name)
                         content = archive.extractfile(item).read()
                         for marker in expected if isinstance(expected, tuple) else (expected,):
                             require((marker in content), name + ': ' + marker.decode(errors='replace'))
-                    if name in untouched:
-                        require((hashlib.sha256(archive.extractfile(item).read()).hexdigest() == untouched.pop(name)), name)
+                    if name in official_package_digests:
+                        require(item.isfile(), 'OFFICIAL_PACKAGE_MANIFEST_TYPE:' + name)
+                        if content is None:
+                            content = archive.extractfile(item).read()
+                        require(hashlib.sha256(content).hexdigest() == official_package_digests.pop(name),
+                                'OFFICIAL_PACKAGE_MANIFEST_DIGEST:' + name)
+                    if name in feature_digests:
+                        expected_digest = feature_digests.pop(name)
+                        if content is None:
+                            content = archive.extractfile(item).read()
+                        actual_digest = hashlib.sha256(content).hexdigest()
+                        module = name.removeprefix(PREFIX + '/node_modules/')
+                        classification = 'COMPLETE_CHAIN' if module in REVIEWED_OFFICIAL_CHAINS else 'RAW'
+                        require(actual_digest == expected_digest,
+                                'OFFICIAL_FEATURE_' + classification + '_DIGEST_MISMATCH:' + name
+                                + ':expected=' + expected_digest + ':actual=' + actual_digest)
                     if name in legacy_workflow_aliases:
                         require((item.issym()), '旧工作流包名必须是只读兼容链接：' + name)
                         require((item.linkname == legacy_workflow_aliases.pop(name)), name)
@@ -127,18 +323,15 @@ def verify(path):
                     require((not name.startswith(('root/dsha-device-shell-guide/', 'root/dsha-task-notifier/',
                                                 'root/dsha-status-overlay/', 'root/dsha-web-mobile/'))), '混入旧版内置插件')
         require((not wanted), str(wanted))
-        require((not untouched), '新版功能模块缺失：' + str(untouched))
+        require((not feature_digests), '新版功能模块缺失：' + str(feature_digests))
+        require(not official_package_digests, 'OFFICIAL_PACKAGE_MANIFEST_MISSING:' + str(sorted(official_package_digests)))
         require((not legacy_workflow_aliases), '缺少旧工作流包名兼容链接：' + str(legacy_workflow_aliases))
         require((aliases > 100), '缺少共享依赖别名')
         require((expanded == int(apk.read('assets/offline-rootfs.bytes'))), 'VERIFICATION_FAILED')
-        tools_lock = json.loads((Path(__file__).resolve().parent / 'ubuntu-tools/packages.lock.json').read_text())
-        packages = {Path(row['Filename']).name: row['SHA256'] for row in tools_lock['packages']}
-        with apk.open('assets/ubuntu-tools.bin') as stream, tarfile.open(fileobj=stream, mode='r|gz') as tools:
-            for member in tools:
-                if member.name.endswith('.deb'):
-                    require((member.isfile() and member.name in packages), '离线工具归档存在未知软件包')
-                    require((hashlib.sha256(tools.extractfile(member).read()).hexdigest() == packages.pop(member.name)), 'VERIFICATION_FAILED')
-        require((not packages), 'APK 缺少锁定的 Ubuntu 软件包')
+        tools_lock_file = root / 'tools/ubuntu-tools/packages.lock.json'
+        tools_lock = json.loads(tools_lock_file.read_text())
+        verify_ubuntu_tools(apk, tools_lock, hashlib.sha256(tools_lock_file.read_bytes()).hexdigest(),
+                           hashlib.sha256((root / 'app/src/main/assets/ubuntu-tools.bin').read_bytes()).hexdigest())
         require((b'dpkg --configure' in apk.read('assets/install-ubuntu-tools.sh')), 'VERIFICATION_FAILED')
         plugins = verify_builtin_plugins(
             apk, json.loads((root / 'app/src/main/assets/builtin-plugins.json').read_text(encoding='utf-8')))
@@ -160,10 +353,11 @@ def verify(path):
         require(('assets/builtin-plugins/dsh-web-mobile/lib/delete-session.js' in apk.namelist()), 'VERIFICATION_FAILED')
         require((b'NARB_DISABLE_NATIVE_CACHE' in apk.read('assets/dsha-runtime-env.sh')), 'VERIFICATION_FAILED')
         migration = apk.read('assets/rc1-migration.py')
-        require((b'RESTORED_SETTINGS_IMPORTED_FOR_RETRY' in migration), 'VERIFICATION_FAILED')
-        require((b'legacy-agent-presets' in migration), 'VERIFICATION_FAILED')
+        require(b'RESTORED_SETTINGS_IMPORTED_FOR_RETRY' in migration, 'Production settings migration is missing')
+        require(b'legacy-agent-presets' in migration, 'Legacy preset reader is missing')
+        require('assets/fresh-settings-policy-patch.json' not in apk.namelist(), 'Fresh-only settings policy must not enter production')
         return dict(apk=str(path), dsh=dsh_version, environment=version, plugins=plugins,
-                    preservedOfficialFeatures=preserved_features,
+                    preservedOfficialFeatures=preserved_features, officialDshPackageManifests=official_package_count,
                     sharedModuleAliases=aliases, expandedBytes=expanded, ubuntuToolPackages=len(tools_lock['packages']),
                     rootfsSha256=digest.hexdigest(), dshRuntimeSha256=runtime_sha256)
 

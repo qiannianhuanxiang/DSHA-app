@@ -26,7 +26,7 @@ class ReleaseEvidenceTest(unittest.TestCase):
         self.apks=[{'flavor':'standard','versionCode':147,'sha256':'a'*64},
                    {'flavor':'low','versionCode':147,'sha256':'b'*64}]
         checks=['web-ready','existing-data-preserved','plugins-visible','recovery-ready','no-crash']
-        self.proof={'schema':1,'package':'com.dsh.client','certificateSha256':gate.CERT,
+        self.proof={'schema':1,'package':'dsh.android.client','certificateSha256':gate.CERT,
                     'versionCode':147,'serial':'test-device','firstInstallTimePreserved':True,
                     'nonDestructive':True,'flavors':{
                         'standard':{'sha256':'a'*64,'result':'PASS','checks':checks},
@@ -34,6 +34,13 @@ class ReleaseEvidenceTest(unittest.TestCase):
 
     def test_current_two_flavor_evidence_is_accepted(self):
         gate.validate_device_evidence(self.proof,self.apks)
+
+    def test_standard_evidence_is_bound_to_the_selected_apk(self):
+        proof=copy.deepcopy(self.proof)
+        proof['flavors'].pop('low')
+        gate.validate_device_evidence(proof,self.apks[:1])
+        proof['flavors']['standard']['sha256']='c'*64
+        with self.assertRaises(ValueError):gate.validate_device_evidence(proof,self.apks[:1])
 
     def test_mismatched_or_missing_apk_is_rejected(self):
         for flavor in ('standard','low'):

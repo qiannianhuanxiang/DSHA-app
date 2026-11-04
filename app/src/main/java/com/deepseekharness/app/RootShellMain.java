@@ -42,6 +42,7 @@ public final class RootShellMain {
         shell =
             new ShellService(); // Historical ordinary reads do not require a guessed app identity.
       if (operation.equals("virtual-screen-start")) output = shell.execVirtualScreen(command);
+      else if (operation.equals("unrestricted")) output = shell.execUnrestricted(command);
       else if (operation.isEmpty())
         output = smsUser < 0 ? shell.exec(command) : shell.execAuthorizedSms(command, smsUser);
       else throw new SecurityException("未知 Root 操作");

@@ -4,8 +4,8 @@
 
 ## DSH 与 npm 依赖
 
-- 当前 `@deepseek-ai/dsh` 为 **0.2.0-rc.2**。完整版本、来源与 integrity 见 `tools/dsh-runtime/package-lock.json`；各包原许可文件保留在运行归档中。
-- Office 入口 `@deepseek-ai/libreoffice-kit` **0.1.2**、WASM **0.1.1**：保留上游 NOTICE、licenses、sources 与预构建说明。DSHA 的字体路径适配见 `assets/office-fonts-patch.json`。
+- 当前 `@deepseek-ai/dsh` 为 **0.2.1-rc.3**。完整版本、来源与 integrity 见 `tools/dsh-runtime/package-lock.json`；各包原许可文件保留在运行归档中。
+- Office 入口 `@deepseek-ai/libreoffice-kit` **0.1.5**、WASM **0.1.5**：保留上游 NOTICE、licenses、sources 与预构建说明。DSHA 的字体路径适配见 `assets/office-fonts-patch.json`。
 - pnpm **10.34.5**（MIT）和 certifi **2026.7.22**（MPL-2.0）：版本和原包摘要由 `tools/runtime-tools.lock.json` 固定。CA 未关闭 TLS 核验。
 - 许可目录和实际依赖需结合归档成员检查；锁文件内其他平台可选依赖不等于已进入 arm64 APK。
 - core-js **3.50.0**（MIT），原包来源 `https://registry.npmjs.org/core-js/-/core-js-3.50.0.tgz`，全文为 `assets/web-integration/core-js.LICENSE`。
@@ -15,14 +15,14 @@
 
 ## 移动插件
 
-- `dsh-web-mobile` **3.0.3**，MIT，来自 `https://github.com/mexiaosqwq/dsh-web-mobile`，固定提交 `a094288883b343e848d7f9cf302d73ad8ed4794b`。
-- 上游 client 摘要 `88bfc7b315249cbe8a4fcbcaf41854cce3a8480a5b98a7bdb063ba78b1ae9a19`；本地差异由 `tools/apply-mobile-client-patches.mjs` 与 `tools/mobile-server/` 管理。不是未修改的上游产物。
+- `dsh-web-mobile` **3.2.2**，MIT，来自 `https://github.com/mexiaosqwq/dsh-web-mobile`，固定提交 `4c798ecc554009e401dc1f166b73c314cdf5273f`。
+- 上游 client 摘要 `17e95442d6f8c170d6b42a0281538af7ddba4cbeb05975d405236de6ee470dd6`；本地差异由 `tools/apply-mobile-client-patches.mjs` 与 `tools/mobile-server/` 管理。不是未修改的上游产物。
 - 许可全文：`app/src/main/assets/builtin-plugins/dsh-web-mobile/LICENSE`。当前产物摘要：
 
-- `client.js`：`3e5568a4c41730df9b3a01261b7781678cb74866e1c96f45164204e5e9a6c5e7`
-- `index.js`：`1ab8021dec1453ed7e48a43269efcc46598a27005de2d51b6644579544c90445`
-- `compress.js`：`f5902f4f036d0f7a67d2ce6e4c71b01a98227cb4365abde7a4bf8f1bf5e6de0c`
-- `delete-session.js`：`f4f8caf0fd54ab49ad264908296b12d9d46868542b082136927afe3c21d32b19`
+- `client.js`：`665699341525871da011ee98b18891bb35c69e7173235be7bdaa0e29e9c50194`
+- `index.js`：`dcddbce73ec1052b7c02e961bac1389d227f72f1ef49f62a2f16f692e8f930ab`
+- `compress.js`：`a7f4f7f89cc99490978ed4cbfd16ab86f71e1f7fbf2241c00c2811e7cde9aeab`
+- `delete-session.js`：`cb119ff9703716fe1111ee5a2f211d14886ab1d2310601c5787efc8d91219d51`
 
 ## 终端与会话启动器
 
@@ -40,6 +40,7 @@
 
 - Shizuku API/provider：Standard 13.1.5、Low 12.2.0（MIT），公开来源 RikkaApps/Shizuku-API；许可全文随 `assets/licenses/Shizuku-MIT.txt` 保存，原始 Git blob 及 SHA 记录在 build154 审计。
 - Termux terminal-view / terminal-emulator 0.118.0 的 Apache-2.0 例外及全文随 `assets/licenses/Termux-terminal-Apache-2.0.txt` 保存；不将其声明扩展到整个上游工程。
+- terminal-emulator Java 源码固定于 Termux v0.118.0 提交 `6e2689f55295fa444be8ac8592c527c2c5ef3253` 并内置；DSHA 对 `TerminalSession.java`、`TerminalEmulator.java`、`TerminalSessionClient.java` 的修改及自有队列说明见 `app/src/main/java/com/termux/terminal/NOTICE.dsha.md`。terminal-view 保持 0.118.0 上游依赖，JNI 使用项目内已有构建。
 - Gson 2.13.1：Apache-2.0；Bouncy Castle bcprov-jdk15to18 1.85.2：上游许可全文随 `assets/licenses` 保存。版本与 JAR 摘要见 `tools/backup-dependencies.lock.json`，构建执行 `verifyBackupDependencies`。
 - SnakeYAML 2.4（Apache-2.0）：固定官方 Maven Central JAR/POM 与 `snakeyaml-2.4` 源码标签，使用宿主 data-only SafeConstructor 投影凭据中的本机连接字段。许可原文为 `assets/licenses/snakeyaml-LICENSE.txt`，Java 8 类文件及 Android FIELD 路径见 `docs/audits/build156/snakeyaml-official-artifacts.json`；不由静态兼容声明推导旧设备验收完成。
 - Low 的 GeckoView 143.0.20251003115653 为 MPL-2.0，来自 Mozilla Maven；保留相应声明。兼容版最低 API 23，不表示所有旧设备已经验收。
@@ -53,7 +54,6 @@
 - `com.android.tools:desugar_jdk_libs:2.0.4`
 - `com.google.android.material:material:1.11.0`
 - `com.google.code.gson:gson:2.13.1`
-- `com.termux.termux-app:terminal-view:0.118.0`
 - `dev.rikka.shizuku:api:12.2.0`
 - `dev.rikka.shizuku:api:13.1.5`
 - `dev.rikka.shizuku:provider:12.2.0`
@@ -62,6 +62,14 @@
 - `org.mozilla.geckoview:geckoview-arm64-v8a:143.0.20251003115653`
 - `org.yaml:snakeyaml:2.4`
 
+## bxroot 与链接运行库
+
+- bxroot 源码许可为 MIT，版权为 2026 bxroot contributors；上游为 https://github.com/qiannianhuanxiang/bxroot，记录的基线提交为 `a2794b35ca4d1a9f01c97c4a79183a9bc30c9f33`。本包使用带本地修改的源码，版本标记为 `0.2.4-dsha-termux-compat-20261103`；不能将它表述为未修改的上游提交。三库实际字节、类型与构建优化记录在 `tools/bxroot-native.lock.json`。
+- `libbxroot.so` 是静态 ET_EXEC launcher；`libbxroot-ulx.so` 是 static-PIE ET_DYN loader。两者静态链接 glibc，bxroot 的 MIT 不能覆盖整个二进制的运行库许可。`libbxroot-runtime.so` 是 glibc ET_DYN，依赖 `libc.so.6` 与 `ld-linux-aarch64.so.1`；其配方同时注明 `libc_nonshared.a` 辅助链接。缺少历史 link map，尚未完整枚举 archive 成员。
+- glibc 主体许可为 LGPL-2.1-or-later，部分代码另有版权/许可，随包保留 `assets/licenses/bxroot-glibc-COPYRIGHT.txt` 及 `LGPL-2.1.txt`。
+- GCC 运行库中适用组件采用 GPL-3.0-or-later WITH GCC-exception-3.1；例外须满足原文条件，不能外推到未核实的全部嵌入代码。保留 `assets/licenses/bxroot-GCC-COPYRIGHT.txt`、`GCC-RUNTIME-LIBRARY-EXCEPTION-3.1.txt` 和既有 `GPL-3.0.txt`。
+- bxroot MIT 原文为 `assets/licenses/bxroot-MIT.txt`。以上新增文本的实际本机来源、原文截取边界与 SHA-256 在 `tools/bxroot-license-sources.json`；原文/摘要校验不等于对应源码、静态再链接义务或完整分发合规已验。
+
 ## 实际入库 JNI 成员与来源边界
 
 | 资产 | 许可声明 | 来源 / 可核验范围 |
@@ -69,6 +77,13 @@
 | `app/src/low/jniLibs/arm64-v8a/libproot_legacy.so` | GPL-2.0 | tools/build-low-proot.py, proot v5.1.107.92 source archive and local changes |
 | `app/src/low/jniLibs/arm64-v8a/libprootloader_legacy.so` | GPL-2.0 | tools/build-low-proot.py, proot v5.1.107.92 source archive |
 | `app/src/main/jniLibs/arm64-v8a/libandroidshmem.so` | unknown origin/license for this original binary | Retained original; no current exact-source reproduction receipt |
+| `app/src/main/jniLibs/arm64-v8a/libbxroot-enter.so` | bxroot MIT | same modified bxroot source and native lock; src/host/bx-enter.c + session.c + enter-libc.c, freestanding Android PIE (PT_INTERP /system/bin/linker64, no NEEDED); native re-entry |
+| `app/src/main/jniLibs/arm64-v8a/libbxroot-host.so` | bxroot MIT | same modified bxroot source and native lock; src/host/bx-host.c, freestanding static ET_EXEC without libc; Android native-call entry |
+| `app/src/main/jniLibs/arm64-v8a/libbxroot-runtime.so` | bxroot MIT; glibc dependency and nonshared helper linkage; GCC runtime terms as applicable | same modified bxroot source and native lock; glibc ET_DYN preload runtime, O2; see bxroot section |
+| `app/src/main/jniLibs/arm64-v8a/libbxroot-ulx.so` | bxroot MIT; statically linked glibc (LGPL-2.1-or-later with component notices); GCC runtime terms as applicable | same modified bxroot source and native lock; ET_DYN static-PIE loader, O2; see bxroot section |
+| `app/src/main/jniLibs/arm64-v8a/libbxroot.so` | bxroot MIT; statically linked glibc (LGPL-2.1-or-later with component notices); GCC runtime terms as applicable | https://github.com/qiannianhuanxiang/bxroot; modified source; tools/bxroot-native.lock.json; ET_EXEC launcher, O2; see bxroot section |
+| `app/src/main/jniLibs/arm64-v8a/libdsha-proroot-compat.so` | MIT | tools/proroot-compat/stack-sysconf.c; independent GNU AArch64 sysconf proxy, locked NDK build; original proroot binaries unchanged |
+| `app/src/main/jniLibs/arm64-v8a/libdsha-proroot-linker.so` | MIT | tools/proroot-compat/linker-entry.c; freestanding GNU AArch64 direct-preload adapter; original proroot binaries unchanged |
 | `app/src/main/jniLibs/arm64-v8a/libdsha-session.so` | MIT | tools/native-session/session-launcher.c; locked API 23 build |
 | `app/src/main/jniLibs/arm64-v8a/libproot.so` | GPL-2.0 | Termux proot; original Standard binary exact revision remains unverified |
 | `app/src/main/jniLibs/arm64-v8a/libprootloader.so` | GPL-2.0 | Termux proot; original Standard binary exact revision remains unverified |
@@ -87,12 +102,12 @@
 
 | 锁内路径 | 版本 | 上游声明 | 原包来源 |
 |---|---|---|---|
-| `node_modules/@deepseek-ai/libreoffice-kit` | 0.1.2 | MPL-2.0 | https://registry.npmjs.org/@deepseek-ai/libreoffice-kit/-/libreoffice-kit-0.1.2.tgz |
-| `node_modules/@deepseek-ai/libreoffice-kit-darwin-arm64` | 0.1.1 | MPL-2.0 | https://registry.npmjs.org/@deepseek-ai/libreoffice-kit-darwin-arm64/-/libreoffice-kit-darwin-arm64-0.1.1.tgz |
-| `node_modules/@deepseek-ai/libreoffice-kit-darwin-x64` | 0.1.1 | MPL-2.0 | https://registry.npmjs.org/@deepseek-ai/libreoffice-kit-darwin-x64/-/libreoffice-kit-darwin-x64-0.1.1.tgz |
-| `node_modules/@deepseek-ai/libreoffice-kit-wasm` | 0.1.1 | MPL-2.0 | https://registry.npmjs.org/@deepseek-ai/libreoffice-kit-wasm/-/libreoffice-kit-wasm-0.1.1.tgz |
-| `node_modules/@deepseek-ai/libreoffice-kit-win32-arm64` | 0.1.2 | MPL-2.0 | https://registry.npmjs.org/@deepseek-ai/libreoffice-kit-win32-arm64/-/libreoffice-kit-win32-arm64-0.1.2.tgz |
-| `node_modules/@deepseek-ai/libreoffice-kit-win32-x64` | 0.1.2 | MPL-2.0 | https://registry.npmjs.org/@deepseek-ai/libreoffice-kit-win32-x64/-/libreoffice-kit-win32-x64-0.1.2.tgz |
+| `node_modules/@deepseek-ai/libreoffice-kit` | 0.1.5 | MPL-2.0 | https://registry.npmjs.org/@deepseek-ai/libreoffice-kit/-/libreoffice-kit-0.1.5.tgz |
+| `node_modules/@deepseek-ai/libreoffice-kit-darwin-arm64` | 0.1.5 | MPL-2.0 | https://registry.npmjs.org/@deepseek-ai/libreoffice-kit-darwin-arm64/-/libreoffice-kit-darwin-arm64-0.1.5.tgz |
+| `node_modules/@deepseek-ai/libreoffice-kit-darwin-x64` | 0.1.5 | MPL-2.0 | https://registry.npmjs.org/@deepseek-ai/libreoffice-kit-darwin-x64/-/libreoffice-kit-darwin-x64-0.1.5.tgz |
+| `node_modules/@deepseek-ai/libreoffice-kit-wasm` | 0.1.5 | MPL-2.0 | https://registry.npmjs.org/@deepseek-ai/libreoffice-kit-wasm/-/libreoffice-kit-wasm-0.1.5.tgz |
+| `node_modules/@deepseek-ai/libreoffice-kit-win32-arm64` | 0.1.5 | MPL-2.0 | https://registry.npmjs.org/@deepseek-ai/libreoffice-kit-win32-arm64/-/libreoffice-kit-win32-arm64-0.1.5.tgz |
+| `node_modules/@deepseek-ai/libreoffice-kit-win32-x64` | 0.1.5 | MPL-2.0 | https://registry.npmjs.org/@deepseek-ai/libreoffice-kit-win32-x64/-/libreoffice-kit-win32-x64-0.1.5.tgz |
 | `node_modules/@img/sharp-libvips-darwin-arm64` | 1.3.4 | LGPL-3.0-or-later | https://registry.npmjs.org/@img/sharp-libvips-darwin-arm64/-/sharp-libvips-darwin-arm64-1.3.4.tgz |
 | `node_modules/@img/sharp-libvips-darwin-x64` | 1.3.4 | LGPL-3.0-or-later | https://registry.npmjs.org/@img/sharp-libvips-darwin-x64/-/sharp-libvips-darwin-x64-1.3.4.tgz |
 | `node_modules/@img/sharp-libvips-linux-arm` | 1.3.4 | LGPL-3.0-or-later | https://registry.npmjs.org/@img/sharp-libvips-linux-arm/-/sharp-libvips-linux-arm-1.3.4.tgz |

@@ -56,6 +56,10 @@ public final class WebDownloads {
           } else {
             dismiss();
             if (state.phase().equals("ready") && !model.pickerOpen) {
+              if (model.isShareRequested()) {
+                model.prepareShare();
+                return;
+              }
               model.pickerOpen = true;
               Intent intent =
                   new Intent(Intent.ACTION_CREATE_DOCUMENT)
@@ -73,7 +77,37 @@ public final class WebDownloads {
                         Toast.LENGTH_LONG)
                     .show();
               }
-            } else if (state.phase().equals("done") || state.phase().equals("error")) {
+            } else if (state.phase().equals("share-ready")) {
+              android.net.Uri uri = model.takeShareUri();
+              if (uri == null) return;
+              if (!activity
+                      .getLifecycle()
+                      .getCurrentState()
+                      .isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)
+                  || activity.isDestroyed()) {
+                model.shareOpened(false);
+                return;
+              }
+              try {
+                activity.startActivity(
+                    NativeFileShare.chooser(
+                        uri,
+                        model.fileName(),
+                        model.shareMime(),
+                        com.deepseekharness.app.util.UiText.text("分享")));
+                model.shareOpened(true);
+              } catch (RuntimeException error) {
+                model.shareOpened(false);
+                Toast.makeText(
+                        activity,
+                        com.deepseekharness.app.util.UiText.choose(
+                            "无法打开分享面板", "Unable to open the share picker"),
+                        Toast.LENGTH_LONG)
+                    .show();
+              }
+            } else if (state.phase().equals("done")
+                || state.phase().equals("error")
+                || state.phase().equals("queued")) {
               if (state.phase().equals("error") && model.canRetrySave()) {
                 dialog =
                     new com.deepseekharness.app.ui.DshaDialogBuilder(activity)

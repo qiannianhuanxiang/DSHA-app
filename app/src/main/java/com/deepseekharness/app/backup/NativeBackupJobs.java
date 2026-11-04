@@ -321,6 +321,11 @@ public final class NativeBackupJobs {
     }
   }
 
+  /** 界面的迟到取消只影响点击时的作业，不撤销后来启动的另一作业。 */
+  synchronized void cancelIfCurrent(String id) {
+    if (id != null && !id.isEmpty() && state.busy && state.id.equals(id)) cancel();
+  }
+
   /**
    * 格式化专用：先封住所有手动/自动入口，再取消现有任务，并等待 worker 的
    * 整个 finally 完成。state.busy 会在 finally 之前变为 false，不能单独作为空闲证据。
@@ -520,6 +525,20 @@ public final class NativeBackupJobs {
         true);
   }
 
+  /** API23-28 的一键目标：仅在本次受保护作业内创建新文件。 */
+  public synchronized boolean exportToDirectory(NativeDataLocations.Selection selection, Uri tree) {
+    if (tree == null) return false;
+    return exportInternal(
+        selection,
+        null,
+        null,
+        com.deepseekharness.app.util.BackupFileNames.portableName(),
+        false,
+        false,
+        false,
+        tree);
+  }
+
   public synchronized boolean exportAutomatic(char[] password) {
     try {
       if (!AutomaticBackups.enabled(context) || !AutomaticBackups.idle(context)) return false;
@@ -538,6 +557,19 @@ public final class NativeBackupJobs {
       boolean rescue,
       boolean automatic,
       boolean downloads) {
+    return exportInternal(
+        selection, suppliedPassword, destination, expectedName, rescue, automatic, downloads, null);
+  }
+
+  private synchronized boolean exportInternal(
+      NativeDataLocations.Selection selection,
+      char[] suppliedPassword,
+      Uri destination,
+      String expectedName,
+      boolean rescue,
+      boolean automatic,
+      boolean downloads,
+      Uri directory) {
     if (selection == null
         || state.busy
         || workers.isClosed()
@@ -586,6 +618,7 @@ public final class NativeBackupJobs {
         () -> {
           File plain = new File(owned, "snapshot.dshdata"),
               encrypted = new File(owned, "portable.dshbak");
+          BackupDirectoryTarget selectedTarget = null;
           try {
             if (activeProtection != null) activeProtection.await();
             NativeDataLocations locations = new NativeDataLocations(context);
@@ -726,13 +759,39 @@ public final class NativeBackupJobs {
                 BackupJson.number(summary, "entries"),
                 fs.stat(encrypted).size,
                 true);
+            if (directory != null)
+              selectedTarget =
+                  BackupDirectoryTarget.create(
+                      context.getContentResolver(), directory, expectedName, cancellation);
+            Uri actualDestination = selectedTarget == null ? destination : selectedTarget.uri;
             DocumentCopy exported =
                 automatic
                     ? null
                     : downloads
                         ? copyToDownloads(encrypted, artifactHash, expectedName, cancellation)
                         : copyToDocument(
-                            encrypted, artifactHash, destination, expectedName, cancellation);
+                            encrypted, artifactHash, actualDestination, expectedName, cancellation);
+            if (selectedTarget != null) {
+              selectedTarget.retain();
+              fs.atomic(
+                  owned,
+                  "exported.json",
+                  BackupJson.write(
+                      Map.of(
+                          "version",
+                          1L,
+                          "operation",
+                          owned.getName(),
+                          "uri",
+                          actualDestination.toString(),
+                          "name",
+                          expectedName,
+                          "sha256",
+                          exported.sha256,
+                          "readback",
+                          exported.readback),
+                      16384));
+            }
             boolean readback = automatic || exported.readback;
             String quality = BackupJson.string(summary, "integrity");
             String result =
@@ -761,13 +820,13 @@ public final class NativeBackupJobs {
                           "payloadSha256",
                           artifactHash,
                           "uri",
-                          (downloads ? exported.uri : destination).toString(),
+                          (downloads ? exported.uri : actualDestination).toString(),
                           "name",
                           downloads ? exported.name : expectedName),
                       16384));
               new ConfigStore(context)
                   .recordVerifiedNativeBackup(
-                      (downloads ? exported.uri : destination).toString(),
+                      (downloads ? exported.uri : actualDestination).toString(),
                       downloads ? exported.name : expectedName,
                       frozen.scope);
             }
@@ -819,6 +878,7 @@ public final class NativeBackupJobs {
               main.post(() -> changes.setValue(state()));
             }
           } finally {
+            if (selectedTarget != null) selectedTarget.discard();
             if (password != null) Arrays.fill(password, '\0');
             try {
               if (!fs.stat(plain).type.equals("MISSING")) fs.delete(plain);

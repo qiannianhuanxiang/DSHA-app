@@ -10,8 +10,9 @@ import com.deepseekharness.app.BuildConfig;
 import com.deepseekharness.app.core.UpdateRepository.State;
 import com.deepseekharness.app.core.UpdateRepository.Stage;
 import com.deepseekharness.app.util.ResumableDownload;
+import com.deepseekharness.app.util.UpdateFailures;
+import com.deepseekharness.app.util.UpdateManifest;
 import com.deepseekharness.app.util.UpdatePolicy;
-import org.json.JSONArray;
 import org.json.JSONObject;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -41,7 +42,9 @@ public final class UpdateEngine {
     return instance;
   }
 
-  public static final String FEED = com.deepseekharness.app.util.UpdateLocations.FEED;
+  public static final String FEED = com.deepseekharness.app.util.AppIdentity.isExperimental()
+      ? com.deepseekharness.app.util.AppIdentity.defaultUpdateFeed()
+      : com.deepseekharness.app.util.UpdateLocations.FEED;
   private static final ExecutorService IO = Executors.newSingleThreadExecutor();
   private final AtomicBoolean busy = new AtomicBoolean();
   private volatile boolean cancelled;
@@ -180,12 +183,16 @@ public final class UpdateEngine {
             result =
                 cancelled
                     ? com.deepseekharness.app.util.UiText.text("已取消，可重新检查或下载")
-                    : com.deepseekharness.app.util.UiText.format(
-                        currentCandidate()
-                            ? "检查%s失败：%s；保留此通道上次结果，可重试检查或继续使用已下载包"
-                            : "检查%s失败：%s；可重新检查",
-                        channelName(channel),
-                        com.deepseekharness.app.util.SensitiveData.redact(error.getMessage()));
+                    : String.format(
+                            java.util.Locale.ROOT,
+                            com.deepseekharness.app.util.UiText.choose(
+                                "暂时无法确认更新：%s", "Unable to confirm updates: %s"),
+                            UpdateFailures.message(error))
+                        + (currentCandidate()
+                            ? com.deepseekharness.app.util.UiText.choose(
+                                "\n此通道上次结果已保留，可重试检查或使用已下载包",
+                                "\nThe previous result for this channel is kept. Retry the check or use the downloaded package.")
+                            : "");
           }
           connection = null;
           DiagnosticLog.record(context, "APP_UPDATE", result);
@@ -202,7 +209,7 @@ public final class UpdateEngine {
 
   /** 每个应用进程最多自动检查一次；旋转、主题重建及从 Web 返回不重复请求。 */
   public void checkOnStartup(boolean enabled) {
-    if (!enabled || startupChecked) return;
+    if (!enabled || startupChecked || FEED.isEmpty()) return;
     startupChecked = true;
     if (busy.get() || shouldResume()) return;
     check(true);
@@ -231,49 +238,38 @@ public final class UpdateEngine {
                 ? com.deepseekharness.app.util.UiText.text("预览版")
                 : com.deepseekharness.app.util.UiText.text("稳定版")),
         () -> {
+          if (FEED.isEmpty())
+            throw new IOException(
+                com.deepseekharness.app.util.UiText.choose(
+                    "此独立 bxroot 构建未配置更新源，请使用同签名的二改版安装包更新",
+                    "No update source for this bxroot fork. Use a fork APK signed with the same key."));
           HttpURLConnection conn = transport.open(FEED, 0);
           connection = conn;
           byte[] raw;
-          try (InputStream input = conn.getInputStream();
-              ByteArrayOutputStream bytes = new ByteArrayOutputStream()) {
-            byte[] buffer = new byte[8192];
-            int n;
-            while ((n = input.read(buffer)) != -1) {
-              ensureActive();
-              if (bytes.size() + n > 1024 * 1024)
-                throw new IOException(com.deepseekharness.app.util.UiText.text("更新清单过大"));
-              bytes.write(buffer, 0, n);
+          try {
+            int status = conn.getResponseCode();
+            if (status == 404 || status == 410) raw = null;
+            else {
+              if (status != 200) throw new UpdateFailures.HttpFailure(status);
+              try (InputStream input = conn.getInputStream();
+                  ByteArrayOutputStream bytes = new ByteArrayOutputStream()) {
+                byte[] buffer = new byte[8192];
+                int n;
+                while ((n = input.read(buffer)) != -1) {
+                  ensureActive();
+                  if (bytes.size() + n > 1024 * 1024) throw new UpdateFailures.InvalidManifest();
+                  bytes.write(buffer, 0, n);
+                }
+                raw = bytes.toByteArray();
+              }
             }
-            raw = bytes.toByteArray();
           } finally {
             conn.disconnect();
           }
-          JSONObject feed =
-              new JSONObject(new String(raw, java.nio.charset.StandardCharsets.UTF_8));
-          if (feed.optInt("schemaVersion") != 1)
-            throw new IOException(com.deepseekharness.app.util.UiText.text("更新清单版本不兼容"));
-          JSONArray releases = feed.getJSONArray("releases");
-          ArrayList<UpdatePolicy.Release> options = new ArrayList<>();
-          for (int i = 0; i < releases.length(); i++) {
-            JSONObject release = releases.getJSONObject(i);
-            JSONArray artifacts = release.getJSONArray("artifacts");
-            for (int j = 0; j < artifacts.length(); j++) {
-              JSONObject apk = artifacts.getJSONObject(j);
-              options.add(
-                  new UpdatePolicy.Release(
-                      release.getInt("versionCode"),
-                      release.getString("version"),
-                      release.getString("channel"),
-                      apk.getString("flavor"),
-                      apk.getInt("minSdk"),
-                      apk.getString("abi"),
-                      apk.getString("url"),
-                      apk.getString("sha256"),
-                      apk.getLong("bytes"),
-                      release.optString("notes"),
-                      release.optString("pageUrl", null)));
-            }
-          }
+          java.util.List<UpdatePolicy.Release> options =
+              raw == null
+                  ? java.util.Collections.emptyList()
+                  : UpdateManifest.parse(raw, context.getPackageName(), installedSignerHashes());
           ensureActive();
           UpdatePolicy.Release selected =
               UpdatePolicy.select(
@@ -294,8 +290,7 @@ public final class UpdateEngine {
           startupNotice = startup && selected != null;
           return candidate != null
               ? com.deepseekharness.app.util.UiText.format("发现新版本 %s", candidate.version)
-              : com.deepseekharness.app.util.UiText.format(
-                  "此通道暂无适合当前设备的更新；当前版本码 %s", BuildConfig.VERSION_CODE);
+              : com.deepseekharness.app.util.UiText.choose("暂无可用更新", "No updates available");
         });
   }
 
@@ -420,8 +415,7 @@ public final class UpdateEngine {
                 cancelled
                     ? stopReason
                     : com.deepseekharness.app.util.UiText.format(
-                        "下载暂停：%s；可继续下载",
-                        com.deepseekharness.app.util.SensitiveData.redact(error.getMessage()));
+                        "下载暂停：%s；可继续下载", UpdateFailures.message(error));
             completedPhase =
                 cancelled
                     ? (com.deepseekharness.app.util.UiText.text("已取消下载，进度已保留").equals(stopReason)
@@ -671,6 +665,19 @@ public final class UpdateEngine {
     if (Build.VERSION.SDK_INT >= 28)
       return info.signingInfo == null ? new Signature[0] : info.signingInfo.getApkContentsSigners();
     return info.signatures == null ? new Signature[0] : info.signatures;
+  }
+
+  private java.util.List<String> installedSignerHashes() throws Exception {
+    int flags =
+        Build.VERSION.SDK_INT >= 28
+            ? PackageManager.GET_SIGNING_CERTIFICATES
+            : PackageManager.GET_SIGNATURES;
+    PackageInfo installed =
+        context.getPackageManager().getPackageInfo(context.getPackageName(), flags);
+    ArrayList<String> hashes = new ArrayList<>();
+    for (Signature signature : signatures(installed))
+      hashes.add(hex(MessageDigest.getInstance("SHA-256").digest(signature.toByteArray())));
+    return hashes;
   }
 
   private HttpURLConnection connect(String target) throws Exception {

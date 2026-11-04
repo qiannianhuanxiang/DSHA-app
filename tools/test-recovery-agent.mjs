@@ -5,9 +5,9 @@ import { pathToFileURL } from 'node:url';
 import path from 'node:path';
 
 const root = path.resolve(import.meta.dirname, '..');
-const expectedDsh = JSON.parse(await readFile(path.join(root, 'tools/dsh-runtime/package.json'), 'utf8')).dependencies['@deepseek-ai/dsh'];
+const expectedDsh = JSON.parse(await readFile(path.join(root, 'tools/recovery-runtime/lock.json'), 'utf8')).dshVersion;
 const fixture = JSON.parse(await readFile(path.join(root, 'app/build/test-runtimes/current.json'), 'utf8'));
-const runtime = process.env.DSHA_TEST_RUNTIME || fixture.raw;
+const runtime = process.env.DSHA_TEST_RECOVERY_RUNTIME || process.env.DSHA_TEST_RUNTIME || fixture.raw;
 const requireRuntime = createRequire(path.join(runtime, 'package.json'));
 const load = name => import(pathToFileURL(requireRuntime.resolve(name)).href);
 const { Context } = await load('@deepseek-ai/cordis');
@@ -47,6 +47,11 @@ assert.deepEqual(requests[2], {
   route: 'propose',
   args: { action: 'repair-cli-dependencies', targetId: 'runtime', sourceSha256: 'x', dataGeneration: 'x' },
 });
+assert.equal((await invoke('dsha_targets')).isError, false);
+assert.deepEqual(requests[3], { route: 'targets', args: {} });
+assert.equal((await invoke('dsha_result', { planId: 'fixture-candidate' })).isError, false);
+assert.deepEqual(requests[4], { route: 'result', args: { planId: 'fixture-candidate' } });
+assert.equal(requests.length, 5, 'all five recovery tools must dispatch only their fixed broker routes');
 
 let dangerousExecutions = 0;
 const unsafe = ctx.plugin({ inject: ['tools'], apply(scope) {
@@ -84,7 +89,7 @@ assert.deepEqual(warnings, [], 'fixed profile must not contain silently skipped 
 const active = rows.filter(row => row.disabled !== true);
 assert.deepEqual(active.filter(row => row.name === '@deepseek-ai/dsh-agent-preset').map(row => row.config.id), ['dsha-emergency']);
 for (const row of rows.filter(row => row.id.startsWith('tool-'))) assert.equal(row.disabled, true, `host tool ${row.id} enabled`);
-for (const id of ['plugin-manager', 'terminal-controller', 'workspace-files', 'cordis-host-runner', 'ptc-runtime']) {
+for (const id of ['plugin-manager', 'ui-plugin-manager', 'entry-customization', 'terminal-controller', 'workspace-files', 'cordis-host-runner', 'ptc-runtime']) {
   assert.equal(rows.find(row => row.id === id)?.disabled, true, `${id} must be disabled`);
 }
 const preset = active.find(row => row.id === 'preset-dsha-emergency');
@@ -106,4 +111,4 @@ const disposeWatch=recovery.watchRecoveryStop('current-instance',async()=>{stops
 await tick();assert.equal(stops,0);
 stopValue='current-instance\n';await tick();await tick();assert.equal(stops,1);
 disposeWatch();await tick();assert.equal(stops,1);assert.equal(cancels,1);
-console.log(`PASS: rc2 actual ToolRuntime dispatch/global+scoped guard/disposal, profile composition (${warnings.length} patch warnings), broker routing/auth and owned stop sentinel`);
+console.log(`PASS: ${actual.version} actual ToolRuntime dispatch/global+scoped guard/disposal, profile composition (${warnings.length} patch warnings), broker routing/auth and owned stop sentinel`);

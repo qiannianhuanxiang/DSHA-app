@@ -1,4 +1,4 @@
-// Exercise the locked rc2 frontend's exported Tooltip with its actual React.
+// Exercise the locked rc3 frontend's exported Tooltip with its actual React.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
@@ -99,5 +99,5 @@ try {
   await page.waitForTimeout(150);
   assert.equal(await page.locator('[role="tooltip"]').count(),0,'unmount must cancel a pending tooltip');
   assert.deepEqual(fixture.errors, []);
-  console.log('PASS: actual rc2 Tooltip touch/click, hover, keyboard, disable, pinned outside-close/Escape, scroll/blur/visibility, non-swallowing Escape and delayed leave/unmount.');
+  console.log('PASS: actual rc3 Tooltip touch/click, hover, keyboard, disable, pinned outside-close/Escape, scroll/blur/visibility, non-swallowing Escape and delayed leave/unmount.');
 } finally { await fixture.close(); }

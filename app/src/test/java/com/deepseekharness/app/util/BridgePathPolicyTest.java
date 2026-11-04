@@ -1,6 +1,13 @@
 package com.deepseekharness.app.util;
 
+import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import org.junit.Assume;
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.TemporaryFolder;
 import static org.junit.Assert.*;
 
 /**
@@ -11,6 +18,7 @@ import static org.junit.Assert.*;
  * 这些断言就是钉住「这条路必须被堵死」。
  */
 public class BridgePathPolicyTest {
+  @Rule public TemporaryFolder temp = new TemporaryFolder();
 
   /** 真机实测能泄露凭据的路径，全部必须拒绝。 */
   @Test
@@ -109,6 +117,119 @@ public class BridgePathPolicyTest {
     assertTrue(BridgePathPolicy.deniedGuestView("/data/data/com.dsh.client/x", null));
     assertTrue(BridgePathPolicy.deniedGuestView(null, null));
     assertTrue(BridgePathPolicy.deniedGuestView("", null));
+  }
+
+  @Test
+  public void readFileAllowsHostAndGuestWorkPathsButKeepsCredentialBoundary() {
+    String rootfs = "/data/user/0/dsh.android.client/files/linux/ubuntu";
+    String shared = "/storage/emulated/0";
+    String media = "/data/media/0";
+    for (String path :
+        new String[] {
+          rootfs + "/root/work/report.md",
+          rootfs + "/root/nonexistent-xyz-123",
+          rootfs + "/etc/hosts"
+        }) {
+      assertFalse(path, BridgePathPolicy.deniedReadCanonical(path, rootfs, shared, media, false));
+    }
+    for (String path :
+        new String[] {shared, shared + "/Download/report.txt", media + "/Download/x"})
+      assertFalse(path, BridgePathPolicy.deniedReadCanonical(path, rootfs, shared, media, true));
+    for (String path :
+        new String[] {
+          rootfs,
+          rootfs + "/root/.dsh/.bridge_token",
+          rootfs + "/root/.ssh/id_rsa",
+          "/root/.dsh/.bridge_token",
+          "/data/user/0/dsh.android.client/shared_prefs/x.xml",
+          "/data/data/dsh.android.client/files/secret",
+          "/data/user_de/0/dsh.android.client/x",
+          "/etc/hosts",
+          shared + "/Download/report.txt"
+        }) {
+      assertTrue(path, BridgePathPolicy.deniedReadCanonical(path, rootfs, shared, media, false));
+    }
+    for (String path :
+        new String[] {
+          rootfs + "/root/report",
+          "/data/user_de/0/app/x",
+          "/storage/emulated/10/Download/x",
+          "/data/media/10/Download/x",
+          shared + "/Download/.env"
+        })
+      assertTrue(path, BridgePathPolicy.deniedReadCanonical(path, rootfs, shared, media, true));
+    assertTrue(BridgePathPolicy.deniedReadCanonical(null, rootfs, shared, media, false));
+    assertTrue(
+        BridgePathPolicy.deniedReadCanonical(rootfs + "/root/x", null, shared, media, false));
+    assertTrue(BridgePathPolicy.deniedReadCanonical(shared + "/x", rootfs, null, null, true));
+    assertTrue(BridgePathPolicy.deniedReadRaw("/data/user_de/0/dsh.android.client/x"));
+    assertTrue(BridgePathPolicy.deniedReadRaw("/data/user/0/dsh.android.client/x"));
+    assertTrue(BridgePathPolicy.deniedReadRaw("/data/data/dsh.android.client/x"));
+  }
+
+  @Test
+  public void readFileMapsGuestPathsWithoutHostFallback() throws Exception {
+    File rootfs = temp.newFolder("rootfs");
+    String guestPath = "/root/dsha-test-" + java.util.UUID.randomUUID();
+    File guestDirectory = new File(rootfs, guestPath.substring(1));
+    assertTrue(guestDirectory.mkdirs());
+    File guestFile = new File(guestDirectory, "report.txt");
+    assertTrue(guestFile.createNewFile());
+    assertEquals(guestDirectory, BridgePathPolicy.resolveReadFile(guestPath, rootfs));
+    assertEquals(guestFile, BridgePathPolicy.resolveReadFile(guestPath + "/report.txt", rootfs));
+    assertEquals(
+        new File(guestDirectory, "missing"),
+        BridgePathPolicy.resolveReadFile(guestPath + "/missing", rootfs));
+    assertEquals(new File(rootfs, "etc"), BridgePathPolicy.resolveReadFile("/etc", rootfs));
+    assertEquals(
+        new File("/sdcard/Download"), BridgePathPolicy.resolveReadFile("/sdcard/Download", rootfs));
+    assertNull(BridgePathPolicy.resolveReadFile(guestPath, null));
+    assertTrue(BridgePathPolicy.readSharedDomain("/storage/emulated/0/Download"));
+    assertTrue(BridgePathPolicy.readSharedDomain("/data/media/0/Download"));
+    assertFalse(BridgePathPolicy.readSharedDomain("/storage/emulatedfake/0"));
+    assertFalse(BridgePathPolicy.readSharedDomain("/sdcard/../root/report"));
+  }
+
+  @Test
+  public void readFileRejectsSensitiveDirectoriesInAnyHome() {
+    String root = "/data/user/0/dsh.android.client/files/linux/ubuntu";
+    for (String guest :
+        new String[] {
+          "/home/alice/.ssh/id_rsa", "/home/alice/.aws/credentials",
+          "/home/alice/.android/debug.keystore", "/home/alice/.kube/config",
+          "/home/alice/.dsh/session", "/home/alice/.config/gcloud/configurations/x"
+        }) {
+      assertTrue(guest, BridgePathPolicy.deniedReadRaw(guest));
+      assertTrue(
+          guest, BridgePathPolicy.deniedReadCanonical(root + guest, root, null, null, false));
+    }
+    assertFalse(BridgePathPolicy.deniedReadRaw("/home/alice/.ssh-backup/report.txt"));
+    assertFalse(BridgePathPolicy.deniedReadRaw("/home/alice/.config/gcloud-backup/report.txt"));
+  }
+
+  @Test
+  public void readFileCanonicalChecksBlockRealSymlinkTargets() throws Exception {
+    Path root = temp.newFolder("guest-root").toPath();
+    Path home = Files.createDirectories(root.resolve("home/alice"));
+    Path sensitive = Files.createDirectories(home.resolve(".ssh")).resolve("id_rsa");
+    Files.write(sensitive, new byte[] {1});
+    Path external = temp.newFile("outside").toPath();
+    Path secretLink = home.resolve("report");
+    Path escapeLink = home.resolve("outside-link");
+    try {
+      Files.createSymbolicLink(secretLink, sensitive);
+      Files.createSymbolicLink(escapeLink, external);
+    } catch (IOException | UnsupportedOperationException | SecurityException e) {
+      Assume.assumeNoException("Symbolic links unavailable on this host", e);
+    }
+    String rootCanonical = root.toFile().getCanonicalPath();
+    assertFalse(BridgePathPolicy.deniedReadRaw("/home/alice/report"));
+    assertTrue(
+        BridgePathPolicy.deniedReadCanonical(
+            secretLink.toFile().getCanonicalPath(), rootCanonical, null, null, false));
+    assertTrue(
+        BridgePathPolicy.deniedReadCanonical(
+            escapeLink.toFile().getCanonicalPath(), rootCanonical, null, null, false));
   }
 
   /** normalize 的边界。 */

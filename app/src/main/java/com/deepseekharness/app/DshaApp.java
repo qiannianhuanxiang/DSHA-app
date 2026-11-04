@@ -5,14 +5,32 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.os.Build;
 
-/**
- * 应用入口：全局初始化。
- * 骨架阶段只建一个任务通知渠道；完整版另有配对/确认渠道（见原 Constants.CHANNEL_*）。
- */
+/** 应用入口：全局初始化。 骨架阶段只建一个任务通知渠道；完整版另有配对/确认渠道（见原 Constants.CHANNEL_*）。 */
 public class DshaApp extends Application
     implements com.deepseekharness.app.runtime.RuntimeHostPorts.Owner,
         com.deepseekharness.app.data.PortableSettings.Owner,
         com.deepseekharness.app.backup.MaintenanceUiPorts {
+
+  private final com.deepseekharness.app.capabilities.CapabilityBroker screenCapabilityBroker =
+      new com.deepseekharness.app.capabilities.CapabilityBroker(
+          android.os.SystemClock::elapsedRealtime);
+  private volatile String screenInstallationId;
+
+  public com.deepseekharness.app.capabilities.CapabilityBroker capabilityBroker() {
+    return screenCapabilityBroker;
+  }
+
+  /** Local installation authority is never taken from an imported data archive. */
+  public synchronized String installationId() {
+    if (screenInstallationId == null) {
+      try {
+        screenInstallationId = com.deepseekharness.app.core.InstallationIdentity.loadOrCreate(this);
+      } catch (java.io.IOException unavailable) {
+        throw new IllegalStateException("INSTALLATION_IDENTITY_UNAVAILABLE", unavailable);
+      }
+    }
+    return screenInstallationId;
+  }
 
   private final com.deepseekharness.app.runtime.RuntimeHostPorts runtimeHostPorts =
       new com.deepseekharness.app.runtime.RuntimeHostPorts();
@@ -33,12 +51,7 @@ public class DshaApp extends Application
 
   @Override
   public android.content.Intent runtimePage() {
-    return new android.content.Intent(this, com.deepseekharness.app.ui.MainActivity.class)
-        .addFlags(
-            android.content.Intent.FLAG_ACTIVITY_NEW_TASK
-                | android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP
-                | android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP)
-        .putExtra("open_launch", true);
+    return com.deepseekharness.app.ui.MainActivity.homeIntent(this);
   }
 
   private final com.deepseekharness.app.util.ApplicationServiceSlot<HarnessService> harnessService =
@@ -73,6 +86,10 @@ public class DshaApp extends Application
           com.deepseekharness.app.core.PluginRepository>
       pluginOwner = new com.deepseekharness.app.util.ApplicationOwner<>();
   private final com.deepseekharness.app.util.ApplicationOwner<
+          com.deepseekharness.app.plugins.PluginManagementEngine>
+      pluginManagementOwner = new com.deepseekharness.app.util.ApplicationOwner<>();
+  private volatile com.deepseekharness.app.plugins.PluginManagementEngine initializedPluginEngine;
+  private final com.deepseekharness.app.util.ApplicationOwner<
           com.deepseekharness.app.vscreen.VirtualScreenManager>
       virtualScreenOwner = new com.deepseekharness.app.util.ApplicationOwner<>();
   private final com.deepseekharness.app.util.ApplicationOwner<
@@ -89,6 +106,16 @@ public class DshaApp extends Application
 
   public com.deepseekharness.app.core.PluginRepository pluginRepository() {
     return pluginOwner.get(() -> new com.deepseekharness.app.core.PluginRepository(this));
+  }
+
+  public com.deepseekharness.app.plugins.PluginManagementEngine pluginManagementEngine() {
+    return pluginManagementOwner.get(
+        () -> {
+          var engine =
+              new com.deepseekharness.app.plugins.PluginManagementEngine(this, pluginRepository());
+          initializedPluginEngine = engine;
+          return engine;
+        });
   }
 
   public com.deepseekharness.app.vscreen.VirtualScreenManager virtualScreenManager() {
@@ -138,6 +165,12 @@ public class DshaApp extends Application
           }
 
           @Override
+          public boolean preferFastColdMode() {
+            return Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                && new com.deepseekharness.app.core.ConfigStore(runtimeApp).preferFastColdMode();
+          }
+
+          @Override
           public void stage(String value) {
             com.deepseekharness.app.core.ColdInstallDiagnostics.stage(runtimeApp, value);
           }
@@ -177,31 +210,30 @@ public class DshaApp extends Application
           }
 
           @Override
+          public String coldRuntimeIdentity(java.io.File rootfs) throws java.io.IOException {
+            return checkedColdRuntimeIdentity(runtimeApp, rootfs);
+          }
+
+          @Override
           public com.deepseekharness.app.runtime.RuntimeHostPorts.Settings successfulColdRuntime(
               java.io.File rootfs,
               com.deepseekharness.app.util.ColdInstallPlan.Mode mode,
               String packageSlotSha)
               throws java.io.IOException {
+            String rootIdentity = checkedColdRuntimeIdentity(runtimeApp, rootfs);
             java.io.File current =
                 new java.io.File(runtimeApp.getFilesDir(), "linux/ubuntu").getCanonicalFile();
-            if (!current.equals(rootfs.getCanonicalFile()))
-              throw new java.io.IOException("COLD_RUNTIME_ROOT_CHANGED");
             var fs = new com.deepseekharness.app.backup.AndroidBackupFileSystem();
-            var node = fs.stat(current);
             java.io.File toolsVersion =
                 new java.io.File(current, "root/.dsha-ubuntu-tools-version");
-            if (!node.type.equals("DIRECTORY")
-                || !fs.stat(toolsVersion).type.equals("FILE")
+            if (!fs.stat(toolsVersion).type.equals("FILE")
                 || !new String(
                         fs.small(toolsVersion, 128), java.nio.charset.StandardCharsets.US_ASCII)
                     .matches("[a-f0-9]{64}\\n"))
               throw new java.io.IOException("COLD_RUNTIME_POSTCHECK_MISSING");
             var selected =
                 new com.deepseekharness.app.core.ConfigStore(runtimeApp)
-                    .recordSuccessfulColdRuntime(
-                        mode,
-                        current.getPath() + ":" + node.device + ":" + node.key,
-                        packageSlotSha);
+                    .recordSuccessfulColdRuntime(mode, rootIdentity, packageSlotSha);
             com.deepseekharness.app.core.ColdInstallDiagnostics.record(
                 runtimeApp,
                 "RUNTIME_SELECTED",
@@ -219,6 +251,7 @@ public class DshaApp extends Application
     com.deepseekharness.app.core.DiagnosticLog.installCrashHandler(this);
     registerActivityLifecycleCallbacks(new com.deepseekharness.app.ui.ModernAndroidUi());
     registerActivityLifecycleCallbacks(new ForegroundActivity());
+    registerActivityLifecycleCallbacks(new PluginLifecycle());
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
       NotificationManager nm = getSystemService(NotificationManager.class);
       nm.createNotificationChannel(
@@ -227,5 +260,77 @@ public class DshaApp extends Application
               com.deepseekharness.app.util.UiText.text("任务通知"),
               NotificationManager.IMPORTANCE_LOW));
     }
+  }
+
+  /** 插件初始化排在 resumed 后的主消息队列空闲处；离开可见前台立即退休观察。 */
+  private final class PluginLifecycle implements ActivityLifecycleCallbacks {
+    private final java.util.Set<android.app.Activity> started =
+        java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+    private final java.util.Set<android.app.Activity> resumed =
+        java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+    private android.os.MessageQueue.IdleHandler pendingIdle;
+
+    @Override
+    public void onActivityCreated(android.app.Activity activity, android.os.Bundle state) {}
+
+    @Override
+    public void onActivityStarted(android.app.Activity activity) {
+      started.add(activity);
+    }
+
+    @Override
+    public void onActivityResumed(android.app.Activity activity) {
+      resumed.add(activity);
+      if (pendingIdle != null) return;
+      pendingIdle =
+          () -> {
+            pendingIdle = null;
+            if (!resumed.isEmpty()) pluginManagementEngine().onForeground();
+            return false;
+          };
+      android.os.Looper.myQueue().addIdleHandler(pendingIdle);
+    }
+
+    @Override
+    public void onActivityPaused(android.app.Activity activity) {
+      resumed.remove(activity);
+    }
+
+    @Override
+    public void onActivityStopped(android.app.Activity activity) {
+      resumed.remove(activity);
+      boolean wasStarted = started.remove(activity);
+      if (!started.isEmpty()) return;
+      if (pendingIdle != null) {
+        android.os.Looper.myQueue().removeIdleHandler(pendingIdle);
+        pendingIdle = null;
+      }
+      // 不为关闭观察而创建服务；旋转后仍复用同一个应用级 Engine 和目录快照。
+      var engine = initializedPluginEngine;
+      if (engine != null) {
+        engine.onBackground();
+        if (wasStarted && !activity.isChangingConfigurations()) engine.invalidateInstalledState();
+      }
+    }
+
+    @Override
+    public void onActivitySaveInstanceState(
+        android.app.Activity activity, android.os.Bundle state) {}
+
+    @Override
+    public void onActivityDestroyed(android.app.Activity activity) {
+      onActivityStopped(activity);
+    }
+  }
+
+  private static String checkedColdRuntimeIdentity(android.content.Context app, java.io.File rootfs)
+      throws java.io.IOException {
+    var fs = new com.deepseekharness.app.backup.AndroidBackupFileSystem();
+    java.io.File current = fs.child(app.getFilesDir().getCanonicalFile(), "linux/ubuntu");
+    var node = fs.stat(current);
+    if (!node.type.equals("DIRECTORY")
+        || !current.getCanonicalFile().equals(rootfs.getCanonicalFile()))
+      throw new java.io.IOException("COLD_RUNTIME_ROOT_CHANGED");
+    return current.getCanonicalPath() + ":" + node.device + ":" + node.key;
   }
 }

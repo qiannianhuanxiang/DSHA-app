@@ -1,0 +1,62 @@
+plugins { id 'java' }
+def coreVersion = providers.gradleProperty('coreVersion').getOrElse('1.9.0')
+layout.buildDirectory = file("build/core-${coreVersion}")
+repositories { mavenCentral(); google() }
+configurations { androidAars }
+dependencyLocking { lockAllConfigurations(); lockFile = file("gradle-core-${coreVersion}.lockfile") }
+dependencies {
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'androidx.collection:collection:1.2.0'
+    testImplementation 'androidx.annotation:annotation-jvm:1.9.1'
+    testImplementation('org.robolectric:robolectric:4.15.1') {
+        exclude group: 'androidx.test', module: 'monitor'
+        exclude group: 'androidx.test.espresso', module: 'espresso-idling-resource'
+    }
+    testImplementation 'org.robolectric:android-all:14-robolectric-10818077'
+    androidAars "androidx.core:core:${coreVersion}@aar"
+    androidAars 'androidx.test:monitor:1.8.0@aar'
+    androidAars 'androidx.test.espresso:espresso-idling-resource:3.6.1@aar'
+}
+def aarJars = tasks.register('extractAndroidAars') {
+    inputs.files(configurations.androidAars)
+    outputs.dir(layout.buildDirectory.dir('aar-jars'))
+    outputs.dir(layout.buildDirectory.dir('generated-resource-java'))
+    doLast {
+        configurations.androidAars.files.each { archive ->
+            copy { from zipTree(archive); include 'classes.jar'; into layout.buildDirectory.dir('aar-jars/' + archive.name) }
+            if (archive.name == "core-${coreVersion}.aar") {
+                // A Java-only fixture must supply AGP's generated R class.
+                // IDs come from the real AAR symbol table; Insets classes are untouched.
+                def symbols = zipTree(archive).matching { include 'R.txt' }.singleFile.readLines()
+                def groups = [:].withDefault { [] }
+                int index = 0
+                symbols.each { line ->
+                    def parts = line.split(' ', 4)
+                    if (parts[0] == 'int') groups[parts[1]] << "public static final int ${parts[2]} = ${parts[3] == '0x0' ? 0x7f010000 + index++ : parts[3]};"
+                    else groups[parts[1]] << "public static final int[] ${parts[2]} = ${parts[3]};"
+                }
+                def target = layout.buildDirectory.file('generated-resource-java/androidx/core/R.java').get().asFile
+                target.parentFile.mkdirs()
+                target.text = 'package androidx.core; public final class R {\n' + groups.collect { name, fields ->
+                    'public static final class ' + name + '{\n' + fields.join('\n') + '\n}'
+                }.join('\n') + '\n}'
+            }
+        }
+    }
+}
+sourceSets.test.java.srcDir(layout.buildDirectory.dir('generated-resource-java'))
+tasks.named('compileTestJava') {
+    dependsOn aarJars
+    sourceCompatibility = '17'; targetCompatibility = '17'; options.encoding = 'UTF-8'
+    source files('../../../app/src/main/java/com/deepseekharness/app/ui/ModernAndroidUi.java',
+        '../../../app/src/main/java/com/deepseekharness/app/ui/WebFullscreenUi.java',
+        '../../../app/src/main/java/com/deepseekharness/app/ui/PictureInPictureFrame.java',
+        '../../../app/src/main/java/com/deepseekharness/app/util/PictureInPicturePolicy.java')
+    classpath += files(provider { fileTree(layout.buildDirectory.dir('aar-jars')) { include '**/*.jar' } })
+}
+tasks.named('test') {
+    dependsOn aarJars
+    classpath += files(provider { fileTree(layout.buildDirectory.dir('aar-jars')) { include '**/*.jar' } })
+    systemProperty 'robolectric.dependency.repo.url', 'https://repo.maven.apache.org/maven2'
+    maxHeapSize = '1g'; testLogging { events 'passed', 'failed'; exceptionFormat = 'full' }
+}

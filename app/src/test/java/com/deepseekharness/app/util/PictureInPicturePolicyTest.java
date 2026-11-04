@@ -5,6 +5,15 @@ import static org.junit.Assert.*;
 
 public class PictureInPicturePolicyTest {
   @Test
+  public void sameSizeSubtreeRequestsDispatchAndIdleGeometryStaysCached() {
+    assertTrue(PictureInPicturePolicy.mustDispatchChildLayout(1440, 3016, -1, -1, false));
+    assertTrue(PictureInPicturePolicy.mustDispatchChildLayout(1440, 3016, 1080, 3016, false));
+    assertTrue(PictureInPicturePolicy.mustDispatchChildLayout(1440, 3016, 1440, 2048, false));
+    assertTrue(PictureInPicturePolicy.mustDispatchChildLayout(1440, 3016, 1440, 3016, true));
+    assertFalse(PictureInPicturePolicy.mustDispatchChildLayout(1440, 3016, 1440, 3016, false));
+  }
+
+  @Test
   public void actualWindowSizeReflowsHeightAndPreservesLogicalWidth() {
     assertArrayEquals(
         new int[] {1080, 1440},
@@ -20,14 +29,19 @@ public class PictureInPicturePolicyTest {
   }
 
   @Test
-  public void onlySystemAllowedReadyContentMayEnter() {
-    assertTrue(PictureInPicturePolicy.canEnter(true, true, true, false, false));
-    for (int denied = 0; denied < 5; denied++) {
-      boolean[] conditions = {true, true, true, false, false};
+  public void onlyExplicitlyEnabledSystemAllowedReadyContentMayEnter() {
+    assertTrue(PictureInPicturePolicy.canEnter(true, true, true, true, false, false));
+    for (int denied = 0; denied < 6; denied++) {
+      boolean[] conditions = {true, true, true, true, false, false};
       conditions[denied] = !conditions[denied];
       assertFalse(
           PictureInPicturePolicy.canEnter(
-              conditions[0], conditions[1], conditions[2], conditions[3], conditions[4]));
+              conditions[0],
+              conditions[1],
+              conditions[2],
+              conditions[3],
+              conditions[4],
+              conditions[5]));
     }
   }
 

@@ -34,6 +34,10 @@ final class StartupEnvironmentActions implements StartupPipeline.Actions {
     return state.lifecycle.isCurrent(generation);
   }
 
+  public void yieldPluginQuery() {
+    com.deepseekharness.app.plugins.PluginManagementEngine.get(owner.context()).yieldToUserAction();
+  }
+
   public void stage(String value) {
     stage.accept(value);
   }
@@ -42,7 +46,13 @@ final class StartupEnvironmentActions implements StartupPipeline.Actions {
     status.accept(value);
   }
 
-  public void releasePrior() {
+  public void releasePrior() throws IOException {
+    if (!current()) return;
+    if (Thread.currentThread().isInterrupted())
+      throw new java.io.InterruptedIOException("STARTUP_STOP_INTERRUPTED");
+    String pending = processes.stopOwnedLaunchers();
+    if (!pending.isEmpty()) throw new IOException(pending);
+    if (!processes.confirmStopped()) throw new IOException("STARTUP_PRIOR_EXIT_UNCONFIRMED");
     processes.releasePrior(generation);
   }
 

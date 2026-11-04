@@ -95,4 +95,20 @@ public class RuntimeLauncherTest {
         IllegalArgumentException.class,
         () -> LaunchSpec.runtime(fake()).environment(Map.of("KEY", "bad\0value")).build());
   }
+
+  @Test
+  public void callerCannotSupplyAnApkPackageProofWhenThereIsNoApkOwner() throws Exception {
+    File root = temporary.newFolder();
+    var launcher = new RuntimeLauncher(null, root, root, root, root, ports);
+    LaunchSpec spec =
+        LaunchSpec.runtime(fake())
+            .pipedInput(true)
+            .environment(Map.of("DSHA_MANAGED_PACKAGE_PROOFS_SHA256", "a".repeat(64)))
+            .build();
+    assertFalse(
+        launcher
+            .builder("true", spec)
+            .environment()
+            .containsKey("DSHA_MANAGED_PACKAGE_PROOFS_SHA256"));
+  }
 }

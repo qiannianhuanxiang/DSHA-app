@@ -294,7 +294,7 @@ public final class NativeDataLocations {
                         ? "DEVICE_SPECIFIC_STATE"
                         : result.plugins == null
                             ? ""
-                            : result.plugins.exclusion(new File(origin, path));
+                            : result.plugins.exclusion(new File(target, path));
               },
               resolver) {
             @Override

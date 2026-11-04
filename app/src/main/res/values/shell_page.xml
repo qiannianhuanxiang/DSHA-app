@@ -1,0 +1,232 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  UI v5 页面组件：设置、配置、安装、授权、数据、插件与独立内页共用的
+  标题 / 分组 / 卡片 / 行 / 输入 / 按钮。颜色只引用 shell_ui.xml 的
+  shell_* token，尺寸集中在这里；页面布局不再各写一套字号与内边距。
+-->
+<resources>
+
+    <!-- ========== 页面内边距与节奏 ========== -->
+    <dimen name="shell_page_pad">20dp</dimen>
+    <dimen name="shell_page_top">18dp</dimen>
+    <dimen name="shell_page_bottom">30dp</dimen>
+    <dimen name="shell_page_title">26sp</dimen>
+    <dimen name="shell_page_desc">13sp</dimen>
+    <dimen name="shell_section_gap">24dp</dimen>
+    <dimen name="shell_section_label">12sp</dimen>
+    <dimen name="shell_section_margin">10dp</dimen>
+
+    <!-- ========== 卡片与行 ========== -->
+    <dimen name="shell_card_pad">16dp</dimen>
+    <dimen name="shell_row_min_height">56dp</dimen>
+    <dimen name="shell_row_pad_h">16dp</dimen>
+    <dimen name="shell_row_pad_v">12dp</dimen>
+    <dimen name="shell_row_title">14sp</dimen>
+    <dimen name="shell_row_sub">12sp</dimen>
+    <dimen name="shell_row_value">13sp</dimen>
+    <dimen name="shell_row_icon">32dp</dimen>
+    <dimen name="shell_row_icon_pad">7dp</dimen>
+    <dimen name="shell_row_chevron">16dp</dimen>
+
+    <!-- ========== 文本与控件 ========== -->
+    <dimen name="shell_status_text">12sp</dimen>
+    <dimen name="shell_footer_text">12sp</dimen>
+    <dimen name="shell_input_height">48dp</dimen>
+    <dimen name="shell_button_height">52dp</dimen>
+    <dimen name="shell_button_secondary_height">46dp</dimen>
+
+    <!-- ========== 页面标题：标题承担层级，说明只补一句真实语境 ========== -->
+    <style name="ShellPageTitle" parent="">
+        <item name="android:textSize">@dimen/shell_page_title</item>
+        <item name="android:textColor">@color/shell_text</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:includeFontPadding">false</item>
+        <item name="android:lineSpacingExtra">2dp</item>
+    </style>
+
+    <style name="ShellPageDescription" parent="">
+        <item name="android:textSize">@dimen/shell_page_desc</item>
+        <item name="android:textColor">@color/shell_text_secondary</item>
+        <item name="android:includeFontPadding">false</item>
+        <item name="android:lineSpacingExtra">3dp</item>
+    </style>
+
+    <!-- ========== 分组与卡片 ========== -->
+    <style name="ShellSectionLabel" parent="">
+        <item name="android:textSize">@dimen/shell_section_label</item>
+        <item name="android:textColor">@color/shell_text_secondary</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:includeFontPadding">false</item>
+        <item name="android:letterSpacing">0.03</item>
+    </style>
+
+    <style name="ShellCard" parent="">
+        <item name="android:background">@drawable/bg_shell_card</item>
+        <item name="android:orientation">vertical</item>
+    </style>
+
+    <style name="ShellCardTitle" parent="">
+        <item name="android:textSize">16sp</item>
+        <item name="android:textColor">@color/shell_text</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:includeFontPadding">false</item>
+    </style>
+
+    <style name="ShellCardBody" parent="">
+        <item name="android:textSize">@dimen/shell_page_desc</item>
+        <item name="android:textColor">@color/shell_text_secondary</item>
+        <item name="android:includeFontPadding">false</item>
+        <item name="android:lineSpacingExtra">3dp</item>
+    </style>
+
+    <!-- ========== 可点行：图标 + 标题 + 说明 + 右箭头 ========== -->
+    <style name="ShellRow" parent="">
+        <item name="android:background">?attr/selectableItemBackground</item>
+        <item name="android:clickable">true</item>
+        <item name="android:focusable">true</item>
+        <item name="android:gravity">center_vertical</item>
+        <item name="android:orientation">horizontal</item>
+        <item name="android:minHeight">@dimen/shell_row_min_height</item>
+        <item name="android:paddingStart">@dimen/shell_row_pad_h</item>
+        <item name="android:paddingTop">@dimen/shell_row_pad_v</item>
+        <item name="android:paddingEnd">@dimen/shell_row_pad_h</item>
+        <item name="android:paddingBottom">@dimen/shell_row_pad_v</item>
+    </style>
+
+    <style name="ShellRowTitle" parent="">
+        <item name="android:textSize">@dimen/shell_row_title</item>
+        <item name="android:textColor">@color/shell_text</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:includeFontPadding">false</item>
+        <item name="android:maxLines">2</item>
+        <item name="android:ellipsize">end</item>
+    </style>
+
+    <style name="ShellRowSub" parent="">
+        <item name="android:textSize">@dimen/shell_row_sub</item>
+        <item name="android:textColor">@color/shell_text_muted</item>
+        <item name="android:includeFontPadding">false</item>
+        <item name="android:lineSpacingExtra">2dp</item>
+        <item name="android:maxLines">2</item>
+        <item name="android:ellipsize">end</item>
+    </style>
+
+    <style name="ShellRowValue" parent="">
+        <item name="android:textSize">@dimen/shell_row_value</item>
+        <item name="android:textColor">@color/shell_text_secondary</item>
+        <item name="android:includeFontPadding">false</item>
+        <item name="android:gravity">end</item>
+    </style>
+
+    <style name="ShellRowIcon" parent="">
+        <item name="android:tint">@color/shell_accent</item>
+        <item name="android:background">@drawable/bg_logo</item>
+        <item name="android:padding">@dimen/shell_row_icon_pad</item>
+        <item name="android:importantForAccessibility">no</item>
+    </style>
+
+    <style name="ShellDivider" parent="">
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">1dp</item>
+        <item name="android:layout_marginStart">@dimen/shell_row_pad_h</item>
+        <item name="android:background">@color/shell_line</item>
+    </style>
+
+    <!-- ========== 状态、说明与页脚 ========== -->
+    <style name="ShellStatusText" parent="">
+        <item name="android:textSize">@dimen/shell_status_text</item>
+        <item name="android:textColor">@color/shell_text_muted</item>
+        <item name="android:includeFontPadding">false</item>
+        <item name="android:lineSpacingExtra">3dp</item>
+    </style>
+
+    <style name="ShellFooter" parent="">
+        <item name="android:textSize">@dimen/shell_footer_text</item>
+        <item name="android:textColor">@color/shell_text_muted</item>
+        <item name="android:includeFontPadding">false</item>
+        <item name="android:gravity">center</item>
+    </style>
+
+    <!-- ========== 输入与开关 ========== -->
+    <style name="ShellInput" parent="">
+        <item name="android:background">@drawable/bg_shell_input</item>
+        <item name="android:minHeight">@dimen/shell_input_height</item>
+        <item name="android:textSize">14sp</item>
+        <item name="android:textColor">@color/shell_text</item>
+        <item name="android:textColorHint">@color/shell_text_muted</item>
+        <item name="android:includeFontPadding">false</item>
+        <item name="android:paddingStart">14dp</item>
+        <item name="android:paddingEnd">14dp</item>
+        <item name="android:paddingTop">12dp</item>
+        <item name="android:paddingBottom">12dp</item>
+    </style>
+
+    <style name="ShellSwitch" parent="Widget.DSHA.Switch">
+        <item name="android:textSize">14sp</item>
+        <item name="android:textColor">@color/shell_text</item>
+        <item name="android:minHeight">@dimen/touch_min</item>
+    </style>
+
+    <!-- ========== 按钮 ========== -->
+    <style name="ShellPrimaryButton" parent="Widget.DSHA.PrimaryButton">
+        <item name="android:minHeight">@dimen/shell_button_height</item>
+        <item name="android:minWidth">0dp</item>
+        <item name="android:textSize">14sp</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:textColor">@color/shell_on_accent</item>
+        <item name="android:includeFontPadding">false</item>
+        <item name="android:gravity">center</item>
+        <item name="android:paddingStart">16dp</item>
+        <item name="android:paddingEnd">16dp</item>
+        <item name="android:paddingTop">12dp</item>
+        <item name="android:paddingBottom">12dp</item>
+    </style>
+
+    <style name="ShellSecondaryButton" parent="Widget.DSHA.Button">
+        <item name="android:minHeight">@dimen/shell_button_secondary_height</item>
+        <item name="android:minWidth">0dp</item>
+        <item name="android:textSize">14sp</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:textColor">@color/shell_text</item>
+        <item name="android:includeFontPadding">false</item>
+        <item name="android:gravity">center</item>
+        <item name="android:paddingStart">12dp</item>
+        <item name="android:paddingEnd">12dp</item>
+        <item name="android:paddingTop">10dp</item>
+        <item name="android:paddingBottom">10dp</item>
+    </style>
+
+    <style name="ShellDangerButton" parent="Widget.DSHA.Button">
+        <item name="android:background">@drawable/bg_shell_danger</item>
+        <item name="android:minHeight">@dimen/shell_button_secondary_height</item>
+        <item name="android:minWidth">0dp</item>
+        <item name="android:textSize">14sp</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:textColor">@color/shell_bad</item>
+        <item name="android:includeFontPadding">false</item>
+        <item name="android:gravity">center</item>
+    </style>
+
+    <style name="ShellTextButton" parent="Widget.DSHA.TextButton">
+        <item name="android:minHeight">@dimen/touch_min</item>
+        <item name="android:textSize">13sp</item>
+        <item name="android:textColor">@color/shell_accent</item>
+        <item name="android:includeFontPadding">false</item>
+        <item name="android:gravity">center</item>
+    </style>
+
+    <!-- ========== 分段控件（插件市场 / 已安装） ========== -->
+    <style name="ShellSegment" parent="">
+        <item name="android:background">@drawable/bg_shell_segment</item>
+        <item name="android:clickable">true</item>
+        <item name="android:focusable">true</item>
+        <item name="android:gravity">center</item>
+        <item name="android:minHeight">@dimen/touch_min</item>
+        <item name="android:paddingStart">14dp</item>
+        <item name="android:paddingEnd">14dp</item>
+        <item name="android:textColor">@color/shell_segment_text</item>
+        <item name="android:textSize">13sp</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:includeFontPadding">false</item>
+    </style>
+</resources>

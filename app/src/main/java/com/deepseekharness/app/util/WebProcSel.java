@@ -89,11 +89,13 @@ public final class WebProcSel {
     // 只接受已知的 Node + dsh web 参数序列，不能因命令中带有 bridge 名称就放行。
     String[] argv =
         cmdline.indexOf('\0') >= 0 ? cmdline.split("\u0000") : cmdline.trim().split("\\s+");
+    argv = directBxrootPayload(directProrootPreloads(argv));
     if (argv.length > 0 && basename(argv[0]).equals("libproroot-bridge.so"))
       return isProrootWebPayload(argv) || isProrootManagedWebShell(argv);
     if (argv.length == 0) return false;
     String executable = basename(argv[0]);
-    if (executable.equals("libproot.so")
+    if (executable.equals("libbxroot.so")
+        || executable.equals("libproot.so")
         || executable.startsWith("libproroot")
         || executable.equals("proot")) return false;
     if (maySignalWeb(cmdline)) return true;
@@ -116,13 +118,19 @@ public final class WebProcSel {
   }
 
   private static boolean managedWebShell(String command) {
-    return command.startsWith("export DSH_HOME=/root/.dsh && ")
+    boolean prefix =
+        command.startsWith("export DSH_HOME=/root/.dsh && ")
+            || command.startsWith(
+                "export PATH=\"/root/dsh-bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}\" && export DSH_HOME=/root/.dsh && ");
+    return prefix
         && command.contains("export DSHA_STARTUP_PROFILE=")
         && command.contains("export DSHA_WEB_GENERATION=")
         && command.contains("echo $$ > " + PID_WEB)
         && command.contains("[ ! -e " + STOP_SENTINEL + " ] || exit 0;")
         && (command.contains("exec dsh web --no-open --host 127.0.0.1 --port ")
-            || command.contains("exec dsh --profile 'dsha-recovery-"));
+            || command.contains("exec dsh --profile 'dsha-recovery-")
+            || command.contains(DshEntrypoint.exec() + " web --no-open --host 127.0.0.1 --port ")
+            || command.contains(DshEntrypoint.exec() + " --profile 'dsha-recovery-"));
   }
 
   private static boolean isProrootManagedWebShell(String[] argv) {
@@ -157,6 +165,103 @@ public final class WebProcSel {
     return path.substring(path.lastIndexOf('/') + 1);
   }
 
+  /** Normalize only the signed shim and vendor launcher's fixed optional libgcc pair. */
+  private static String[] directProrootPreloads(String[] args) {
+    String[] current = signedProrootShim(args);
+    if (current.length < 10
+        || !basename(current[0]).equals("libproroot-bridge.so")
+        || !basename(current[1]).equals("libproroot-linker.so")
+        || !current[2].equals("--argv0")
+        || !current[4].equals("--preload")
+        || !basename(current[5]).equals("libproroot-runtime.so")
+        || !current[6].equals("--preload")) return current;
+    String executable = current[8];
+    String suffix = "";
+    for (String allowed :
+        new String[] {
+          "/usr/local/bin/node", "/usr/local/bin/nodejs", "/usr/bin/bash", "/bin/bash"
+        }) {
+      if (executable.endsWith(allowed)) {
+        suffix = allowed;
+        break;
+      }
+    }
+    if (suffix.isEmpty()) return current;
+    String root = executable.substring(0, executable.length() - suffix.length());
+    if (!root.startsWith("/")
+        || root.contains("/../")
+        || root.contains("/./")
+        || root.contains("//")
+        || !current[7].equals(root + "/usr/lib/aarch64-linux-gnu/libgcc_s.so.1")) return current;
+    String[] normalized = new String[current.length - 2];
+    System.arraycopy(current, 0, normalized, 0, 6);
+    System.arraycopy(current, 8, normalized, 6, current.length - 8);
+    return normalized;
+  }
+
+  private static String[] signedProrootShim(String[] args) {
+    if (args.length < 10
+        || !basename(args[0]).equals("libproroot-bridge.so")
+        || !basename(args[1]).equals("libproroot-linker.so")
+        || !args[2].equals("--preload")
+        || !basename(args[3]).equals("libdsha-proroot-compat.so")
+        || !args[4].equals("--argv0")
+        || !args[6].equals("--preload")
+        || !basename(args[7]).equals("libproroot-runtime.so")) return args;
+    String directory = args[1].substring(0, args[1].lastIndexOf('/') + 1);
+    if (!directory.startsWith("/data/app/")
+        || directory.contains("/../")
+        || directory.contains("/./")
+        || !args[0].equals(directory + "libproroot-bridge.so")
+        || !args[3].equals(directory + "libdsha-proroot-compat.so")
+        || !args[7].equals(directory + "libproroot-runtime.so")) return args;
+    String[] normalized = new String[args.length - 2];
+    System.arraycopy(args, 0, normalized, 0, 2);
+    System.arraycopy(args, 4, normalized, 2, args.length - 4);
+    return normalized;
+  }
+
+  /** ULX 保留内核 argv；只展开同目录三库与同一 rootfs 的固定加载序列。 */
+  private static String[] directBxrootPayload(String[] args) {
+    if (args.length < 8) return args;
+    String ulx = bxrootPath(args[0]);
+    String runtime = bxrootPath(args[5]);
+    if (!ulx.startsWith("/data/app/") || !ulx.endsWith("/libbxroot-ulx.so")
+        || !args[2].equals("--argv0") || !args[4].equals("--preload")
+        || !runtime.equals(ulx.substring(0, ulx.lastIndexOf('/') + 1) + "libbxroot-runtime.so"))
+      return args;
+    String executable = bxrootPath(args[6]);
+    String suffix = "";
+    for (String candidate : new String[] {
+        "/usr/local/bin/node", "/usr/local/bin/nodejs", "/bin/bash", "/usr/bin/bash"}) {
+      if (executable.endsWith(candidate)) { suffix = candidate; break; }
+    }
+    if (suffix.isEmpty()) return args;
+    String root = executable.substring(0, executable.length() - suffix.length());
+    if (root.isEmpty() || !root.startsWith("/")
+        || !bxrootPath(args[1]).equals(root + "/lib/ld-linux-aarch64.so.1")
+        || !(args[3].equals(suffix) || args[3].equals(basename(executable))
+            || bxrootPath(args[3]).equals(executable))) return args;
+    if (isNode(executable)) {
+      int entry = args[7].equals("--expose-internals") ? 8 : 7;
+      if (entry + 1 >= args.length
+          || !(args[entry].equals("/usr/local/bin/dsh")
+              || args[entry].equals("/usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js")))
+        return args;
+    }
+    String[] normalized = new String[args.length - 6];
+    normalized[0] = executable;
+    System.arraycopy(args, 7, normalized, 1, args.length - 7);
+    return normalized;
+  }
+
+  private static String bxrootPath(String path) {
+    String value = path.startsWith("/proc/self/root/") ? path.substring(15) : path;
+    if (value.contains("/../") || value.contains("/./") || value.contains("//")
+        || value.endsWith("/..") || value.endsWith("/.")) return "";
+    return value;
+  }
+
   private static boolean isNode(String path) {
     String name = basename(path);
     return name.equals("node") || name.equals("nodejs");
@@ -171,6 +276,7 @@ public final class WebProcSel {
     if (cmdline == null || cmdline.isEmpty()) return false;
     String[] args =
         cmdline.indexOf('\0') >= 0 ? cmdline.split("\u0000") : cmdline.trim().split("\\s+");
+    args = directBxrootPayload(directProrootPreloads(args));
     if (args.length > 0 && basename(args[0]).equals("libproroot-bridge.so"))
       return isProrootWebPayload(args);
     if (args.length < 3 || !isNode(args[0])) return false;
@@ -186,6 +292,7 @@ public final class WebProcSel {
     if (cmdline == null || cmdline.isEmpty()) return "";
     String[] args =
         cmdline.indexOf('\0') >= 0 ? cmdline.split("\u0000") : cmdline.trim().split("\\s+");
+    args = directBxrootPayload(directProrootPreloads(args));
     int argument;
     if (args.length > 0 && basename(args[0]).equals("libproroot-bridge.so")) {
       if (!isProrootWebPayload(args)) return "";

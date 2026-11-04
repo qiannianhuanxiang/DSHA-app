@@ -1,4 +1,4 @@
-"""Bind a downloaded successful package run, its source and both unsigned APKs."""
+"""Bind a downloaded successful package run, its source and the requested unsigned APK scope."""
 import argparse
 import hashlib
 import json
@@ -90,7 +90,7 @@ def select_manifest(artifacts):
 
 
 def validate_receipt(receipt, artifacts, commit, source=ROOT, expected_sources=None,
-                     offline_inputs=None):
+                     offline_inputs=None, expected_flavors=("standard",)):
     if receipt.get('verificationSchema') != 2 \
             or receipt.get('status') != 'PASS_UNSIGNED_PACKAGE' or receipt.get('commit') != commit \
             or receipt.get('dirty') is not False:
@@ -118,27 +118,30 @@ def validate_receipt(receipt, artifacts, commit, source=ROOT, expected_sources=N
         if path.is_file() and (not path.resolve().is_relative_to(source.resolve())
                                or digest(path) != expected):
             raise ValueError('PACKAGE_SOURCE_CHANGED: ' + name)
+    if expected_flavors not in (('standard',), ('standard', 'low')):
+        raise ValueError('PACKAGE_EXPECTED_FLAVORS')
     rows = receipt.get('apks', [])
-    if len(rows) != 2 or {row.get('flavor') for row in rows} != {'standard', 'low'}:
+    if len(rows) != len(expected_flavors) or {row.get('flavor') for row in rows} != set(expected_flavors):
         raise ValueError('PACKAGE_FLAVORS')
     commands = receipt.get('commands', [])
     if not commands or any(row.get('exitCode') != 0 for row in commands):
         raise ValueError('PACKAGE_FAILED_CHECK')
+    required = REQUIRED_CHECKS if 'low' in expected_flavors else REQUIRED_CHECKS - {'low-elf'}
     names = [row.get('name') for row in commands]
     if any(not isinstance(name, str) or not re.fullmatch('[a-z0-9-]+', name) for name in names) \
-            or len(set(names)) != len(names) or not REQUIRED_CHECKS.issubset(names):
+            or len(set(names)) != len(names) or not required.issubset(names):
         raise ValueError('PACKAGE_CHECK_INCOMPLETE')
     for row in commands:
         log = one_member(artifacts, row['name'] + '.log')
         if digest(log) != row.get('sha256'):
             raise ValueError('PACKAGE_CHECK_CHANGED: ' + row['name'])
-    for flavor in ('Standard', 'Low'):
+    for flavor in (value.title() for value in expected_flavors):
         counts = receipt.get('junit', {}).get(flavor, {})
         if counts.get('tests', 0) <= counts.get('skipped', 0) \
                 or counts.get('failures') != 0 or counts.get('errors') != 0:
             raise ValueError('PACKAGE_JUNIT_INCOMPLETE: ' + flavor)
     selected = []
-    for flavor in ('standard', 'low'):
+    for flavor in expected_flavors:
         row = next(row for row in rows if row['flavor'] == flavor)
         candidate = one_member(artifacts, 'app-' + flavor + '-release-unsigned.apk')
         if digest(candidate) != row.get('sha256') \
@@ -152,16 +155,18 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--run', type=Path, required=True)
     parser.add_argument('--artifacts', type=Path, required=True)
+    parser.add_argument('--flavors', choices=('standard', 'both'), default='standard')
     args = parser.parse_args()
+    flavors = ('standard',) if args.flavors == 'standard' else ('standard', 'low')
     commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
     validate_run(json.loads(args.run.read_text()), os.environ['GITHUB_REPOSITORY'], commit)
     manifest = select_manifest(args.artifacts)
     selected = validate_receipt(json.loads(manifest.read_text(encoding='utf-8')),
-                                args.artifacts, commit)
+                                args.artifacts, commit, expected_flavors=flavors)
     with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
-        for flavor, apk in zip(('standard', 'low'), selected):
+        for flavor, apk in zip(flavors, selected):
             output.write(flavor + '=' + str(apk.resolve()) + '\n')
-    print('PASS successful package run, same commit, source receipt and two APK digests')
+    print('PASS successful package run, same commit, source receipt and requested APK digests')
 
 
 if __name__ == '__main__':

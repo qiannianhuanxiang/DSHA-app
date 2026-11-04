@@ -29,7 +29,7 @@ public class AdbWheelBundleTest {
     assertNotNull("构建入口须传入 dsha.assetsDir", directory);
     File assets = new File(directory);
     File archive = new File(assets, "adb-wheels.tar.gz");
-    assertTrue(archive.isFile());
+    SourceOnlyTestInputs.requireRegularFile(archive.toPath(), "请先恢复固定输入包中的 adb-wheels.tar.gz");
     var lock =
         com.google.gson.JsonParser.parseString(
                 Files.readString(new File(assets, "adb-wheels.lock.json").toPath()))
@@ -76,7 +76,9 @@ public class AdbWheelBundleTest {
             bundled,
             restored,
             archive,
-            cachedArchive);
+            cachedArchive,
+            AdbWheelCache.Lock.read(
+                Files.readAllBytes(new File(assets, "adb-wheels.lock.json").toPath())));
     assertEquals(expected.size() - 1, report.added);
     assertEquals(1, report.modified);
     assertEquals(originalModifiedHash, hash(modified));
